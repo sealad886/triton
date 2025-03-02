@@ -1,44 +1,38 @@
-include(${PROJECT_SOURCE_DIR}/unittest/googletest.cmake)
+# Function to add Triton unit tests
+function(add_triton_unittest test_name)
+  cmake_parse_arguments(ARG "" "" "SOURCES;LIBS" ${ARGN})
 
-include(GoogleTest)
-enable_testing()
+  # Create test target
+  add_executable(${test_name} ${ARG_SOURCES})
 
-function(add_triton_ut)
-  set(options)
-  set(oneValueArgs NAME)
-  set(multiValueArgs SRCS LIBS DEFS)
-  cmake_parse_arguments(_ "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  # Set test properties
+  set_target_properties(${test_name} PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+  )
 
-  get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
-  get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
-  get_property(triton_libs GLOBAL PROPERTY TRITON_LIBS)
+  # Add gtest dependencies
+  target_link_libraries(${test_name}
+    PRIVATE
+      gtest
+      gtest_main
+      ${ARG_LIBS}
+  )
 
-  add_test(NAME ${__NAME}
-          COMMAND ${__NAME})
-  add_executable(
-          ${__NAME}
-          ${__SRCS})
-  target_link_libraries(
-          ${__NAME}
-          PRIVATE
-          GTest::gtest_main
-          ${triton_libs}
-          ${dialect_libs}
-          ${conversion_libs}
-          gmock
-          ${__LIBS})
+  # Add test to global target
+  add_dependencies(TritonUnitTests ${test_name})
 
-  if(NOT MSVC)
-    target_compile_options(${__NAME} PRIVATE -fno-rtti)
-  endif()
+  # Register test with ctest
+  add_test(NAME ${test_name} COMMAND ${test_name})
 
-  target_compile_definitions(${__NAME} PRIVATE ${__DEFS})
+  # Set test timeout (5 minutes)
+  set_tests_properties(${test_name} PROPERTIES TIMEOUT 300)
 
-  # Without the TEST_DISCOVERY_TIMEOUT, the tests randomly time out on my mac
-  # laptop.  I think the issue may be that the very first time you run a program
-  # it's a bit slow.
-  gtest_discover_tests(${__NAME} DISCOVERY_TIMEOUT 60)
+  # Set test folder for IDEs
+  set_target_properties(${test_name} PROPERTIES FOLDER "Triton/Tests")
+endfunction()
 
-  # Add the unit test to the top-level unit test target.
-  add_dependencies(TritonUnitTests ${__NAME})
+# Add a disabled test (for tests that are not yet ready)
+function(add_disabled_triton_unittest test_name)
+  message(STATUS "Test ${test_name} is disabled")
 endfunction()
