@@ -306,6 +306,39 @@ merge:
 
     @skip_non_darwin
     @skip_no_xcrun
+    def test_compile_triton_reduce_pipeline_no_loop(self):
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _reduce_kernel(x_ptr, out_ptr, m, n, BM: tl.constexpr, BN: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs_m = pid * BM + tl.arange(0, BM)
+            offs_n = tl.arange(0, BN)
+            ptrs = x_ptr + offs_m[:, None] * n + offs_n[None, :]
+            mask = (offs_m[:, None] < m) & (offs_n[None, :] < n)
+            x = tl.load(ptrs, mask=mask, other=0.0)
+            s = tl.sum(x, axis=1)
+            tl.store(out_ptr + offs_m, s, mask=offs_m < m)
+
+        src = triton.compiler.ASTSource(
+            fn=_reduce_kernel,
+            signature={
+                "x_ptr": "*fp32",
+                "out_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+            },
+            constexprs={"BM": 16, "BN": 32},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
+        assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
+        assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+
+    @skip_non_darwin
+    @skip_no_xcrun
     def test_compile_from_lowered_intrinsic_ir(self):
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
 

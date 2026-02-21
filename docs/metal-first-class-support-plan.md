@@ -127,11 +127,14 @@ Acceptance:
       builtins during LLVM->MSL call translation.
 - [x] Materialize `@global_smem` in Metal LLVM conversion to prevent missing
       shared-memory base symbols during `ttg.convert_layout` lowering.
+- [x] Lower shared-memory `@global_smem` pointer arithmetic and typed
+      load/store patterns in LLVM->MSL (`getelementptr inbounds`, vector
+      element ops, address-space-aware pointer casts).
 - [ ] Extend translation coverage for complex control-flow constructs
       (phi-heavy CFGs, uncommon intrinsic patterns) used by advanced kernels.
-- [ ] Resolve remaining `tt.reduce` + `ttg.convert_layout` verifier failure
-      (`block with no terminator`, vector<1> undef) in
-      `ConvertTritonMetalGPUToLLVM`.
+- [ ] Resolve remaining dynamic-loop reduction lowering gap where kernels with
+      `scf.for`-shaped reductions fail control-flow legalization
+      (`failed to legalize operation 'cf.br'`) in `make_llir`.
 
 Acceptance:
 - Kernels that lower through the Metal LLVM pipeline compile through
@@ -227,6 +230,13 @@ Acceptance:
 - 2026-02-21: Added explicit `@global_smem` symbol materialization in
   `ConvertTritonMetalGPUToLLVM`, fixing the prior native assertion in
   `getStackPointer` during reduction-related `ttg.convert_layout` lowering.
-- 2026-02-21: Isolated current reduction blocker to a verifier failure inside
-  LLVM conversion (`block with no terminator`, vector<1> undef) after shared
-  memory base resolution; this is now the active source-level lowering gap.
+- 2026-02-21: Reworked Metal shared-memory predicated load/store lowering to
+  branch-free `select`-based form, removing malformed CFG generation in
+  reduction conversion.
+- 2026-02-21: Extended LLVM->MSL lowering for reduction-generated IR
+  (`getelementptr ... @global_smem`, typed address-space load/store, vector-1
+  extract/insert handling), enabling Triton reduction kernels without dynamic
+  loops to compile to valid `.metallib`.
+- 2026-02-21: Isolated current reduction blocker to dynamic-loop control-flow
+  legalization (`cf.br` illegal in `ConvertControlFlowToLLVMPass`) for kernels
+  that retain `scf.for` structure through `make_llir`.

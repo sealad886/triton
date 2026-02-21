@@ -91,8 +91,11 @@ Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
 
 void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
                          triton::gpu::AddrSpace targets) const {
+  (void)targets;
+  auto func = getBarrierDeclaration(rewriter, "__metal_simdgroup_barrier");
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  b.barrier(targets);
+  // mem_flags::mem_none = 0
+  LLVM::CallOp::create(rewriter, loc, func, ValueRange{b.i32_val(0)});
 }
 
 void TargetInfo::clusterBarrier(Location loc, RewriterBase &rewriter) const {
@@ -116,11 +119,9 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
         "Metal does not support cross-CTA shared memory transfers");
   }
   if (pred) {
-    auto [prevBlock, ifBlock, thenBlock] = createIfBlock(rewriter, loc, pred);
-    (void)prevBlock;
-    rewriter.setInsertionPointToStart(ifBlock);
-    LLVM::StoreOp::create(rewriter, loc, val, ptr);
-    rewriter.setInsertionPointToStart(thenBlock);
+    Value oldVal = LLVM::LoadOp::create(rewriter, loc, val.getType(), ptr);
+    Value merged = LLVM::SelectOp::create(rewriter, loc, pred, val, oldVal);
+    LLVM::StoreOp::create(rewriter, loc, merged, ptr);
   } else {
     LLVM::StoreOp::create(rewriter, loc, val, ptr);
   }
@@ -133,27 +134,12 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
     llvm::report_fatal_error(
         "Metal does not support cross-CTA shared memory transfers");
   }
-  if (pred) {
-    Value undef = LLVM::UndefOp::create(rewriter, loc, elemTy);
-    auto [prevBlock, ifBlock, thenBlock] = createIfBlock(rewriter, loc, pred);
-    Value loadedVal = thenBlock->addArgument(elemTy, loc);
+  Value loaded = LLVM::LoadOp::create(rewriter, loc, elemTy, ptr);
+  if (!pred)
+    return loaded;
 
-    auto *prevTerminator = prevBlock->getTerminator();
-    rewriter.replaceOpWithNewOp<LLVM::CondBrOp>(
-        prevTerminator, pred, ifBlock, ValueRange{}, thenBlock,
-        ValueRange{undef});
-
-    auto *ifTerminator = ifBlock->getTerminator();
-    rewriter.setInsertionPoint(ifTerminator);
-    Value loaded = LLVM::LoadOp::create(rewriter, loc, elemTy, ptr);
-    rewriter.replaceOpWithNewOp<LLVM::BrOp>(ifTerminator, ValueRange{loaded},
-                                            thenBlock);
-
-    rewriter.setInsertionPointToStart(thenBlock);
-    return loadedVal;
-  } else {
-    return LLVM::LoadOp::create(rewriter, loc, elemTy, ptr);
-  }
+  Value undef = LLVM::UndefOp::create(rewriter, loc, elemTy);
+  return LLVM::SelectOp::create(rewriter, loc, pred, loaded, undef);
 }
 
 Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
