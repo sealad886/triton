@@ -175,6 +175,21 @@ def compile_kernel(args: CompileArgs):
     ty_to_cpp = triton.runtime.driver.active.map_python_to_cpp_type
     backend_name = target.backend
 
+    metal_arg_bindings: list[str] = []
+    if backend_name == "metal":
+        for idx, (arg_name, arg_type) in enumerate(zip(arg_names_not_1, arg_types_not_1)):
+            if arg_type.startswith("*"):
+                metal_arg_bindings.append(
+                    f"    [encoder setBuffer:(id<MTLBuffer>){arg_name} offset:0 atIndex:{idx}];"
+                )
+            else:
+                cpp_ty = ty_to_cpp(arg_type)
+                metal_arg_bindings.append(f"    {cpp_ty} __{arg_name}_tmp = {arg_name};")
+                metal_arg_bindings.append(
+                    f"    [encoder setBytes:&__{arg_name}_tmp length:sizeof({cpp_ty}) atIndex:{idx}];"
+                )
+    metal_arg_bindings_str = "\n".join(metal_arg_bindings)
+
     params = {
         "kernel_name": func_name,
         "triton_kernel_name": args.kernel_name,
@@ -194,6 +209,8 @@ def compile_kernel(args: CompileArgs):
         "_placeholder": "",
         "warp_size": target.warp_size,
         "backend_name": backend_name,
+        "metal_threads_per_threadgroup": args.num_warps * target.warp_size,
+        "metal_arg_bindings": metal_arg_bindings_str,
     }
     output_files = []
     template_dir = Path(__file__).parent / "extra" / backend_name
