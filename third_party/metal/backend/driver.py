@@ -6,15 +6,15 @@ with the Metal framework for device management, memory allocation, and
 kernel dispatch.
 """
 
-import os
-import sys
-import struct
-import threading
 import functools
+import os
+import struct
+import sys
+import threading
 from pathlib import Path
 
-from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
+from triton.backends.driver import DriverBase
 
 
 def _get_metal_module():
@@ -23,6 +23,7 @@ def _get_metal_module():
         return None
     try:
         import Metal
+
         return Metal
     except ImportError:
         return None
@@ -34,6 +35,7 @@ def _get_foundation_module():
         return None
     try:
         import Foundation
+
         return Foundation
     except ImportError:
         return None
@@ -115,6 +117,7 @@ class MetalUtils:
             MetalKernelHandle
         """
         import tempfile
+
         metadata = metadata or {}
         dev = self.device
         if dev is None:
@@ -163,18 +166,33 @@ class MetalUtils:
             binary_bytes=binary_bytes,
         )
 
-    def launch(self, grid_x, grid_y, grid_z, stream, function,
-               launch_cooperative_grid, launch_pdl,
-               kernel_metadata, launch_metadata,
-               launch_enter_hook, launch_exit_hook,
-               global_scratch, profile_scratch,
-               arg_annotations, kernel_signature, args):
+    def launch(
+        self,
+        grid_x,
+        grid_y,
+        grid_z,
+        stream,
+        function,
+        launch_cooperative_grid,
+        launch_pdl,
+        kernel_metadata,
+        launch_metadata,
+        launch_enter_hook,
+        launch_exit_hook,
+        global_scratch,
+        profile_scratch,
+        arg_annotations,
+        kernel_signature,
+        args,
+    ):
         """Launch a Metal compute kernel."""
         handle = function
         if not isinstance(handle, MetalKernelHandle):
             raise RuntimeError("Expected MetalKernelHandle for Metal launch")
 
-        kernel_name = kernel_metadata.get("name") if isinstance(kernel_metadata, dict) else None
+        kernel_name = (
+            kernel_metadata.get("name") if isinstance(kernel_metadata, dict) else None
+        )
         if kernel_name is None and hasattr(kernel_metadata, "name"):
             kernel_name = kernel_metadata.name
 
@@ -192,7 +210,9 @@ class MetalUtils:
 class MetalKernelHandle:
     """Handle for a loaded Metal library with kernel dispatch capabilities."""
 
-    def __init__(self, device, command_queue, library, metadata=None, binary_bytes=None):
+    def __init__(
+        self, device, command_queue, library, metadata=None, binary_bytes=None
+    ):
         self.device = device
         self.command_queue = command_queue
         self.library = library
@@ -220,7 +240,9 @@ class MetalKernelHandle:
             if isinstance(result, tuple):
                 pipeline, error = result
                 if error is not None:
-                    raise RuntimeError(f"Failed to create pipeline for '{name}': {error}")
+                    raise RuntimeError(
+                        f"Failed to create pipeline for '{name}': {error}"
+                    )
             else:
                 pipeline = result
 
@@ -266,6 +288,7 @@ def _bind_argument(device, encoder, idx, arg):
     """Bind a single argument to a Metal compute encoder at the given index."""
     try:
         import numpy as np
+
         has_numpy = True
     except ImportError:
         has_numpy = False
@@ -287,7 +310,9 @@ def _bind_argument(device, encoder, idx, arg):
             data = bytes(arg)
             encoder.setBytes_length_index_(data, len(data), idx)
         except Exception:
-            raise TypeError(f"Unsupported Metal argument type at index {idx}: {type(arg)}")
+            raise TypeError(
+                f"Unsupported Metal argument type at index {idx}: {type(arg)}"
+            )
 
 
 def _detect_gpu_family(device):
@@ -324,9 +349,19 @@ class MetalLauncher:
         self.metadata = metadata
         self.src = src
 
-    def __call__(self, gridX, gridY, gridZ, stream, function,
-                 kernel_metadata, launch_metadata,
-                 launch_enter_hook, launch_exit_hook, *args):
+    def __call__(
+        self,
+        gridX,
+        gridY,
+        gridZ,
+        stream,
+        function,
+        kernel_metadata,
+        launch_metadata,
+        launch_enter_hook,
+        launch_exit_hook,
+        *args,
+    ):
         if launch_enter_hook is not None:
             launch_enter_hook(kernel_metadata, launch_metadata)
 
@@ -378,6 +413,7 @@ class MetalDriver(DriverBase):
 
     def get_active_torch_device(self):
         import torch
+
         return torch.device("mps")
 
     def get_current_device(self):
@@ -423,4 +459,5 @@ class MetalDriver(DriverBase):
 
     def get_benchmarker(self):
         from triton.testing import do_bench
+
         return do_bench

@@ -15,7 +15,7 @@
 
 namespace mlir {
 namespace triton {
-#define GEN_PASS_DEF_CONVERTTRITONGPUTOLLVM
+#define GEN_PASS_DEF_CONVERTTRITONMETALGPUTOLLVM
 #include "TritonMetalGPUToLLVM/Passes.h.inc"
 } // namespace triton
 } // namespace mlir
@@ -34,10 +34,10 @@ public:
   }
 };
 
-struct ConvertTritonGPUToLLVM
-    : public triton::impl::ConvertTritonGPUToLLVMBase<ConvertTritonGPUToLLVM> {
-  using ConvertTritonGPUToLLVMBase<
-      ConvertTritonGPUToLLVM>::ConvertTritonGPUToLLVMBase;
+struct ConvertTritonMetalGPUToLLVM
+    : public triton::impl::ConvertTritonMetalGPUToLLVMBase<ConvertTritonMetalGPUToLLVM> {
+  using ConvertTritonMetalGPUToLLVMBase<
+      ConvertTritonMetalGPUToLLVM>::ConvertTritonMetalGPUToLLVMBase;
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
@@ -92,8 +92,8 @@ struct ConvertTritonGPUToLLVM
 namespace mlir {
 namespace triton {
 
-std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonGPUToLLVMPass() {
-  return std::make_unique<ConvertTritonGPUToLLVM>();
+std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonMetalGPUToLLVMPass() {
+  return std::make_unique<ConvertTritonMetalGPUToLLVM>();
 }
 
 } // namespace triton

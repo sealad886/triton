@@ -6,12 +6,6 @@ LLVM IR to AIR (Apple Intermediate Representation) and then to .metallib binarie
 via xcrun.
 """
 
-from triton.backends.compiler import BaseBackend, GPUTarget, Language
-from triton._C.libtriton import ir, passes, llvm
-
-from dataclasses import dataclass
-from typing import Any, Dict, Tuple
-from types import ModuleType
 import functools
 import hashlib
 import os
@@ -19,7 +13,13 @@ import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
+from typing import Any, Dict, Tuple
+
+from triton._C.libtriton import ir, llvm, passes
+from triton.backends.compiler import BaseBackend, GPUTarget, Language
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,9 @@ def _get_metal_arch_version(arch) -> str:
 def _xcrun_path():
     path = shutil.which("xcrun")
     if path is None:
-        raise RuntimeError("'xcrun' not found in PATH; install Xcode Command Line Tools")
+        raise RuntimeError(
+            "'xcrun' not found in PATH; install Xcode Command Line Tools"
+        )
     return path
 
 
@@ -74,7 +76,9 @@ def _get_metal_sdk_version():
     try:
         result = subprocess.run(
             [_xcrun_path(), "metal", "--version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.stderr.strip() or result.stdout.strip()
     except Exception:
@@ -93,11 +97,13 @@ class MetalBackend(BaseBackend):
 
     def parse_options(self, opts) -> Any:
         args = {"arch": self.target.arch}
-        args.update({
-            k: opts[k]
-            for k in MetalOptions.__dataclass_fields__.keys()
-            if k in opts and opts[k] is not None
-        })
+        args.update(
+            {
+                k: opts[k]
+                for k in MetalOptions.__dataclass_fields__.keys()
+                if k in opts and opts[k] is not None
+            }
+        )
         return MetalOptions(**args)
 
     def pack_metadata(self, metadata):
@@ -114,8 +120,8 @@ class MetalBackend(BaseBackend):
         return {}
 
     def load_dialects(self, ctx):
-        # Metal doesn't require additional MLIR dialects beyond the core ones
-        pass
+        import triton._C.libtriton.metal as metal
+        metal.load_dialects(ctx)
 
     @staticmethod
     def make_ttir(mod, metadata, opt):
@@ -139,13 +145,15 @@ class MetalBackend(BaseBackend):
         # Apple Silicon uses SIMD width 32
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
-        passes.ttir.add_convert_to_ttgpuir(pm, f"metal:{opt.arch}", opt.num_warps, 32, opt.num_ctas)
+        passes.ttir.add_convert_to_ttgpuir(
+            pm, f"metal:{opt.arch}", opt.num_warps, 32, opt.num_ctas
+        )
         passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
-        passes.ttgpuir.add_accelerate_matmul(pm)
+        # passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
-        passes.ttgpuir.add_optimize_dot_operands(pm, True)
+        # passes.ttgpuir.add_optimize_dot_operands(pm, True)
         passes.ttir.add_loop_aware_cse(pm)
         passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
@@ -165,9 +173,20 @@ class MetalBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+        passes.ttgpuir.add_allocate_warp_groups(pm)
         passes.convert.add_scf_to_cf(pm)
+
+        import triton._C.libtriton.metal as metal
+
+        passes.ttgpuir.add_allocate_shared_memory(pm)
         passes.ttgpuir.add_allocate_global_scratch_memory(pm)
-        # Generic TTGPU -> LLVM lowering (no vendor-specific passes)
+
+        metal.passes.ttgpuir.add_to_llvmir(pm)
+        passes.ttgpuir.add_canonicalize_llvm_ir(pm)
+        passes.common.add_cse(pm)
+
+        passes.convert.add_cf_to_llvmir(pm)
+        passes.convert.add_arith_to_llvmir(pm)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
@@ -184,7 +203,7 @@ class MetalBackend(BaseBackend):
         context = llvm.context()
         llvm_mod = llvm.to_module(mod, context)
         # Use a generic AArch64 target triple for Metal/AIR
-        triple = "air64-apple-macosx14.0.0"
+        triple = "aarch64-apple-macosx14.0.0"
         proc = ""
         features = ""
         llvm.attach_datalayout(llvm_mod, triple, proc, features)
@@ -196,8 +215,12 @@ class MetalBackend(BaseBackend):
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3)
 
         metadata["shared"] = src.get_int_attr("ttg.shared") or 0
-        metadata["global_scratch_size"] = src.get_int_attr("ttg.global_scratch_memory_size") or 0
-        metadata["global_scratch_align"] = src.get_int_attr("ttg.global_scratch_memory_alignment") or 1
+        metadata["global_scratch_size"] = (
+            src.get_int_attr("ttg.global_scratch_memory_size") or 0
+        )
+        metadata["global_scratch_align"] = (
+            src.get_int_attr("ttg.global_scratch_memory_alignment") or 1
+        )
 
         ret = str(llvm_mod)
         del llvm_mod
@@ -224,7 +247,8 @@ class MetalBackend(BaseBackend):
         # Match the full function signature
         func_match = re.search(
             r"define.*void @" + re.escape(kernel_name) + r"\(([^)]*)\)",
-            src, re.DOTALL,
+            src,
+            re.DOTALL,
         )
         args = []
         if func_match:
@@ -258,7 +282,9 @@ class MetalBackend(BaseBackend):
             if arg_type == "buffer":
                 param_strs.append(f"    device float* {arg_name} [[buffer({idx})]]")
             else:
-                param_strs.append(f"    constant {arg_type}& {arg_name} [[buffer({idx})]]")
+                param_strs.append(
+                    f"    constant {arg_type}& {arg_name} [[buffer({idx})]]"
+                )
 
         # Add threadgroup position and thread position
         param_strs.append("    uint3 tid [[thread_position_in_grid]]")
@@ -268,7 +294,9 @@ class MetalBackend(BaseBackend):
         msl_lines.append(",\n".join(param_strs))
         msl_lines.append(") {")
         msl_lines.append("    // Auto-generated Metal kernel stub")
-        msl_lines.append("    // Full kernel body will be generated by LLVM→AIR→metallib pipeline")
+        msl_lines.append(
+            "    // Full kernel body will be generated by LLVM→AIR→metallib pipeline"
+        )
         msl_lines.append("}")
         msl_lines.append("")
 
@@ -289,7 +317,9 @@ class MetalBackend(BaseBackend):
 
         try:
             # Write MSL source to temp file
-            with tempfile.NamedTemporaryFile(suffix=".metal", delete=False, mode="w") as f:
+            with tempfile.NamedTemporaryFile(
+                suffix=".metal", delete=False, mode="w"
+            ) as f:
                 f.write(src)
                 src_path = f.name
 
@@ -332,11 +362,19 @@ class MetalBackend(BaseBackend):
 
     def add_stages(self, stages, options, language):
         if language == Language.TRITON:
-            stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
-            stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
+            stages["ttir"] = lambda src, metadata: self.make_ttir(
+                src, metadata, options
+            )
+            stages["ttgir"] = lambda src, metadata: self.make_ttgir(
+                src, metadata, options
+            )
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
-        stages["metal"] = lambda src, metadata: self.make_metal_ir(src, metadata, options)
-        stages["metallib"] = lambda src, metadata: self.make_metallib(src, metadata, options)
+        stages["metal"] = lambda src, metadata: self.make_metal_ir(
+            src, metadata, options
+        )
+        stages["metallib"] = lambda src, metadata: self.make_metallib(
+            src, metadata, options
+        )
 
     @functools.lru_cache()
     def hash(self):
