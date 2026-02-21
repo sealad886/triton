@@ -1,6 +1,7 @@
 #include "Utility.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/SymbolTable.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
@@ -92,10 +93,31 @@ Value shuffleIdx(Location loc, RewriterBase &rewriter, Value val, Value i) {
 Value llGetPid(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
                ProgramIDDim axis) {
   assert(moduleOp);
-  // Metal only supports single CTA (no cluster), so block ID = program ID
-  Value blockId = ::mlir::gpu::BlockIdOp::create(rewriter, loc,
-                                                 mlir::gpu::Dimension(axis));
-  return arith::IndexCastOp::create(rewriter, loc, i32_ty, blockId);
+  StringRef funcName;
+  switch (axis) {
+  case ProgramIDDim::X:
+    funcName = "__metal_get_threadgroup_position_in_grid_x";
+    break;
+  case ProgramIDDim::Y:
+    funcName = "__metal_get_threadgroup_position_in_grid_y";
+    break;
+  case ProgramIDDim::Z:
+    funcName = "__metal_get_threadgroup_position_in_grid_z";
+    break;
+  }
+
+  Operation *funcOp = moduleOp.lookupSymbol(funcName);
+  LLVM::LLVMFuncOp func;
+  if (funcOp) {
+    func = cast<LLVM::LLVMFuncOp>(funcOp);
+  } else {
+    auto funcType = LLVM::LLVMFunctionType::get(i32_ty, {});
+    RewriterBase::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(moduleOp.getBody());
+    func = LLVM::LLVMFuncOp::create(rewriter, loc, funcName, funcType);
+    func.setVisibility(SymbolTable::Visibility::Private);
+  }
+  return LLVM::CallOp::create(rewriter, loc, func, ValueRange{})->getResult(0);
 }
 
 } // namespace Metal
