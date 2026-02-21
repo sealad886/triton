@@ -20,8 +20,6 @@ In:
 - Metal-focused tests and backend utility helpers
 
 Out (for this phase):
-- Full LLVM IR -> semantically complete MSL lowering (this remains a larger
-  compiler initiative)
 - New Metal architecture-specific optimization passes beyond current baseline
 
 ## Backend Parity Audit
@@ -35,6 +33,7 @@ Out (for this phase):
 | `third_party/<backend>/python` | root binding (`triton_nvidia.cc`) | `python/triton_amd.cc` | `python/triton_metal.cc` present | Low |
 | Runtime `utils.load_binary` contract | matches JIT expectations | matches JIT expectations | signature/return mismatch | High |
 | Runtime `utils.get_device_properties` schema | includes expected keys | includes expected keys | missing shared-memory key | High |
+| LLVM IR -> MSL backend stage | mature backend-specific lowering | mature backend-specific lowering | placeholder stub generator | High |
 | Backend stage inspection hook | implemented | implemented | missing | Medium |
 | Test utility backend helpers | cuda/hip helpers | hip helpers | no `is_metal` helper | Medium |
 | AOT unit test behavior | supported | supported | not handled cleanly | Medium |
@@ -70,7 +69,7 @@ Acceptance:
 
 ### Phase 2: Compiler Integration Parity
 - [x] Add stages inspection hook wiring in Metal backend stage construction.
-- [ ] Ensure Metal backend hash/versioning accounts for backend SDK/compiler
+- [x] Ensure Metal backend hash/versioning accounts for backend SDK/compiler
       version signals.
 - [x] Validate options parsing defaults against shared Triton knobs where
       applicable.
@@ -94,11 +93,25 @@ Acceptance:
 - [x] Add Metal compiler stage hook test coverage.
 - [x] Update AOT unit tests to gate unsupported backend coverage explicitly
       where needed.
-- [ ] Run targeted backend test set and record outcomes.
+- [x] Run targeted backend test set and record outcomes.
 
 Acceptance:
 - Targeted backend tests pass (or skip with intentional reasons) for updated
   Metal integration points.
+
+### Phase 5: LLVM IR -> MSL Lowering
+- [x] Replace placeholder MSL stub generation with translation from lowered
+      LLVM IR.
+- [x] Add helper-call aware lowering (`__metal_get_*`,
+      `__metal_predicated_ld/st_*`) into generated MSL.
+- [x] Add coverage for translation correctness and metallib compilation from
+      lowered LLVM IR snippets.
+- [ ] Extend translation coverage for complex control-flow constructs
+      (phi-heavy CFGs, uncommon intrinsic patterns) used by advanced kernels.
+
+Acceptance:
+- Kernels that lower through the Metal LLVM pipeline compile through
+  `make_metal_ir` -> `make_metallib` without placeholder stubs.
 
 ## Risks and Mitigations
 
@@ -128,3 +141,11 @@ Acceptance:
 - 2026-02-21: Added initial Metal AOT tooling templates under
   `third_party/metal/tools/metal` and updated compile template generation for
   Metal argument binding code.
+- 2026-02-21: Reworked `ConvertTritonMetalGPUToLLVM` to enforce strict
+  Triton->LLVM legality, add explicit Metal load/store lowering, and replace
+  NVVM/PTX artifacts at source with Metal helper calls.
+- 2026-02-21: Replaced `make_metal_ir` stub generation with real LLVM-IR-to-MSL
+  translation for lowered helper-call based kernels; added reserved-name
+  sanitization and parser robustness for LLVM signatures containing attributes.
+- 2026-02-21: Added regression tests for helper-call translation and direct
+  metallib compilation from lowered LLVM IR snippets.
