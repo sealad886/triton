@@ -263,6 +263,55 @@ class MetalBackend(BaseBackend):
                 parts.append(tail)
             return parts
 
+        msl_reserved_identifiers = {
+            "kernel",
+            "vertex",
+            "fragment",
+            "compute",
+            "thread",
+            "threadgroup",
+            "device",
+            "constant",
+            "bool",
+            "char",
+            "short",
+            "int",
+            "long",
+            "half",
+            "float",
+            "double",
+            "if",
+            "else",
+            "switch",
+            "case",
+            "default",
+            "return",
+            "continue",
+            "break",
+            "while",
+            "for",
+            "fma",
+            "fabs",
+            "sqrt",
+            "floor",
+            "ceil",
+            "trunc",
+            "rint",
+            "exp",
+            "exp2",
+            "log",
+            "log2",
+            "sin",
+            "cos",
+            "tanh",
+            "pow",
+            "copysign",
+            "max",
+            "min",
+            "isnan",
+            "popcount",
+        }
+
         def msl_id(llvm_name: str) -> str:
             raw = llvm_name.lstrip("%")
             raw = re.sub(r"[^A-Za-z0-9_]", "_", raw)
@@ -270,6 +319,8 @@ class MetalBackend(BaseBackend):
                 raw = "tmp"
             if raw[0].isdigit():
                 raw = f"v{raw}"
+            if raw in msl_reserved_identifiers:
+                raw = f"v_{raw}"
             return raw
 
         def llvm_scalar_to_msl(llvm_ty: str) -> str:
@@ -286,8 +337,19 @@ class MetalBackend(BaseBackend):
             }
             return table.get(llvm_ty, "int")
 
+        def llvm_type_to_msl(llvm_ty: str) -> str:
+            llvm_ty = llvm_ty.strip()
+            vec_match = re.match(r"^<\s*(\d+)\s+x\s+(.+)\s*>$", llvm_ty)
+            if vec_match:
+                width = int(vec_match.group(1))
+                scalar = llvm_scalar_to_msl(vec_match.group(2))
+                return f"vec<{scalar}, {width}>"
+            return llvm_scalar_to_msl(llvm_ty)
+
         def constant_to_msl(token: str) -> str:
             token = token.strip()
+            if token in ("undef", "poison", "zeroinitializer"):
+                return "0"
             if token in ("true", "false", "nullptr", "null"):
                 return "nullptr" if token == "null" else token
             if re.match(r"^-?[0-9]+$", token):
@@ -440,6 +502,57 @@ class MetalBackend(BaseBackend):
             "fdiv": "/",
         }
 
+        def lower_intrinsic(fn: str, args: list[str]) -> str | None:
+            if fn.startswith("llvm.fabs.") and len(args) == 1:
+                return f"fabs({args[0]})"
+            if fn.startswith("llvm.sqrt.") and len(args) == 1:
+                return f"sqrt({args[0]})"
+            if fn.startswith("llvm.floor.") and len(args) == 1:
+                return f"floor({args[0]})"
+            if fn.startswith("llvm.ceil.") and len(args) == 1:
+                return f"ceil({args[0]})"
+            if fn.startswith("llvm.trunc.") and len(args) == 1:
+                return f"trunc({args[0]})"
+            if fn.startswith("llvm.round.") and len(args) == 1:
+                return f"rint({args[0]})"
+            if fn.startswith("llvm.exp2.") and len(args) == 1:
+                return f"exp2({args[0]})"
+            if fn.startswith("llvm.exp.") and len(args) == 1:
+                return f"exp({args[0]})"
+            if fn.startswith("llvm.log2.") and len(args) == 1:
+                return f"log2({args[0]})"
+            if fn.startswith("llvm.log.") and len(args) == 1:
+                return f"log({args[0]})"
+            if fn.startswith("llvm.sin.") and len(args) == 1:
+                return f"sin({args[0]})"
+            if fn.startswith("llvm.cos.") and len(args) == 1:
+                return f"cos({args[0]})"
+            if fn.startswith("llvm.tanh.") and len(args) == 1:
+                return f"tanh({args[0]})"
+            if fn.startswith("llvm.pow.") and len(args) == 2:
+                return f"pow({args[0]}, {args[1]})"
+            if fn.startswith("llvm.copysign.") and len(args) == 2:
+                return f"copysign({args[0]}, {args[1]})"
+            if fn.startswith("llvm.fma.") and len(args) == 3:
+                return f"fma({args[0]}, {args[1]}, {args[2]})"
+            if (
+                fn.startswith("llvm.maximum.")
+                or fn.startswith("llvm.maxnum.")
+                or fn.startswith("llvm.smax.")
+                or fn.startswith("llvm.umax.")
+            ) and len(args) == 2:
+                return f"max({args[0]}, {args[1]})"
+            if (
+                fn.startswith("llvm.minimum.")
+                or fn.startswith("llvm.minnum.")
+                or fn.startswith("llvm.smin.")
+                or fn.startswith("llvm.umin.")
+            ) and len(args) == 2:
+                return f"min({args[0]}, {args[1]})"
+            if fn.startswith("llvm.ctpop.") and len(args) == 1:
+                return f"popcount({args[0]})"
+            return None
+
         def fcmp_expr(pred: str, lhs: str, rhs: str) -> str:
             ordered = f"(!isnan({lhs}) && !isnan({rhs}))"
             unordered = f"(isnan({lhs}) || isnan({rhs}))"
@@ -574,7 +687,10 @@ class MetalBackend(BaseBackend):
                     args = [to_expr(v) for v in parse_call_args(args_raw)]
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
-                    if fn in axis_helper_map:
+                    lowered_intrinsic = lower_intrinsic(fn, args)
+                    if lowered_intrinsic is not None:
+                        emit(f"auto {out} = {lowered_intrinsic};")
+                    elif fn in axis_helper_map:
                         emit(f"auto {out} = {axis_helper_map[fn]};")
                     elif fn.startswith("__metal_predicated_ld_global_") and len(args) == 3:
                         emit(f"auto {out} = ({args[2]} ? *{args[1]} : {args[0]});")
@@ -588,7 +704,7 @@ class MetalBackend(BaseBackend):
                         emit(f"auto {out} = {fn}({', '.join(args)});")
                     continue
 
-                m = re.match(r"^(?:tail\s+)?call\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$", line)
+                m = re.match(r"^(?:tail\s+)?call(?:\s+\w+)*\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$", line)
                 if m:
                     fn, args_raw = m.groups()
                     args = [to_expr(v) for v in parse_call_args(args_raw)]
@@ -596,6 +712,8 @@ class MetalBackend(BaseBackend):
                         emit(f"if ({args[2]}) {{ *{args[1]} = {args[0]}; }}")
                     elif fn == "__metal_simdgroup_barrier":
                         emit("threadgroup_barrier(mem_flags::mem_none);")
+                    elif fn.startswith("llvm.assume"):
+                        emit("(void)0;")
                     else:
                         emit(f"{fn}({', '.join(args)});")
                     continue
@@ -616,6 +734,17 @@ class MetalBackend(BaseBackend):
                         emit(f"auto {out} = fmod({lhs_expr}, {rhs_expr});")
                     else:
                         emit(f"auto {out} = {lhs_expr} {bin_map[op]} {rhs_expr};")
+                    continue
+
+                m = re.match(
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*fneg(?:\s+[A-Za-z]+)*\s+[^ ]+\s+(.+)$",
+                    line,
+                )
+                if m:
+                    out_ssa, val = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"auto {out} = -({to_expr(val)});")
                     continue
 
                 m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*icmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$", line)
@@ -656,7 +785,7 @@ class MetalBackend(BaseBackend):
                     elif op in ("ptrtoint", "inttoptr"):
                         emit(f"auto {out} = {to_expr(val)};")
                     else:
-                        emit(f"auto {out} = ({llvm_scalar_to_msl(dst_ty)})({to_expr(val)});")
+                        emit(f"auto {out} = ({llvm_type_to_msl(dst_ty)})({to_expr(val)});")
                     continue
 
                 m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*freeze\s+[^ ]+\s+(.+)$", line)
@@ -681,6 +810,29 @@ class MetalBackend(BaseBackend):
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
                     emit(f"auto {out} = {to_expr(base)} + {to_expr(idx)};")
+                    continue
+
+                m = re.match(
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*extractelement\s+<\s*\d+\s+x\s+.+\s*>\s+([^,]+),\s+i\d+\s+(.+)$",
+                    line,
+                )
+                if m:
+                    out_ssa, vec, idx = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"auto {out} = {to_expr(vec)}[{to_expr(idx)}];")
+                    continue
+
+                m = re.match(
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*insertelement\s+<\s*\d+\s+x\s+.+\s*>\s+([^,]+),\s+.+\s+([^,]+),\s+i\d+\s+(.+)$",
+                    line,
+                )
+                if m:
+                    out_ssa, vec, val, idx = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"auto {out} = {to_expr(vec)};")
+                    emit(f"{out}[{to_expr(idx)}] = {to_expr(val)};")
                     continue
 
                 m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*load\s+[^,]+,\s+ptr(?:\s+addrspace\(\d+\))?\s+(.+)$", line)

@@ -273,6 +273,30 @@ merge:
         assert isinstance(binary, bytes)
         assert binary[:4] == b"MTLB"
 
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_from_lowered_intrinsic_ir(self):
+        from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+        llvm_ir = """
+define void @intrinsic_kernel(ptr %out, float %a, float %b) {
+entry:
+  %neg = fneg float %a
+  %fma = call float @llvm.fma.f32(float %a, float %b, float %neg)
+  %abs = call float @llvm.fabs.f32(float %fma)
+  %mx = call float @llvm.maximum.f32(float %abs, float %b)
+  %p = getelementptr float, ptr %out, i64 0
+  store float %mx, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        opts = MetalOptions(arch="apple8")
+        binary = MetalBackend.make_metallib(msl, metadata, opts)
+        assert isinstance(binary, bytes)
+        assert binary[:4] == b"MTLB"
+
 
 # ── Metal IR generation tests ──────────────────────────────────────
 
@@ -375,6 +399,48 @@ entry:
         assert " + " in msl
         assert "isnan" in msl
         assert " ? " in msl
+
+    def test_make_metal_ir_translates_intrinsics_and_fneg(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @intrinsic_kernel(ptr %out, float %a, float %b) {
+entry:
+  %neg = fneg float %a
+  %fma = call float @llvm.fma.f32(float %a, float %b, float %neg)
+  %abs = call float @llvm.fabs.f32(float %fma)
+  %mx = call float @llvm.maximum.f32(float %abs, float %b)
+  %mn = call float @llvm.minimum.f32(float %mx, float %a)
+  %cmp = fcmp oge float %mn, %a
+  %sel = select i1 %cmp, float %mn, float %a
+  %p = getelementptr float, ptr %out, i64 0
+  store float %sel, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "fma(" in msl
+        assert "fabs(" in msl
+        assert "max(" in msl
+        assert "min(" in msl
+        assert "= -(" in msl
+
+    def test_make_metal_ir_translates_llvm_assume(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @assume_kernel(ptr %out, i1 %pred) {
+entry:
+  call void @llvm.assume(i1 %pred)
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 1, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "(void)0;" in msl
 
 
 # ── Driver tests ────────────────────────────────────────────────────
