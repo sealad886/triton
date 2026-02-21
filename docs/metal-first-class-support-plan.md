@@ -117,6 +117,10 @@ Acceptance:
 - [x] Add intrinsic/math lowering support (`llvm.fma`, `llvm.fabs`,
       `llvm.maximum/minimum`, etc.) and unary `fneg`.
 - [x] Harden MSL SSA-name sanitization to avoid collisions with Metal builtins.
+- [x] Fix source-pass lowering parity for float tensor elementwise ops
+      (`arith.addf/subf/mulf/divf`) in `ConvertTritonMetalGPUToLLVM`.
+- [x] Fix compiler artifact loading for mixed Metal outputs (`.metal` source +
+      `.metallib` binary) to avoid text decode faults in `CompiledKernel`.
 - [ ] Extend translation coverage for complex control-flow constructs
       (phi-heavy CFGs, uncommon intrinsic patterns) used by advanced kernels.
 
@@ -197,3 +201,10 @@ Acceptance:
 - 2026-02-21: Extended LLVM-IR-to-MSL lowering with intrinsic math support
   (`llvm.fma`, `llvm.fabs`, `llvm.maximum/minimum`, etc.), unary `fneg`, and
   identifier sanitization for Metal builtin collisions (e.g. `%fma`).
+- 2026-02-21: Fixed source pass gap in
+  `ConvertTritonMetalGPUToLLVM` by adding explicit float elementwise lowering
+  patterns and arith expand patterns, unblocking full Triton vector-add compile
+  through Metal backend.
+- 2026-02-21: Fixed `CompiledKernel` artifact loader to treat `.metallib` as a
+  binary artifact even when `binary_ext` is `metal`, preventing UTF-8 decode
+  crashes during mixed source/binary artifact reads.

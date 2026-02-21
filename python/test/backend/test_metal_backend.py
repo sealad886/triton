@@ -275,6 +275,37 @@ merge:
 
     @skip_non_darwin
     @skip_no_xcrun
+    def test_compile_triton_vector_add_pipeline(self):
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            y = tl.load(y_ptr + offs, mask=mask, other=0.0)
+            tl.store(out_ptr + offs, x + y, mask=mask)
+
+        src = triton.compiler.ASTSource(
+            fn=_add_kernel,
+            signature={
+                "x_ptr": "*fp32",
+                "y_ptr": "*fp32",
+                "out_ptr": "*fp32",
+                "n": "i32",
+            },
+            constexprs={"BLOCK": 128},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
+        assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
+        assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+
+    @skip_non_darwin
+    @skip_no_xcrun
     def test_compile_from_lowered_intrinsic_ir(self):
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
 

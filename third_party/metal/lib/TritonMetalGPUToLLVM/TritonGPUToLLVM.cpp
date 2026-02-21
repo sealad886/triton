@@ -12,6 +12,7 @@
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
+#include "triton/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVMBase.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -431,6 +432,23 @@ struct ConvertTritonMetalGPUToLLVM
     ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
 
     mlir::triton::populateElementwiseOpToLLVMPatterns(typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
+    // Generic Triton elementwise lowering does not add float binary/scalar-cast
+    // patterns that other first-class backends explicitly register.
+#define POPULATE_FLOAT_OP(SRC_OP, DST_OP)                                     \
+    patterns.add<mlir::triton::gpu::ElementwiseOpConversion<SRC_OP, DST_OP>>( \
+        typeConverter, axisInfoAnalysis, benefit);
+
+    POPULATE_FLOAT_OP(arith::SubFOp, LLVM::FSubOp);
+    POPULATE_FLOAT_OP(arith::AddFOp, LLVM::FAddOp);
+    POPULATE_FLOAT_OP(arith::MulFOp, LLVM::FMulOp);
+    POPULATE_FLOAT_OP(arith::DivFOp, LLVM::FDivOp);
+    POPULATE_FLOAT_OP(arith::ExtFOp, LLVM::FPExtOp);
+    POPULATE_FLOAT_OP(arith::TruncFOp, LLVM::FPTruncOp);
+    POPULATE_FLOAT_OP(arith::FPToSIOp, LLVM::FPToSIOp);
+    POPULATE_FLOAT_OP(arith::SIToFPOp, LLVM::SIToFPOp);
+
+#undef POPULATE_FLOAT_OP
+
     patterns.add<LoadOpConversion, StoreOpConversion>(typeConverter, benefit);
     mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo, patterns, benefit);
     mlir::triton::populateAssertOpToLLVMPattern(typeConverter, patterns, targetInfo, benefit);
@@ -449,6 +467,7 @@ struct ConvertTritonMetalGPUToLLVM
     mlir::triton::populateInstrumentationToLLVMPatterns(typeConverter, patterns);
 
     // Add standard MLIR to LLVM patterns
+    mlir::arith::populateCeilFloorDivExpandOpsPatterns(patterns);
     mlir::arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
     mlir::populateMathToLLVMConversionPatterns(typeConverter, patterns);
     mlir::populateGpuToNVVMConversionPatterns(typeConverter, patterns);
