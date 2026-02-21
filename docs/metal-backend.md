@@ -10,7 +10,8 @@ The Metal backend adds Apple GPU support to Triton by:
 1. Lowering Triton IR through the standard TTIR → TTGIR → LLVM IR pipeline
 2. Translating LLVM IR to Metal Shading Language (MSL)
 3. Compiling MSL to `.metallib` binaries via `xcrun metal` / `xcrun metallib`
-4. Loading and dispatching compiled kernels via PyObjC Metal bindings
+4. Loading and dispatching kernels through `torch.mps.compile_shader`
+   (runtime path) and `.metallib` tooling/PyObjC utilities
 
 ## Requirements
 
@@ -60,14 +61,19 @@ The Metal backend adds Apple GPU support to Triton by:
 
 ### Runtime
 
-The runtime uses PyObjC to access the Metal framework:
+The runtime has two execution/load paths:
 
-- `MTLCreateSystemDefaultDevice()` — get the GPU device
-- `newCommandQueue()` — create command submission queue
-- `newLibraryWithData:error:` — load compiled `.metallib`
-- `newFunctionWithName:` — get kernel function
-- `newComputePipelineStateWithFunction:error:` — create pipeline
-- Command buffer + encoder for dispatch
+- **Primary runtime path (`torch.mps.compile_shader`)**
+  - Compiles generated MSL source at runtime and launches through torch MPS
+    shader objects with tensor arguments bound directly.
+- **Tooling/utility path (PyObjC + `.metallib`)**
+  - Retained for backend smoke testing and lower-level validation flows.
+  - Uses:
+    - `MTLCreateSystemDefaultDevice()`
+    - `newCommandQueue()`
+    - `newLibraryWithURL:error:`
+    - `newFunctionWithName:`
+    - `newComputePipelineStateWithFunction:error:`
 
 ## File Structure
 
@@ -113,14 +119,13 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
 
 ## Current Limitations
 
-- **LLVM IR → MSL translation**: Currently generates stub MSL kernels from
-  LLVM IR signatures. Full IR-level translation requires an LLVM backend
-  that targets AIR (Apple Intermediate Representation), which is not yet
-  available in upstream LLVM.
-- **Data types**: Limited to float32 buffer arguments in the current MSL
-  generation stage. More types will be added.
-- **Shared memory**: Threadgroup memory allocation is recognized but not
-  yet fully wired through to MSL.
+- **LLVM IR → MSL coverage is expanding but incomplete**: CFG/phi lowering and
+  common arithmetic/compare/intrinsic patterns are supported, but uncommon
+  LLVM patterns and advanced control-flow forms are still being added.
+- **Data type coverage is partial**: common scalar numeric paths are handled;
+  uncommon vector/aggregate edge cases remain under active implementation.
+- **Shared/threadgroup memory semantics**: recognized in upstream lowering,
+  but advanced patterns still need broader end-to-end validation.
 - **Tensor cores**: Apple's matrix multiply accelerator is not yet
   integrated into the pass pipeline.
 
@@ -134,6 +139,14 @@ python -m pytest python/test/backend/test_metal_backend.py -v -k "not (Launch or
 
 # Full tests (requires macOS + Apple Silicon)
 python -m pytest python/test/backend/test_metal_backend.py -v
+
+# Deterministic crash-classification harness (minimal transfer path)
+python python/test/backend/metal_mps_transfer_stress.py --mode cpu --iters 256 --transfer-every 16
+python python/test/backend/metal_mps_transfer_stress.py --mode mps --iters 4096 --transfer-every 1
+
+# Deterministic crash-classification harness (runtime-flow mirror)
+python python/test/backend/metal_mps_project_flow_stress.py --mode cpu --iters 256 --transfer-every 16
+python python/test/backend/metal_mps_project_flow_stress.py --mode mps --iters 2048 --transfer-every 1
 ```
 
 ### Building the native extension

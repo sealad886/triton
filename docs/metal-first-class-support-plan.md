@@ -18,6 +18,7 @@ In:
 - `third_party/metal/**/{lib,language,backend,tools,python}`
 - Core runtime/compiler integration points consumed by all backends
 - Metal-focused tests and backend utility helpers
+- Crash-resilient MPS execution harness and artifact collection for triage
 
 Out (for this phase):
 - New Metal architecture-specific optimization passes beyond current baseline
@@ -37,6 +38,7 @@ Out (for this phase):
 | Backend stage inspection hook | implemented | implemented | missing | Medium |
 | Test utility backend helpers | cuda/hip helpers | hip helpers | no `is_metal` helper | Medium |
 | AOT unit test behavior | supported | supported | not handled cleanly | Medium |
+| Crash diagnostics harness | mature sanitizer/profiler ecosystem | mature sanitizer/profiler ecosystem | no deterministic MPS crash triage harness | High |
 
 ## First-Class Definition
 
@@ -112,12 +114,34 @@ Acceptance:
       predicates, and floating binary ops.
 - [x] Add coverage for translation correctness and metallib compilation from
       lowered LLVM IR snippets.
+- [x] Add intrinsic/math lowering support (`llvm.fma`, `llvm.fabs`,
+      `llvm.maximum/minimum`, etc.) and unary `fneg`.
+- [x] Harden MSL SSA-name sanitization to avoid collisions with Metal builtins.
 - [ ] Extend translation coverage for complex control-flow constructs
       (phi-heavy CFGs, uncommon intrinsic patterns) used by advanced kernels.
 
 Acceptance:
 - Kernels that lower through the Metal LLVM pipeline compile through
   `make_metal_ir` -> `make_metallib` without placeholder stubs.
+
+### Phase 6: MPS Crash Diagnostics Harness (Track B)
+- [x] Add deterministic transfer-stress repro script with CPU/MPS mode split
+      and explicit transfer/cleanup checkpoints.
+- [x] Add deterministic project-flow repro script that uses
+      `torch.mps.compile_shader` to mirror Triton Metal runtime launch path.
+- [x] Add startup environment banner + hard-fail mode gating for unavailable
+      MPS runs.
+- [x] Add crash-safe artifact retention (config/env/state/events/checkpoints)
+      with frequent flush/fsync.
+- [x] Add explicit transfer boundary markers (`transfer_to_cpu_pre/post`) and
+      teardown markers (`cleanup_sync_pre/post`) for failure classification.
+- [x] Integrate harness execution into `scripts/test_metal_smoke.py` for
+      repeated validation in both CPU and MPS modes.
+- [ ] Add automated CI artifact upload/reporting for harness run directories.
+
+Acceptance:
+- Native crashes can be localized to compute, transfer/sync, or cleanup
+  boundary using persisted run artifacts, even without Python exceptions.
 
 ## Risks and Mitigations
 
@@ -163,3 +187,13 @@ Acceptance:
   translation and `phi` node lowering using a switch-based CFG state machine
   (Metal does not support `goto`/labels), plus `fcmp` and floating arithmetic
   lowering coverage.
+- 2026-02-21: Added deterministic crash-classification harnesses:
+  `metal_mps_transfer_stress.py` (minimal transfer path) and
+  `metal_mps_project_flow_stress.py` (runtime-flow mirror via
+  `torch.mps.compile_shader`), both with CPU/MPS mode split and checkpointed
+  artifact logging.
+- 2026-02-21: Integrated harness checks into `scripts/test_metal_smoke.py`
+  to run CPU and MPS variants with explicit synchronization boundaries.
+- 2026-02-21: Extended LLVM-IR-to-MSL lowering with intrinsic math support
+  (`llvm.fma`, `llvm.fabs`, `llvm.maximum/minimum`, etc.), unary `fneg`, and
+  identifier sanitization for Metal builtin collisions (e.g. `%fma`).
