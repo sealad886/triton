@@ -43,6 +43,12 @@ def is_hip():
 
 
 @constexpr_function
+def is_metal():
+    target = current_target()
+    return target is not None and target.backend == "metal"
+
+
+@constexpr_function
 def is_hip_cdna3():
     target = current_target()
     return target is not None and target.arch == "gfx942"

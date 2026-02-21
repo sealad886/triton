@@ -137,6 +137,28 @@ class TestMetalBackend:
         assert "metal" in stages
         assert "metallib" in stages
 
+    def test_add_stages_inspection_hook(self, monkeypatch):
+        from third_party.metal.backend.compiler import MetalBackend
+        from triton.backends.compiler import GPUTarget, Language
+        from triton import knobs
+
+        calls = {"count": 0}
+
+        def hook(backend, stages, options, language, capability):
+            calls["count"] += 1
+            assert language == Language.TRITON
+            assert capability is None
+            assert "metallib" in stages
+
+        monkeypatch.setattr(knobs.runtime, "add_stages_inspection_hook", hook)
+
+        target = GPUTarget("metal", "apple8", 32)
+        backend = MetalBackend(target)
+        opts = backend.parse_options({})
+        stages = {}
+        backend.add_stages(stages, opts, Language.TRITON)
+        assert calls["count"] == 1
+
     def test_load_dialects_no_error(self):
         from third_party.metal.backend.compiler import MetalBackend
         from triton.backends.compiler import GPUTarget
@@ -251,13 +273,49 @@ class TestMetalDriver:
         assert "max_buffer_length" in props
         assert props["max_buffer_length"] > 0
 
+    def test_get_device_properties_schema(self):
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        props = utils.get_device_properties()
+        assert "max_shared_mem" in props
+        assert "max_threadgroup_memory_length" in props
+
+    def test_load_binary_runtime_contract(self):
+        from third_party.metal.backend.driver import MetalUtils
+
+        class _DummyHandle:
+            pass
+
+        dummy = _DummyHandle()
+        utils = MetalUtils()
+
+        with patch.object(MetalUtils, "_load_metallib_handle", return_value=dummy):
+            direct = utils.load_binary(b"binary")
+            assert direct is dummy
+
+            module, function, n_regs, n_spills, n_max_threads = utils.load_binary(
+                "kernel_name", b"binary", 0, 0
+            )
+            assert module is dummy
+            assert function is dummy
+            assert n_regs == 0
+            assert n_spills == 0
+            assert isinstance(n_max_threads, int)
+
+    def test_unload_module_noop(self):
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        assert utils.unload_module(object()) is None
+
     def test_map_python_to_cpp_type(self):
         from third_party.metal.backend.driver import MetalDriver
         driver = MetalDriver.__new__(MetalDriver)
-        assert driver.map_python_to_cpp_type("*fp32") == "MTLBuffer*"
+        assert driver.map_python_to_cpp_type("*fp32") == "MTLBufferPtr"
         assert driver.map_python_to_cpp_type("i32") == "int32_t"
         assert driver.map_python_to_cpp_type("fp32") == "float"
-        assert driver.map_python_to_cpp_type("fp16") == "half"
+        assert driver.map_python_to_cpp_type("fp16") == "uint16_t"
 
     def test_get_active_torch_device(self):
         from third_party.metal.backend.driver import MetalDriver

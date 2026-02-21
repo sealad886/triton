@@ -81,6 +81,7 @@ class MetalUtils:
         if dev is None:
             return {
                 "name": "unknown",
+                "max_shared_mem": 0,
                 "max_buffer_length": 0,
                 "max_threads_per_threadgroup": 0,
                 "max_threadgroup_memory_length": 0,
@@ -94,15 +95,17 @@ class MetalUtils:
         except Exception:
             max_threads = 1024  # Common default for Apple Silicon
 
+        max_threadgroup_memory_length = int(dev.maxThreadgroupMemoryLength())
         return {
             "name": str(dev.name()),
+            "max_shared_mem": max_threadgroup_memory_length,
             "max_buffer_length": int(dev.maxBufferLength()),
             "max_threads_per_threadgroup": max_threads,
-            "max_threadgroup_memory_length": int(dev.maxThreadgroupMemoryLength()),
+            "max_threadgroup_memory_length": max_threadgroup_memory_length,
             "gpu_family": _detect_gpu_family(dev),
         }
 
-    def load_binary(self, binary_bytes, metadata=None):
+    def _load_metallib_handle(self, binary_bytes, metadata=None):
         """
         Load a .metallib binary and return a handle for kernel dispatch.
 
@@ -165,6 +168,43 @@ class MetalUtils:
             metadata=metadata,
             binary_bytes=binary_bytes,
         )
+
+    def load_binary(self, *args):
+        """
+        Load binary with both direct and Triton runtime-compatible signatures.
+
+        Supported signatures:
+        - load_binary(binary_bytes, metadata=None) -> MetalKernelHandle
+        - load_binary(name, binary_bytes, shared, device_id)
+            -> (module, function, n_regs, n_spills, n_max_threads)
+        """
+        if len(args) == 0:
+            raise TypeError("load_binary() missing required arguments")
+
+        # Direct utility usage used by backend tests.
+        if len(args) in (1, 2):
+            binary_bytes = args[0]
+            metadata = args[1] if len(args) == 2 else None
+            return self._load_metallib_handle(binary_bytes, metadata)
+
+        # Triton CompiledKernel runtime contract.
+        if len(args) >= 4:
+            name, binary_bytes, _shared, device_id = args[:4]
+            metadata = {"name": name}
+            handle = self._load_metallib_handle(binary_bytes, metadata)
+            props = self.get_device_properties(device_id)
+            n_max_threads = props.get("max_threads_per_threadgroup", 1024)
+            return handle, handle, 0, 0, n_max_threads
+
+        raise TypeError(
+            "load_binary() expected either (binary_bytes, metadata=None) "
+            "or (name, binary_bytes, shared, device_id)"
+        )
+
+    def unload_module(self, module):
+        # Metal libraries are reference-counted objects managed by PyObjC.
+        # Clearing Python references is sufficient for teardown semantics.
+        return None
 
     def launch(
         self,
@@ -366,19 +406,21 @@ class MetalLauncher:
             launch_enter_hook(kernel_metadata, launch_metadata)
 
         handle = function
-        if isinstance(handle, MetalKernelHandle):
-            kernel_name = None
-            if isinstance(kernel_metadata, dict):
-                kernel_name = kernel_metadata.get("name")
-            elif hasattr(kernel_metadata, "name"):
-                kernel_name = kernel_metadata.name
+        if not isinstance(handle, MetalKernelHandle):
+            raise RuntimeError("Expected MetalKernelHandle for Metal launch")
 
-            handle.launch_kernel(
-                name=kernel_name,
-                args=list(args) if args else [],
-                grid=(gridX, gridY, gridZ),
-                block=(256, 1, 1),
-            )
+        kernel_name = None
+        if isinstance(kernel_metadata, dict):
+            kernel_name = kernel_metadata.get("name")
+        elif hasattr(kernel_metadata, "name"):
+            kernel_name = kernel_metadata.name
+
+        handle.launch_kernel(
+            name=kernel_name,
+            args=list(args) if args else [],
+            grid=(gridX, gridY, gridZ),
+            block=(256, 1, 1),
+        )
 
         if launch_exit_hook is not None:
             launch_exit_hook(kernel_metadata, launch_metadata)
@@ -438,7 +480,7 @@ class MetalDriver(DriverBase):
 
     def map_python_to_cpp_type(self, ty: str) -> str:
         if ty[0] == "*":
-            return "MTLBuffer*"
+            return "MTLBufferPtr"
         return {
             "i1": "bool",
             "i8": "int8_t",
@@ -450,8 +492,8 @@ class MetalDriver(DriverBase):
             "u16": "uint16_t",
             "u32": "uint32_t",
             "u64": "uint64_t",
-            "fp16": "half",
-            "bf16": "float",
+            "fp16": "uint16_t",
+            "bf16": "uint16_t",
             "fp32": "float",
             "f32": "float",
             "fp64": "double",

@@ -67,6 +67,11 @@ def is_hip():
     return False if target is None else target.backend == "hip"
 
 
+def is_metal():
+    target = get_current_target()
+    return False if target is None else target.backend == "metal"
+
+
 def is_hip_cdna2():
     target = get_current_target()
     return target is not None and target.backend == 'hip' and target.arch == 'gfx90a'

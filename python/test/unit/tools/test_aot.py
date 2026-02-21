@@ -12,6 +12,11 @@ import triton
 from triton.backends.compiler import GPUTarget
 from triton._internal_testing import is_cuda, is_hip
 
+pytestmark = pytest.mark.skipif(
+    not (is_cuda() or is_hip()),
+    reason="AOT toolchain tests currently cover CUDA/HIP backends only",
+)
+
 if is_cuda():
     from triton.backends.nvidia.driver import include_dirs, library_dirs
 

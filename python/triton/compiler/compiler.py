@@ -142,7 +142,7 @@ def parse(full_name, ext, context):
         return module
     if ext == "llir" or ext == "ptx" or ext == "amdgcn":
         return Path(full_name).read_text()
-    if ext == "cubin" or ext == "hsaco":
+    if ext in ("cubin", "hsaco", "metallib"):
         return Path(full_name).read_bytes()
 
 
@@ -334,8 +334,8 @@ def compile(src, target=None, options=None, _env_vars=None):
         elif full_name := fn_override_manager.get_file(ir_filename):
             print(f"\nOverriding kernel with file {full_name}")
             next_module = parse(full_name, ext, context)
-        # If TRITON_STORE_BINARY_ONLY is 1, only store cubin/hsaco/json
-        if (not store_only_binary) or (ext in ("cubin", "hsaco", "json")):
+        # If TRITON_STORE_BINARY_ONLY is 1, only store binary/json artifacts.
+        if (not store_only_binary) or (ext in ("cubin", "hsaco", "metallib", "json")):
             metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
         if fn_dump_manager is not None:
             fn_dump_manager.put(next_module, ir_filename)

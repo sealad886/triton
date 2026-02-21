@@ -18,6 +18,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, Tuple
 
+from triton import knobs
 from triton._C.libtriton import ir, llvm, passes
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 
@@ -44,6 +45,9 @@ class MetalOptions:
     def __post_init__(self):
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
         object.__setattr__(self, "extern_libs", tuple(extern_libs.items()))
+        assert self.num_warps > 0 and (
+            self.num_warps & (self.num_warps - 1)
+        ) == 0, "num_warps must be a power of 2"
 
     def hash(self):
         key = "_".join([f"{name}-{val}" for name, val in sorted(self.__dict__.items())])
@@ -97,6 +101,8 @@ class MetalBackend(BaseBackend):
 
     def parse_options(self, opts) -> Any:
         args = {"arch": self.target.arch}
+        if "enable_fp_fusion" not in opts:
+            args["enable_fp_fusion"] = knobs.language.default_fp_fusion
         args.update(
             {
                 k: opts[k]
@@ -375,6 +381,10 @@ class MetalBackend(BaseBackend):
         stages["metallib"] = lambda src, metadata: self.make_metallib(
             src, metadata, options
         )
+        if knobs.runtime.add_stages_inspection_hook is not None:
+            knobs.runtime.add_stages_inspection_hook(
+                self, stages, options, language, None
+            )
 
     @functools.lru_cache()
     def hash(self):
