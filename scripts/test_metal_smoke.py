@@ -317,6 +317,83 @@ kernel void fill_42(
                 os.remove(path)
 
 
+def _run_harness_script(script_name, mode, extra_args):
+    script_path = os.path.join("python", "test", "backend", script_name)
+    if not os.path.exists(script_path):
+        print(f"SKIP: {script_path} not found")
+        return True
+
+    cmd = [
+        sys.executable,
+        script_path,
+        "--mode",
+        mode,
+        "--iters",
+        "16",
+        "--shape",
+        "2048",
+        "--transfer-every",
+        "4",
+        "--run-root",
+        "artifacts/metal-harness-runs",
+        "--tag",
+        f"smoke-{script_name.replace('.py', '')}-{mode}",
+    ]
+    cmd.extend(extra_args)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if result.returncode != 0:
+        print("FAIL: Harness script failed")
+        print("  command:", " ".join(cmd))
+        print("  stdout:", result.stdout)
+        print("  stderr:", result.stderr)
+        return False
+    print(result.stdout.strip())
+    return True
+
+
+def _torch_mps_available():
+    try:
+        import torch
+
+        return bool(torch.backends.mps.is_built() and torch.backends.mps.is_available())
+    except Exception:
+        return False
+
+
+def test_transfer_harness_cpu():
+    """Smoke-test deterministic transfer stress harness in CPU mode."""
+    return _run_harness_script("metal_mps_transfer_stress.py", "cpu", [])
+
+
+def test_transfer_harness_mps():
+    """Smoke-test deterministic transfer stress harness in MPS mode."""
+    if not _torch_mps_available():
+        print("SKIP: torch MPS backend unavailable")
+        return True
+    return _run_harness_script(
+        "metal_mps_transfer_stress.py",
+        "mps",
+        ["--sync-before-transfer", "--sync-after-transfer"],
+    )
+
+
+def test_project_flow_harness_cpu():
+    """Smoke-test project-flow harness in CPU mode."""
+    return _run_harness_script("metal_mps_project_flow_stress.py", "cpu", [])
+
+
+def test_project_flow_harness_mps():
+    """Smoke-test project-flow harness in MPS mode."""
+    if not _torch_mps_available():
+        print("SKIP: torch MPS backend unavailable")
+        return True
+    return _run_harness_script(
+        "metal_mps_project_flow_stress.py",
+        "mps",
+        ["--sync-before-transfer", "--sync-after-transfer"],
+    )
+
+
 def main():
     print("=" * 60)
     print("Metal Backend Smoke Tests")
@@ -328,6 +405,10 @@ def main():
         ("PyObjC Metal runtime", test_metal_pyobjc_runtime),
         ("Metal kernel load", test_metal_kernel_load),
         ("Metal kernel dispatch", test_metal_kernel_dispatch),
+        ("Transfer harness (CPU)", test_transfer_harness_cpu),
+        ("Transfer harness (MPS)", test_transfer_harness_mps),
+        ("Project-flow harness (CPU)", test_project_flow_harness_cpu),
+        ("Project-flow harness (MPS)", test_project_flow_harness_mps),
     ]
 
     results = []

@@ -48,6 +48,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache
 
+# Local run artifacts
+artifacts/metal-harness-runs/
+
 # Environments
 .venv
 venv/
