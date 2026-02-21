@@ -1,0 +1,83 @@
+name: Metal macOS Backend Tests
+
+on:
+  push:
+    branches: [main, "feat/metal-*", "ci/macos-*"]
+    paths:
+      - "third_party/metal/**"
+      - "python/test/backend/test_metal_backend.py"
+      - "setup.py"
+      - ".github/workflows/metal-macos-tests.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "third_party/metal/**"
+      - "python/test/backend/test_metal_backend.py"
+      - "setup.py"
+
+jobs:
+  metal-unit-tests:
+    name: Metal Backend Unit Tests
+    runs-on: macos-14  # Apple Silicon runner
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false  # LLVM submodule is large; skip for backend-only tests
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest numpy loguru pyobjc-framework-Metal pyobjc-framework-Foundation
+
+      - name: Run Metal backend tests (non-GPU)
+        run: |
+          python -m pytest python/test/backend/test_metal_backend.py \
+            -v --tb=short -x \
+            -k "not (TestMetalKernelLaunch or TestMetalKernelHandle or TestMetalCompilation or test_driver_is_active or test_get_current_target or test_get_device_properties)"
+
+      - name: Run Metal backend tests (GPU, if available)
+        if: runner.os == 'macOS'
+        continue-on-error: true  # GPU may not be available on all CI runners
+        run: |
+          python -m pytest python/test/backend/test_metal_backend.py \
+            -v --tb=short -x
+
+  metal-import-check:
+    name: Metal Backend Import Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install minimal dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Verify Metal backend importable on non-macOS
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, '.')
+          from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+          from third_party.metal.backend.driver import MetalDriver
+          print('Metal backend imports OK on', sys.platform)
+          opts = MetalOptions(arch='apple8')
+          print('MetalOptions hash:', opts.hash())
+          print('MetalDriver.is_active():', MetalDriver.is_active())
+          "
