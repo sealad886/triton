@@ -41,6 +41,7 @@ class MetalOptions:
     max_num_imprecise_acc_default: int = 0
     sanitize_overflow: bool = True
     launch_cooperative_grid: bool = False
+    instrumentation_mode: str = ""
 
     def __post_init__(self):
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
@@ -127,7 +128,8 @@ class MetalBackend(BaseBackend):
 
     def load_dialects(self, ctx):
         import triton._C.libtriton.metal as metal
-        metal.load_dialects(ctx)
+        if ctx is not None and hasattr(metal, "load_dialects"):
+            metal.load_dialects(ctx)
 
     @staticmethod
     def make_ttir(mod, metadata, opt):
@@ -237,75 +239,374 @@ class MetalBackend(BaseBackend):
     def make_metal_ir(src, metadata, opt):
         """
         Convert LLVM IR text to Metal Shading Language source.
-
-        For Metal, we take the LLVM IR and translate it to a compute kernel in
-        Metal Shading Language (MSL). This stage extracts kernel signatures and
-        generates valid MSL source that can be compiled by xcrun metal.
         """
-        # Extract kernel name from LLVM IR
-        names = re.findall(r"define.*void @([a-zA-Z_][a-zA-Z0-9_]*)\(", src)
-        if not names:
-            raise RuntimeError("No kernel function found in LLVM IR")
-        kernel_name = names[0]
-        metadata["name"] = kernel_name
+        def split_top_level(text: str, sep: str = ",") -> list[str]:
+            parts = []
+            cur = []
+            depth = 0
+            for ch in text:
+                if ch in "([":
+                    depth += 1
+                elif ch in ")]":
+                    depth = max(0, depth - 1)
+                if ch == sep and depth == 0:
+                    part = "".join(cur).strip()
+                    if part:
+                        parts.append(part)
+                    cur = []
+                    continue
+                cur.append(ch)
+            tail = "".join(cur).strip()
+            if tail:
+                parts.append(tail)
+            return parts
 
-        # Parse function arguments from LLVM IR
-        # Match the full function signature
-        func_match = re.search(
-            r"define.*void @" + re.escape(kernel_name) + r"\(([^)]*)\)",
+        def msl_id(llvm_name: str) -> str:
+            raw = llvm_name.lstrip("%")
+            raw = re.sub(r"[^A-Za-z0-9_]", "_", raw)
+            if not raw:
+                raw = "tmp"
+            if raw[0].isdigit():
+                raw = f"v{raw}"
+            return raw
+
+        def llvm_scalar_to_msl(llvm_ty: str) -> str:
+            llvm_ty = llvm_ty.strip()
+            table = {
+                "i1": "bool",
+                "i8": "char",
+                "i16": "short",
+                "i32": "int",
+                "i64": "long",
+                "half": "half",
+                "float": "float",
+                "double": "double",
+            }
+            return table.get(llvm_ty, "int")
+
+        def constant_to_msl(token: str) -> str:
+            token = token.strip()
+            if token in ("true", "false", "nullptr", "null"):
+                return "nullptr" if token == "null" else token
+            if re.match(r"^-?[0-9]+$", token):
+                return token
+            if re.match(r"^-?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?$", token):
+                return token if token.endswith("f") else f"{token}f"
+            return token
+
+        def parse_call_args(arg_list: str) -> list[str]:
+            values = []
+            for arg in split_top_level(arg_list):
+                arg = arg.strip()
+                if not arg:
+                    continue
+                if "%" in arg:
+                    values.append(arg[arg.rfind("%"):].strip())
+                else:
+                    values.append(arg.split()[-1].strip())
+            return values
+
+        func_header = re.search(
+            r"define\s+void\s+@([A-Za-z_][A-Za-z0-9_]*)\s*\(",
             src,
-            re.DOTALL,
+            flags=re.MULTILINE,
         )
-        args = []
-        if func_match:
-            params_str = func_match.group(1).strip()
-            if params_str:
-                for i, param in enumerate(params_str.split(",")):
-                    param = param.strip()
-                    if "ptr" in param or "*" in param:
-                        args.append(("buffer", f"arg{i}", i))
-                    elif "i32" in param:
-                        args.append(("uint", f"arg{i}", i))
-                    elif "i64" in param:
-                        args.append(("ulong", f"arg{i}", i))
-                    elif "float" in param:
-                        args.append(("float", f"arg{i}", i))
-                    elif "half" in param:
-                        args.append(("half", f"arg{i}", i))
-                    else:
-                        args.append(("uint", f"arg{i}", i))
+        if not func_header:
+            raise RuntimeError("No kernel function found in LLVM IR")
 
-        # Generate Metal Shading Language source
+        kernel_name = func_header.group(1)
+        reserved = {"kernel", "vertex", "fragment", "compute"}
+        msl_kernel_name = kernel_name
+        if kernel_name in reserved:
+            msl_kernel_name = f"triton_{kernel_name}"
+        metadata["name"] = msl_kernel_name
+
+        sig_l = src.find("(", func_header.start())
+        depth = 0
+        sig_r = -1
+        for i in range(sig_l, len(src)):
+            ch = src[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    sig_r = i
+                    break
+        if sig_r == -1:
+            raise RuntimeError(f"Failed to parse signature for kernel '{kernel_name}'")
+
+        params_str = src[sig_l + 1:sig_r].strip()
+        func_body_l = src.find("{", sig_r)
+        if func_body_l == -1:
+            raise RuntimeError(f"Failed to parse body for kernel '{kernel_name}'")
+        brace_depth = 0
+        func_body_r = -1
+        for i in range(func_body_l, len(src)):
+            ch = src[i]
+            if ch == "{":
+                brace_depth += 1
+            elif ch == "}":
+                brace_depth -= 1
+                if brace_depth == 0:
+                    func_body_r = i
+                    break
+        if func_body_r == -1:
+            raise RuntimeError(f"Failed to parse body for kernel '{kernel_name}'")
+
+        params = []
+        for idx, raw in enumerate(split_top_level(params_str)):
+            name_match = re.search(r"(%[-A-Za-z0-9._]+)\s*$", raw)
+            llvm_name = name_match.group(1) if name_match else f"%arg{idx}"
+            prefix = raw[:name_match.start()].strip() if name_match else raw.strip()
+            type_match = re.match(
+                r"(ptr(?:\s+addrspace\(\d+\))?|i\d+|float|half|double|i1)", prefix
+            )
+            llvm_ty = type_match.group(1) if type_match else "i32"
+            params.append(
+                {
+                    "index": idx,
+                    "llvm_name": llvm_name,
+                    "llvm_type": llvm_ty,
+                    "is_ptr": llvm_ty.startswith("ptr"),
+                }
+            )
+
+        ptr_elem = {}
+        for p in params:
+            if not p["is_ptr"]:
+                continue
+            llvm_name = re.escape(p["llvm_name"])
+            m = re.findall(
+                rf"getelementptr\s+([A-Za-z0-9_]+),\s+ptr(?:\s+addrspace\(\d+\))?\s+{llvm_name}",
+                src,
+            )
+            pointee = m[-1] if m else "float"
+            ptr_elem[p["llvm_name"]] = llvm_scalar_to_msl(pointee)
+
+        ssa = {}
+        param_lines = []
+        for p in params:
+            arg_name = f"arg{p['index']}"
+            ssa[p["llvm_name"]] = arg_name
+            if p["is_ptr"]:
+                elem_ty = ptr_elem.get(p["llvm_name"], "uint")
+                param_lines.append(
+                    f"    device {elem_ty}* {arg_name} [[buffer({p['index']})]]"
+                )
+            else:
+                scalar_ty = llvm_scalar_to_msl(p["llvm_type"])
+                param_lines.append(
+                    f"    constant {scalar_ty}& {arg_name} [[buffer({p['index']})]]"
+                )
+
+        param_lines.extend(
+            [
+                "    uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]]",
+                "    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]",
+                "    uint3 threads_per_threadgroup [[threads_per_threadgroup]]",
+                "    uint3 threadgroups_per_grid [[threadgroups_per_grid]]",
+            ]
+        )
+
+        def to_expr(token: str) -> str:
+            token = token.strip()
+            if token in ssa:
+                return ssa[token]
+            if token.startswith("%"):
+                out = msl_id(token)
+                ssa[token] = out
+                return out
+            return constant_to_msl(token)
+
+        cmp_map = {
+            "eq": "==",
+            "ne": "!=",
+            "slt": "<",
+            "sle": "<=",
+            "sgt": ">",
+            "sge": ">=",
+            "ult": "<",
+            "ule": "<=",
+            "ugt": ">",
+            "uge": ">=",
+        }
+        bin_map = {
+            "add": "+",
+            "sub": "-",
+            "mul": "*",
+            "udiv": "/",
+            "sdiv": "/",
+            "urem": "%",
+            "srem": "%",
+            "shl": "<<",
+            "lshr": ">>",
+            "ashr": ">>",
+            "and": "&",
+            "or": "|",
+            "xor": "^",
+        }
+        axis_helper_map = {
+            "__metal_get_thread_position_in_threadgroup_x": "thread_position_in_threadgroup.x",
+            "__metal_get_thread_position_in_threadgroup_y": "thread_position_in_threadgroup.y",
+            "__metal_get_thread_position_in_threadgroup_z": "thread_position_in_threadgroup.z",
+            "__metal_get_threadgroup_position_in_grid_x": "threadgroup_position_in_grid.x",
+            "__metal_get_threadgroup_position_in_grid_y": "threadgroup_position_in_grid.y",
+            "__metal_get_threadgroup_position_in_grid_z": "threadgroup_position_in_grid.z",
+            "__metal_get_threads_per_threadgroup_x": "threads_per_threadgroup.x",
+            "__metal_get_threads_per_threadgroup_y": "threads_per_threadgroup.y",
+            "__metal_get_threads_per_threadgroup_z": "threads_per_threadgroup.z",
+            "__metal_get_threadgroups_per_grid_x": "threadgroups_per_grid.x",
+            "__metal_get_threadgroups_per_grid_y": "threadgroups_per_grid.y",
+            "__metal_get_threadgroups_per_grid_z": "threadgroups_per_grid.z",
+        }
+
+        body_lines = []
+        body = src[func_body_l + 1:func_body_r]
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            line = re.sub(r",\s*!dbg\s*![0-9]+.*$", "", line)
+            if line.startswith(";"):
+                continue
+            if line.endswith(":"):
+                label = line[:-1].strip().replace("%", "")
+                body_lines.append(f"{label}:")
+                continue
+            if line == "ret void":
+                body_lines.append("  return;")
+                continue
+
+            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*(?:tail\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$", line)
+            if m:
+                out_ssa, _, fn, args_raw = m.groups()
+                args = [to_expr(v) for v in parse_call_args(args_raw)]
+                out = msl_id(out_ssa)
+                ssa[out_ssa] = out
+                if fn in axis_helper_map:
+                    body_lines.append(f"  auto {out} = {axis_helper_map[fn]};")
+                elif fn.startswith("__metal_predicated_ld_global_") and len(args) == 3:
+                    body_lines.append(f"  auto {out} = ({args[2]} ? *{args[1]} : {args[0]});")
+                elif fn == "__metal_simd_shuffle_xor" and len(args) == 2:
+                    body_lines.append(f"  auto {out} = simd_shuffle_xor({args[0]}, {args[1]});")
+                elif fn == "__metal_simd_shuffle_up" and len(args) == 2:
+                    body_lines.append(f"  auto {out} = simd_shuffle_up({args[0]}, {args[1]});")
+                elif fn == "__metal_simd_shuffle" and len(args) == 2:
+                    body_lines.append(f"  auto {out} = simd_shuffle({args[0]}, {args[1]});")
+                else:
+                    body_lines.append(f"  auto {out} = {fn}({', '.join(args)});")
+                continue
+
+            m = re.match(r"^(?:tail\s+)?call\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$", line)
+            if m:
+                fn, args_raw = m.groups()
+                args = [to_expr(v) for v in parse_call_args(args_raw)]
+                if fn.startswith("__metal_predicated_st_global_") and len(args) == 3:
+                    body_lines.append(f"  if ({args[2]}) {{ *{args[1]} = {args[0]}; }}")
+                elif fn == "__metal_simdgroup_barrier":
+                    body_lines.append("  threadgroup_barrier(mem_flags::mem_none);")
+                else:
+                    body_lines.append(f"  {fn}({', '.join(args)});")
+                continue
+
+            m = re.match(
+                r"^(%[-A-Za-z0-9._]+)\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor)(?:\s+\w+)?\s+[^ ]+\s+([^,]+),\s*(.+)$",
+                line,
+            )
+            if m:
+                out_ssa, op, lhs, rhs = m.groups()
+                out = msl_id(out_ssa)
+                ssa[out_ssa] = out
+                body_lines.append(f"  auto {out} = {to_expr(lhs)} {bin_map[op]} {to_expr(rhs)};")
+                continue
+
+            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*icmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$", line)
+            if m:
+                out_ssa, pred, lhs, rhs = m.groups()
+                out = msl_id(out_ssa)
+                ssa[out_ssa] = out
+                cmp_op = cmp_map.get(pred)
+                if cmp_op is None:
+                    raise RuntimeError(f"Unsupported icmp predicate '{pred}'")
+                body_lines.append(f"  bool {out} = ({to_expr(lhs)} {cmp_op} {to_expr(rhs)});")
+                continue
+
+            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*(sext|zext|trunc|sitofp|uitofp|fptosi|fptoui|bitcast)\s+[^ ]+\s+(.+)\s+to\s+(.+)$", line)
+            if m:
+                out_ssa, op, val, dst_ty = m.groups()
+                out = msl_id(out_ssa)
+                ssa[out_ssa] = out
+                dst_ty = dst_ty.strip()
+                if op == "bitcast":
+                    body_lines.append(f"  auto {out} = as_type<{llvm_scalar_to_msl(dst_ty)}>({to_expr(val)});")
+                else:
+                    body_lines.append(f"  auto {out} = ({llvm_scalar_to_msl(dst_ty)})({to_expr(val)});")
+                continue
+
+            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*select\s+i1\s+([^,]+),\s+[^ ]+\s+([^,]+),\s+[^ ]+\s+(.+)$", line)
+            if m:
+                out_ssa, cond, lhs, rhs = m.groups()
+                out = msl_id(out_ssa)
+                ssa[out_ssa] = out
+                body_lines.append(f"  auto {out} = ({to_expr(cond)} ? {to_expr(lhs)} : {to_expr(rhs)});")
+                continue
+
+            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*getelementptr\s+[A-Za-z0-9_]+,\s+ptr(?:\s+addrspace\(\d+\))?\s+([^,]+),\s+i\d+\s+(.+)$", line)
+            if m:
+                out_ssa, base, idx = m.groups()
+                out = msl_id(out_ssa)
+                ssa[out_ssa] = out
+                body_lines.append(f"  auto {out} = {to_expr(base)} + {to_expr(idx)};")
+                continue
+
+            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*load\s+[^,]+,\s+ptr(?:\s+addrspace\(\d+\))?\s+(.+)$", line)
+            if m:
+                out_ssa, ptr = m.groups()
+                out = msl_id(out_ssa)
+                ssa[out_ssa] = out
+                body_lines.append(f"  auto {out} = *{to_expr(ptr)};")
+                continue
+
+            m = re.match(r"^store\s+[^ ]+\s+([^,]+),\s+ptr(?:\s+addrspace\(\d+\))?\s+(.+)$", line)
+            if m:
+                val, ptr = m.groups()
+                body_lines.append(f"  *{to_expr(ptr)} = {to_expr(val)};")
+                continue
+
+            m = re.match(r"^br\s+label\s+%([A-Za-z0-9_.-]+)$", line)
+            if m:
+                body_lines.append(f"  goto {m.group(1)};")
+                continue
+
+            m = re.match(
+                r"^br\s+i1\s+([^,]+),\s+label\s+%([A-Za-z0-9_.-]+),\s+label\s+%([A-Za-z0-9_.-]+)$",
+                line,
+            )
+            if m:
+                cond, t_lbl, f_lbl = m.groups()
+                body_lines.append(
+                    f"  if ({to_expr(cond)}) goto {t_lbl}; else goto {f_lbl};"
+                )
+                continue
+
+            if line.startswith("unreachable"):
+                body_lines.append("  return;")
+                continue
+
+            raise RuntimeError(f"Unsupported LLVM IR in Metal lowering: '{line}'")
+
         msl_lines = [
             "#include <metal_stdlib>",
             "using namespace metal;",
             "",
+            f"kernel void {msl_kernel_name}(",
+            ",\n".join(param_lines),
+            ") {",
         ]
-
-        # Build kernel signature
-        param_strs = []
-        for arg_type, arg_name, idx in args:
-            if arg_type == "buffer":
-                param_strs.append(f"    device float* {arg_name} [[buffer({idx})]]")
-            else:
-                param_strs.append(
-                    f"    constant {arg_type}& {arg_name} [[buffer({idx})]]"
-                )
-
-        # Add threadgroup position and thread position
-        param_strs.append("    uint3 tid [[thread_position_in_grid]]")
-        param_strs.append("    uint3 ntid [[threads_per_grid]]")
-
-        msl_lines.append(f"kernel void {kernel_name}(")
-        msl_lines.append(",\n".join(param_strs))
-        msl_lines.append(") {")
-        msl_lines.append("    // Auto-generated Metal kernel stub")
-        msl_lines.append(
-            "    // Full kernel body will be generated by LLVM→AIR→metallib pipeline"
-        )
+        msl_lines.extend(body_lines)
         msl_lines.append("}")
         msl_lines.append("")
-
         return "\n".join(msl_lines)
 
     @staticmethod

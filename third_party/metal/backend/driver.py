@@ -235,6 +235,12 @@ class MetalUtils:
         )
         if kernel_name is None and hasattr(kernel_metadata, "name"):
             kernel_name = kernel_metadata.name
+        if kernel_name is None and hasattr(handle, "metadata"):
+            kernel_name = handle.metadata.get("name")
+        if not isinstance(kernel_name, str) or kernel_name == "":
+            raise RuntimeError(
+                f"Missing/invalid Metal kernel name in launch metadata: {kernel_name!r}"
+            )
 
         block = (256, 1, 1)  # Default threadgroup size
         grid = (grid_x, grid_y, grid_z)
@@ -263,6 +269,8 @@ class MetalKernelHandle:
 
     def get_pipeline(self, name):
         """Get or create a compute pipeline for the named kernel."""
+        if not isinstance(name, str) or name == "":
+            raise RuntimeError(f"Invalid Metal kernel function name: {name!r}")
         pipeline = self.pipeline_cache.get(name)
         if pipeline is not None:
             return pipeline
@@ -414,6 +422,21 @@ class MetalLauncher:
             kernel_name = kernel_metadata.get("name")
         elif hasattr(kernel_metadata, "name"):
             kernel_name = kernel_metadata.name
+        if kernel_name is None and isinstance(self.metadata, dict):
+            kernel_name = self.metadata.get("name")
+        if kernel_name is None and hasattr(handle, "metadata"):
+            kernel_name = handle.metadata.get("name")
+        if not isinstance(kernel_name, str) or kernel_name == "":
+            try:
+                names = list(handle.library.functionNames())
+                if names:
+                    kernel_name = str(names[0])
+            except Exception:
+                pass
+        if not isinstance(kernel_name, str) or kernel_name == "":
+            raise RuntimeError(
+                f"Missing/invalid Metal kernel function name: {kernel_name!r}"
+            )
 
         handle.launch_kernel(
             name=kernel_name,

@@ -218,6 +218,34 @@ class TestMetalCompilation:
             with pytest.raises(RuntimeError, match="xcrun"):
                 MetalBackend.make_metallib(metal_source, {}, opts)
 
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_from_lowered_llvm_ir(self):
+        from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+        llvm_ir = """
+define void @kernel(ptr addrspace(1) %0, ptr addrspace(1) %1, i32 %2) {
+  %3 = call i32 @__metal_get_threadgroup_position_in_grid_x()
+  %4 = shl i32 %3, 7
+  %5 = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %6 = and i32 %5, 127
+  %7 = add i32 %4, %6
+  %8 = icmp slt i32 %7, %2
+  %9 = sext i32 %7 to i64
+  %10 = getelementptr float, ptr addrspace(1) %0, i64 %9
+  %11 = call float @__metal_predicated_ld_global_f32_p1(float 0.000000e+00, ptr addrspace(1) %10, i1 %8)
+  %12 = getelementptr float, ptr addrspace(1) %1, i64 %9
+  call void @__metal_predicated_st_global_f32_p1(float %11, ptr addrspace(1) %12, i1 %8)
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        opts = MetalOptions(arch="apple8")
+        binary = MetalBackend.make_metallib(msl, metadata, opts)
+        assert isinstance(binary, bytes)
+        assert binary[:4] == b"MTLB"
+
 
 # ── Metal IR generation tests ──────────────────────────────────────
 
@@ -244,6 +272,38 @@ class TestMetalIRGeneration:
         llvm_ir = "declare void @not_a_definition()"
         with pytest.raises(RuntimeError, match="No kernel function found"):
             MetalBackend.make_metal_ir(llvm_ir, {}, None)
+
+    def test_make_metal_ir_reserved_name_is_sanitized(self):
+        from third_party.metal.backend.compiler import MetalBackend
+        llvm_ir = "define void @kernel(ptr %arg0) {\nret void\n}"
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert metadata["name"] == "triton_kernel"
+        assert "kernel void triton_kernel" in msl
+
+    def test_make_metal_ir_translates_helper_calls(self):
+        from third_party.metal.backend.compiler import MetalBackend
+        llvm_ir = """
+define void @my_kernel(ptr addrspace(1) %0, ptr addrspace(1) %1, i32 %2) {
+  %3 = call i32 @__metal_get_threadgroup_position_in_grid_x()
+  %4 = shl i32 %3, 7
+  %5 = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %6 = add i32 %4, %5
+  %7 = icmp slt i32 %6, %2
+  %8 = sext i32 %6 to i64
+  %9 = getelementptr float, ptr addrspace(1) %0, i64 %8
+  %10 = call float @__metal_predicated_ld_global_f32_p1(float 0.000000e+00, ptr addrspace(1) %9, i1 %7)
+  %11 = getelementptr float, ptr addrspace(1) %1, i64 %8
+  call void @__metal_predicated_st_global_f32_p1(float %10, ptr addrspace(1) %11, i1 %7)
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "threadgroup_position_in_grid.x" in msl
+        assert "thread_position_in_threadgroup.x" in msl
+        assert "? *" in msl
+        assert "if (" in msl and "*v11 = v10" in msl
 
 
 # ── Driver tests ────────────────────────────────────────────────────
