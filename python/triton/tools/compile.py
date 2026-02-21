@@ -168,12 +168,17 @@ def compile_kernel(args: CompileArgs):
         if hints.get((i, ), None) == 16:
             suffix += f'{i}d'
     func_name = '_'.join([out_name, sig_hash, suffix])
-    asm = ccinfo.asm[backend.binary_ext]  # store binary data once
+    backend_name = target.backend
+    asm_ext = backend.binary_ext
+    if backend_name == "metal" and "metallib" in ccinfo.asm:
+        asm_ext = "metallib"
+    asm = ccinfo.asm[asm_ext]  # store binary data once
+    if isinstance(asm, str):
+        asm = asm.encode("utf-8")
 
     hex_ = str(binascii.hexlify(asm))[2:-1]
 
     ty_to_cpp = triton.runtime.driver.active.map_python_to_cpp_type
-    backend_name = target.backend
 
     metal_arg_bindings: list[str] = []
     if backend_name == "metal":

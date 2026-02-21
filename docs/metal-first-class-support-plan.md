@@ -31,7 +31,7 @@ Out (for this phase):
 | `third_party/<backend>/lib` | large conversion stack | large conversion + transforms | minimal conversion stack | Medium |
 | `third_party/<backend>/tools` | `compile.*` + `link.h` | `compile.*` + `link.h` | missing | High |
 | `third_party/<backend>/python` | root binding (`triton_nvidia.cc`) | `python/triton_amd.cc` | `python/triton_metal.cc` present | Low |
-| Runtime `utils.load_binary` contract | matches JIT expectations | matches JIT expectations | signature/return mismatch | High |
+| Runtime `utils.load_binary` contract | matches JIT expectations | matches JIT expectations | aligned for source+metallib payloads | Low |
 | Runtime `utils.get_device_properties` schema | includes expected keys | includes expected keys | missing shared-memory key | High |
 | LLVM IR -> MSL backend stage | mature backend-specific lowering | mature backend-specific lowering | placeholder stub generator | High |
 | Backend stage inspection hook | implemented | implemented | missing | Medium |
@@ -57,11 +57,15 @@ Metal is considered first-class for this project phase when:
       backend sources.
 - [x] Align `MetalUtils.load_binary` with Triton JIT call contract and return
       shape.
+- [x] Route runtime launch through `torch.mps.compile_shader` so Tensor
+      arguments bind at source instead of downstream script adaptation.
 - [x] Add `MetalUtils.unload_module` and ensure no-op safety semantics.
 - [x] Align Metal device property schema with expected shared-memory keys used
       by compiler/runtime guards.
 - [x] Verify `MetalLauncher` invocation path handles loaded function objects
       consistently.
+- [ ] Expand scalar-cast conformance coverage for edge types (`u64` high values,
+      fp8 variants, tuple argument flattening in complex signatures).
 
 Acceptance:
 - JIT initialization can invoke Metal `utils.load_binary` path without schema
@@ -104,6 +108,8 @@ Acceptance:
       LLVM IR.
 - [x] Add helper-call aware lowering (`__metal_get_*`,
       `__metal_predicated_ld/st_*`) into generated MSL.
+- [x] Add CFG/dataflow lowering primitives for `phi`, floating-point compare
+      predicates, and floating binary ops.
 - [x] Add coverage for translation correctness and metallib compilation from
       lowered LLVM IR snippets.
 - [ ] Extend translation coverage for complex control-flow constructs
@@ -149,3 +155,11 @@ Acceptance:
   sanitization and parser robustness for LLVM signatures containing attributes.
 - 2026-02-21: Added regression tests for helper-call translation and direct
   metallib compilation from lowered LLVM IR snippets.
+- 2026-02-21: Switched Metal runtime execution path to compile/load generated
+  MSL via `torch.mps.compile_shader`, with signature-aware argument flattening
+  and constexpr filtering in the launcher to fix Tensor argument binding at the
+  source backend layer.
+- 2026-02-21: Extended LLVM-IR-to-MSL lowering with predecessor-aware branch
+  translation and `phi` node lowering using a switch-based CFG state machine
+  (Metal does not support `goto`/labels), plus `fcmp` and floating arithmetic
+  lowering coverage.

@@ -98,7 +98,9 @@ class MetalBackend(BaseBackend):
 
     def __init__(self, target: GPUTarget) -> None:
         super().__init__(target)
-        self.binary_ext = "metallib"
+        # Runtime launches consume generated MSL source through
+        # torch.mps.compile_shader while we still emit `.metallib` for tooling.
+        self.binary_ext = "metal"
 
     def parse_options(self, opts) -> Any:
         args = {"arch": self.target.arch}
@@ -431,6 +433,38 @@ class MetalBackend(BaseBackend):
             "ugt": ">",
             "uge": ">=",
         }
+        float_bin_map = {
+            "fadd": "+",
+            "fsub": "-",
+            "fmul": "*",
+            "fdiv": "/",
+        }
+
+        def fcmp_expr(pred: str, lhs: str, rhs: str) -> str:
+            ordered = f"(!isnan({lhs}) && !isnan({rhs}))"
+            unordered = f"(isnan({lhs}) || isnan({rhs}))"
+            table = {
+                "false": "false",
+                "true": "true",
+                "oeq": f"({ordered} && ({lhs} == {rhs}))",
+                "ogt": f"({ordered} && ({lhs} > {rhs}))",
+                "oge": f"({ordered} && ({lhs} >= {rhs}))",
+                "olt": f"({ordered} && ({lhs} < {rhs}))",
+                "ole": f"({ordered} && ({lhs} <= {rhs}))",
+                "one": f"({ordered} && ({lhs} != {rhs}))",
+                "ord": ordered,
+                "ueq": f"({unordered} || ({lhs} == {rhs}))",
+                "ugt": f"({unordered} || ({lhs} > {rhs}))",
+                "uge": f"({unordered} || ({lhs} >= {rhs}))",
+                "ult": f"({unordered} || ({lhs} < {rhs}))",
+                "ule": f"({unordered} || ({lhs} <= {rhs}))",
+                "une": f"({unordered} || ({lhs} != {rhs}))",
+                "uno": unordered,
+            }
+            if pred not in table:
+                raise RuntimeError(f"Unsupported fcmp predicate '{pred}'")
+            return table[pred]
+
         bin_map = {
             "add": "+",
             "sub": "-",
@@ -461,8 +495,8 @@ class MetalBackend(BaseBackend):
             "__metal_get_threadgroups_per_grid_z": "threadgroups_per_grid.z",
         }
 
-        body_lines = []
         body = src[func_body_l + 1:func_body_r]
+        cleaned_lines = []
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line:
@@ -470,131 +504,247 @@ class MetalBackend(BaseBackend):
             line = re.sub(r",\s*!dbg\s*![0-9]+.*$", "", line)
             if line.startswith(";"):
                 continue
+            cleaned_lines.append(line)
+
+        blocks = {"entry": []}
+        block_order = ["entry"]
+        current_block = "entry"
+        for line in cleaned_lines:
             if line.endswith(":"):
                 label = line[:-1].strip().replace("%", "")
-                body_lines.append(f"{label}:")
+                current_block = label
+                if label not in blocks:
+                    blocks[label] = []
+                    block_order.append(label)
                 continue
-            if line == "ret void":
-                body_lines.append("  return;")
-                continue
+            blocks[current_block].append(line)
 
-            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*(?:tail\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$", line)
-            if m:
-                out_ssa, _, fn, args_raw = m.groups()
-                args = [to_expr(v) for v in parse_call_args(args_raw)]
-                out = msl_id(out_ssa)
-                ssa[out_ssa] = out
-                if fn in axis_helper_map:
-                    body_lines.append(f"  auto {out} = {axis_helper_map[fn]};")
-                elif fn.startswith("__metal_predicated_ld_global_") and len(args) == 3:
-                    body_lines.append(f"  auto {out} = ({args[2]} ? *{args[1]} : {args[0]});")
-                elif fn == "__metal_simd_shuffle_xor" and len(args) == 2:
-                    body_lines.append(f"  auto {out} = simd_shuffle_xor({args[0]}, {args[1]});")
-                elif fn == "__metal_simd_shuffle_up" and len(args) == 2:
-                    body_lines.append(f"  auto {out} = simd_shuffle_up({args[0]}, {args[1]});")
-                elif fn == "__metal_simd_shuffle" and len(args) == 2:
-                    body_lines.append(f"  auto {out} = simd_shuffle({args[0]}, {args[1]});")
-                else:
-                    body_lines.append(f"  auto {out} = {fn}({', '.join(args)});")
-                continue
+        block_ids = {label: idx for idx, label in enumerate(block_order)}
 
-            m = re.match(r"^(?:tail\s+)?call\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$", line)
-            if m:
-                fn, args_raw = m.groups()
-                args = [to_expr(v) for v in parse_call_args(args_raw)]
-                if fn.startswith("__metal_predicated_st_global_") and len(args) == 3:
-                    body_lines.append(f"  if ({args[2]}) {{ *{args[1]} = {args[0]}; }}")
-                elif fn == "__metal_simdgroup_barrier":
-                    body_lines.append("  threadgroup_barrier(mem_flags::mem_none);")
-                else:
-                    body_lines.append(f"  {fn}({', '.join(args)});")
-                continue
+        body_lines = [
+            "  int __triton_pred_block = -1;",
+            f"  int __pc = {block_ids['entry']};",
+            "  while (true) {",
+            "    switch (__pc) {",
+        ]
 
-            m = re.match(
-                r"^(%[-A-Za-z0-9._]+)\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor)(?:\s+\w+)?\s+[^ ]+\s+([^,]+),\s*(.+)$",
-                line,
-            )
-            if m:
-                out_ssa, op, lhs, rhs = m.groups()
-                out = msl_id(out_ssa)
-                ssa[out_ssa] = out
-                body_lines.append(f"  auto {out} = {to_expr(lhs)} {bin_map[op]} {to_expr(rhs)};")
-                continue
+        for block in block_order:
+            block_id = block_ids[block]
+            instrs = blocks.get(block, [])
+            body_lines.append(f"    case {block_id}: {{")
 
-            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*icmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$", line)
-            if m:
-                out_ssa, pred, lhs, rhs = m.groups()
-                out = msl_id(out_ssa)
-                ssa[out_ssa] = out
-                cmp_op = cmp_map.get(pred)
-                if cmp_op is None:
-                    raise RuntimeError(f"Unsupported icmp predicate '{pred}'")
-                body_lines.append(f"  bool {out} = ({to_expr(lhs)} {cmp_op} {to_expr(rhs)});")
-                continue
+            def emit(stmt: str):
+                body_lines.append(f"      {stmt}")
 
-            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*(sext|zext|trunc|sitofp|uitofp|fptosi|fptoui|bitcast)\s+[^ ]+\s+(.+)\s+to\s+(.+)$", line)
-            if m:
-                out_ssa, op, val, dst_ty = m.groups()
-                out = msl_id(out_ssa)
-                ssa[out_ssa] = out
-                dst_ty = dst_ty.strip()
-                if op == "bitcast":
-                    body_lines.append(f"  auto {out} = as_type<{llvm_scalar_to_msl(dst_ty)}>({to_expr(val)});")
-                else:
-                    body_lines.append(f"  auto {out} = ({llvm_scalar_to_msl(dst_ty)})({to_expr(val)});")
-                continue
+            terminated = False
+            for line in instrs:
+                if line == "ret void":
+                    emit("return;")
+                    terminated = True
+                    break
 
-            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*select\s+i1\s+([^,]+),\s+[^ ]+\s+([^,]+),\s+[^ ]+\s+(.+)$", line)
-            if m:
-                out_ssa, cond, lhs, rhs = m.groups()
-                out = msl_id(out_ssa)
-                ssa[out_ssa] = out
-                body_lines.append(f"  auto {out} = ({to_expr(cond)} ? {to_expr(lhs)} : {to_expr(rhs)});")
-                continue
+                m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*phi\s+[^ ]+\s+(.+)$", line)
+                if m:
+                    out_ssa, incoming_raw = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    incoming_pairs = []
+                    for incoming in split_top_level(incoming_raw):
+                        pair = incoming.strip()
+                        pm = re.match(r"^\[\s*(.+)\s*,\s*%([A-Za-z0-9_.-]+)\s*\]$", pair)
+                        if pm is None:
+                            raise RuntimeError(
+                                f"Unsupported phi incoming value in Metal lowering: '{pair}'"
+                            )
+                        incoming_pairs.append((pm.group(1).strip(), pm.group(2)))
+                    if not incoming_pairs:
+                        raise RuntimeError("Malformed phi node with no incoming values")
+                    phi_expr = to_expr(incoming_pairs[-1][0])
+                    for val, pred in reversed(incoming_pairs[:-1]):
+                        pred_id = block_ids.get(pred, -1)
+                        phi_expr = (
+                            f"(__triton_pred_block == {pred_id} ? {to_expr(val)} : {phi_expr})"
+                        )
+                    emit(f"auto {out} = {phi_expr};")
+                    continue
 
-            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*getelementptr\s+[A-Za-z0-9_]+,\s+ptr(?:\s+addrspace\(\d+\))?\s+([^,]+),\s+i\d+\s+(.+)$", line)
-            if m:
-                out_ssa, base, idx = m.groups()
-                out = msl_id(out_ssa)
-                ssa[out_ssa] = out
-                body_lines.append(f"  auto {out} = {to_expr(base)} + {to_expr(idx)};")
-                continue
+                m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*(?:tail\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$", line)
+                if m:
+                    out_ssa, _, fn, args_raw = m.groups()
+                    args = [to_expr(v) for v in parse_call_args(args_raw)]
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    if fn in axis_helper_map:
+                        emit(f"auto {out} = {axis_helper_map[fn]};")
+                    elif fn.startswith("__metal_predicated_ld_global_") and len(args) == 3:
+                        emit(f"auto {out} = ({args[2]} ? *{args[1]} : {args[0]});")
+                    elif fn == "__metal_simd_shuffle_xor" and len(args) == 2:
+                        emit(f"auto {out} = simd_shuffle_xor({args[0]}, {args[1]});")
+                    elif fn == "__metal_simd_shuffle_up" and len(args) == 2:
+                        emit(f"auto {out} = simd_shuffle_up({args[0]}, {args[1]});")
+                    elif fn == "__metal_simd_shuffle" and len(args) == 2:
+                        emit(f"auto {out} = simd_shuffle({args[0]}, {args[1]});")
+                    else:
+                        emit(f"auto {out} = {fn}({', '.join(args)});")
+                    continue
 
-            m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*load\s+[^,]+,\s+ptr(?:\s+addrspace\(\d+\))?\s+(.+)$", line)
-            if m:
-                out_ssa, ptr = m.groups()
-                out = msl_id(out_ssa)
-                ssa[out_ssa] = out
-                body_lines.append(f"  auto {out} = *{to_expr(ptr)};")
-                continue
+                m = re.match(r"^(?:tail\s+)?call\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$", line)
+                if m:
+                    fn, args_raw = m.groups()
+                    args = [to_expr(v) for v in parse_call_args(args_raw)]
+                    if fn.startswith("__metal_predicated_st_global_") and len(args) == 3:
+                        emit(f"if ({args[2]}) {{ *{args[1]} = {args[0]}; }}")
+                    elif fn == "__metal_simdgroup_barrier":
+                        emit("threadgroup_barrier(mem_flags::mem_none);")
+                    else:
+                        emit(f"{fn}({', '.join(args)});")
+                    continue
 
-            m = re.match(r"^store\s+[^ ]+\s+([^,]+),\s+ptr(?:\s+addrspace\(\d+\))?\s+(.+)$", line)
-            if m:
-                val, ptr = m.groups()
-                body_lines.append(f"  *{to_expr(ptr)} = {to_expr(val)};")
-                continue
-
-            m = re.match(r"^br\s+label\s+%([A-Za-z0-9_.-]+)$", line)
-            if m:
-                body_lines.append(f"  goto {m.group(1)};")
-                continue
-
-            m = re.match(
-                r"^br\s+i1\s+([^,]+),\s+label\s+%([A-Za-z0-9_.-]+),\s+label\s+%([A-Za-z0-9_.-]+)$",
-                line,
-            )
-            if m:
-                cond, t_lbl, f_lbl = m.groups()
-                body_lines.append(
-                    f"  if ({to_expr(cond)}) goto {t_lbl}; else goto {f_lbl};"
+                m = re.match(
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)(?:\s+[A-Za-z]+)*\s+[^ ]+\s+([^,]+),\s*(.+)$",
+                    line,
                 )
-                continue
+                if m:
+                    out_ssa, op, lhs, rhs = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    lhs_expr = to_expr(lhs)
+                    rhs_expr = to_expr(rhs)
+                    if op in float_bin_map:
+                        emit(f"auto {out} = {lhs_expr} {float_bin_map[op]} {rhs_expr};")
+                    elif op == "frem":
+                        emit(f"auto {out} = fmod({lhs_expr}, {rhs_expr});")
+                    else:
+                        emit(f"auto {out} = {lhs_expr} {bin_map[op]} {rhs_expr};")
+                    continue
 
-            if line.startswith("unreachable"):
-                body_lines.append("  return;")
-                continue
+                m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*icmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$", line)
+                if m:
+                    out_ssa, pred, lhs, rhs = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    cmp_op = cmp_map.get(pred)
+                    if cmp_op is None:
+                        raise RuntimeError(f"Unsupported icmp predicate '{pred}'")
+                    emit(f"bool {out} = ({to_expr(lhs)} {cmp_op} {to_expr(rhs)});")
+                    continue
 
-            raise RuntimeError(f"Unsupported LLVM IR in Metal lowering: '{line}'")
+                m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*fcmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$", line)
+                if m:
+                    out_ssa, pred, lhs, rhs = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    lhs_expr = to_expr(lhs)
+                    rhs_expr = to_expr(rhs)
+                    emit(f"bool {out} = {fcmp_expr(pred, lhs_expr, rhs_expr)};")
+                    continue
+
+                m = re.match(
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(sext|zext|trunc|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+[^ ]+\s+(.+)\s+to\s+(.+)$",
+                    line,
+                )
+                if m:
+                    out_ssa, op, val, dst_ty = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    dst_ty = dst_ty.strip()
+                    if op in ("bitcast", "addrspacecast"):
+                        if dst_ty.startswith("ptr"):
+                            emit(f"auto {out} = {to_expr(val)};")
+                        else:
+                            emit(f"auto {out} = as_type<{llvm_scalar_to_msl(dst_ty)}>({to_expr(val)});")
+                    elif op in ("ptrtoint", "inttoptr"):
+                        emit(f"auto {out} = {to_expr(val)};")
+                    else:
+                        emit(f"auto {out} = ({llvm_scalar_to_msl(dst_ty)})({to_expr(val)});")
+                    continue
+
+                m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*freeze\s+[^ ]+\s+(.+)$", line)
+                if m:
+                    out_ssa, val = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"auto {out} = {to_expr(val)};")
+                    continue
+
+                m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*select\s+i1\s+([^,]+),\s+[^ ]+\s+([^,]+),\s+[^ ]+\s+(.+)$", line)
+                if m:
+                    out_ssa, cond, lhs, rhs = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"auto {out} = ({to_expr(cond)} ? {to_expr(lhs)} : {to_expr(rhs)});")
+                    continue
+
+                m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*getelementptr\s+[A-Za-z0-9_]+,\s+ptr(?:\s+addrspace\(\d+\))?\s+([^,]+),\s+i\d+\s+(.+)$", line)
+                if m:
+                    out_ssa, base, idx = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"auto {out} = {to_expr(base)} + {to_expr(idx)};")
+                    continue
+
+                m = re.match(r"^(%[-A-Za-z0-9._]+)\s*=\s*load\s+[^,]+,\s+ptr(?:\s+addrspace\(\d+\))?\s+(.+)$", line)
+                if m:
+                    out_ssa, ptr = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"auto {out} = *{to_expr(ptr)};")
+                    continue
+
+                m = re.match(r"^store\s+[^ ]+\s+([^,]+),\s+ptr(?:\s+addrspace\(\d+\))?\s+(.+)$", line)
+                if m:
+                    val, ptr = m.groups()
+                    emit(f"*{to_expr(ptr)} = {to_expr(val)};")
+                    continue
+
+                m = re.match(r"^br\s+label\s+%([A-Za-z0-9_.-]+)$", line)
+                if m:
+                    target = m.group(1)
+                    target_id = block_ids.get(target)
+                    if target_id is None:
+                        raise RuntimeError(
+                            f"Unknown branch target '{target}' in Metal lowering"
+                        )
+                    emit(f"__triton_pred_block = {block_id};")
+                    emit(f"__pc = {target_id};")
+                    emit("continue;")
+                    terminated = True
+                    break
+
+                m = re.match(
+                    r"^br\s+i1\s+([^,]+),\s+label\s+%([A-Za-z0-9_.-]+),\s+label\s+%([A-Za-z0-9_.-]+)$",
+                    line,
+                )
+                if m:
+                    cond, t_lbl, f_lbl = m.groups()
+                    t_id = block_ids.get(t_lbl)
+                    f_id = block_ids.get(f_lbl)
+                    if t_id is None or f_id is None:
+                        raise RuntimeError(
+                            f"Unknown branch targets '{t_lbl}'/'{f_lbl}' in Metal lowering"
+                        )
+                    emit(
+                        f"if ({to_expr(cond)}) {{ __triton_pred_block = {block_id}; __pc = {t_id}; }} "
+                        f"else {{ __triton_pred_block = {block_id}; __pc = {f_id}; }}"
+                    )
+                    emit("continue;")
+                    terminated = True
+                    break
+
+                if line.startswith("unreachable"):
+                    emit("return;")
+                    terminated = True
+                    break
+
+                raise RuntimeError(f"Unsupported LLVM IR in Metal lowering: '{line}'")
+
+            if not terminated:
+                emit("return;")
+            body_lines.append("    }")
+
+        body_lines.append("    default: return;")
+        body_lines.append("    }")
+        body_lines.append("  }")
 
         msl_lines = [
             "#include <metal_stdlib>",

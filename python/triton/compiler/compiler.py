@@ -335,7 +335,8 @@ def compile(src, target=None, options=None, _env_vars=None):
             print(f"\nOverriding kernel with file {full_name}")
             next_module = parse(full_name, ext, context)
         # If TRITON_STORE_BINARY_ONLY is 1, only store binary/json artifacts.
-        if (not store_only_binary) or (ext in ("cubin", "hsaco", "metallib", "json")):
+        binary_artifact_exts = {"json", "cubin", "hsaco", "metallib", backend.binary_ext}
+        if (not store_only_binary) or (ext in binary_artifact_exts):
             metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
         if fn_dump_manager is not None:
             fn_dump_manager.put(next_module, ir_filename)

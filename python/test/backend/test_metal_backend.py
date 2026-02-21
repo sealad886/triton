@@ -111,7 +111,7 @@ class TestMetalBackend:
         from triton.backends.compiler import GPUTarget
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
-        assert backend.binary_ext == "metallib"
+        assert backend.binary_ext == "metal"
 
     def test_parse_options(self):
         from third_party.metal.backend.compiler import MetalBackend
@@ -246,6 +246,33 @@ define void @kernel(ptr addrspace(1) %0, ptr addrspace(1) %1, i32 %2) {
         assert isinstance(binary, bytes)
         assert binary[:4] == b"MTLB"
 
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_from_lowered_cfg_with_phi(self):
+        from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+        llvm_ir = """
+define void @phi_kernel(ptr %out, i1 %cond) {
+entry:
+  br i1 %cond, label %then, label %else
+then:
+  br label %merge
+else:
+  br label %merge
+merge:
+  %v = phi i32 [ 1, %then ], [ 2, %else ]
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %v, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        opts = MetalOptions(arch="apple8")
+        binary = MetalBackend.make_metallib(msl, metadata, opts)
+        assert isinstance(binary, bytes)
+        assert binary[:4] == b"MTLB"
+
 
 # ── Metal IR generation tests ──────────────────────────────────────
 
@@ -305,6 +332,50 @@ define void @my_kernel(ptr addrspace(1) %0, ptr addrspace(1) %1, i32 %2) {
         assert "? *" in msl
         assert "if (" in msl and "*v11 = v10" in msl
 
+    def test_make_metal_ir_translates_phi_nodes(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @phi_kernel(ptr %out, i1 %cond) {
+entry:
+  br i1 %cond, label %then, label %else
+then:
+  br label %merge
+else:
+  br label %merge
+merge:
+  %v = phi i32 [ 1, %then ], [ 2, %else ]
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %v, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "__triton_pred_block" in msl
+        assert "switch (__pc)" in msl
+        assert "__triton_pred_block ==" in msl
+
+    def test_make_metal_ir_translates_fcmp_and_float_ops(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fcmp_kernel(ptr %out, float %a, float %b) {
+entry:
+  %sum = fadd float %a, %b
+  %cmp = fcmp olt float %sum, %b
+  %sel = select i1 %cmp, float %sum, float %b
+  %p = getelementptr float, ptr %out, i64 0
+  store float %sel, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert " + " in msl
+        assert "isnan" in msl
+        assert " ? " in msl
+
 
 # ── Driver tests ────────────────────────────────────────────────────
 
@@ -348,14 +419,22 @@ class TestMetalDriver:
             pass
 
         dummy = _DummyHandle()
+        dummy_metallib = _DummyHandle()
         utils = MetalUtils()
 
-        with patch.object(MetalUtils, "_load_metallib_handle", return_value=dummy):
-            direct = utils.load_binary(b"binary")
+        with patch.object(
+            MetalUtils, "_load_msl_source_handle", return_value=dummy
+        ), patch.object(
+            MetalUtils, "_load_metallib_handle", return_value=dummy_metallib
+        ):
+            direct = utils.load_binary("kernel void k() {}")
             assert direct is dummy
 
+            direct_metallib = utils.load_binary(b"MTLBdummy")
+            assert direct_metallib is dummy_metallib
+
             module, function, n_regs, n_spills, n_max_threads = utils.load_binary(
-                "kernel_name", b"binary", 0, 0
+                "kernel_name", "kernel void k() {}", 0, 0
             )
             assert module is dummy
             assert function is dummy
@@ -368,6 +447,13 @@ class TestMetalDriver:
 
         utils = MetalUtils()
         assert utils.unload_module(object()) is None
+
+    def test_flatten_runtime_args_skips_constexpr(self):
+        from third_party.metal.backend.driver import _flatten_runtime_args
+
+        ptr = object()
+        flat = _flatten_runtime_args(["*fp32", "constexpr", "i32"], [ptr, 128, 7])
+        assert flat == [("*fp32", ptr), ("i32", 7)]
 
     def test_map_python_to_cpp_type(self):
         from third_party.metal.backend.driver import MetalDriver

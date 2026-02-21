@@ -11,7 +11,6 @@ import os
 import struct
 import sys
 import threading
-from pathlib import Path
 
 from triton.backends.compiler import GPUTarget
 from triton.backends.driver import DriverBase
@@ -41,6 +40,132 @@ def _get_foundation_module():
         return None
 
 
+def _get_torch_module():
+    """Lazily import torch when available."""
+    try:
+        import torch
+
+        return torch
+    except ImportError:
+        return None
+
+
+def _is_metallib_blob(binary):
+    if not isinstance(binary, (bytes, bytearray, memoryview)):
+        return False
+    return bytes(binary[:4]) == b"MTLB"
+
+
+def _extract_num_warps(metadata):
+    if metadata is None:
+        return None
+    if isinstance(metadata, tuple) and metadata:
+        return metadata[0]
+    if isinstance(metadata, dict):
+        return metadata.get("num_warps")
+    if hasattr(metadata, "num_warps"):
+        return metadata.num_warps
+    return None
+
+
+def _resolve_kernel_name(kernel_metadata, launcher_metadata, handle):
+    kernel_name = None
+    for md in (kernel_metadata, launcher_metadata, getattr(handle, "metadata", None)):
+        if isinstance(md, dict):
+            kernel_name = md.get("name")
+        elif hasattr(md, "name"):
+            kernel_name = md.name
+        if isinstance(kernel_name, str) and kernel_name:
+            return kernel_name
+
+    if hasattr(handle, "available_kernel_names"):
+        names = handle.available_kernel_names()
+        if names:
+            return names[0]
+
+    if hasattr(handle, "library"):
+        try:
+            names = list(handle.library.functionNames())
+            if names:
+                return str(names[0])
+        except Exception:
+            pass
+    return kernel_name
+
+
+def _flatten_signature_value(sig, arg, out):
+    if isinstance(sig, tuple):
+        if not isinstance(arg, (list, tuple)) or len(sig) != len(arg):
+            raise RuntimeError("Kernel argument structure does not match signature")
+        for nested_sig, nested_arg in zip(sig, arg):
+            _flatten_signature_value(nested_sig, nested_arg, out)
+        return
+    if sig == "constexpr":
+        return
+    out.append((sig, arg))
+
+
+def _flatten_runtime_args(signature_layout, args):
+    if len(signature_layout) != len(args):
+        return [(None, arg) for arg in args]
+    flat = []
+    for sig, arg in zip(signature_layout, args):
+        _flatten_signature_value(sig, arg, flat)
+    return flat
+
+
+def _normalize_pointer_arg(arg):
+    base = getattr(arg, "base", None)
+    if base is not None and hasattr(base, "data_ptr") and hasattr(base, "dtype"):
+        return base
+    return arg
+
+
+def _normalize_scalar_arg(sig, arg):
+    torch = _get_torch_module()
+    if torch is None:
+        return arg
+
+    dtype_map = {
+        "i1": torch.bool,
+        "i8": torch.int8,
+        "i16": torch.int16,
+        "i32": torch.int32,
+        "i64": torch.int64,
+        "u1": torch.bool,
+        "u8": torch.uint8,
+        "u16": torch.uint16,
+        "u32": torch.uint32,
+        "u64": torch.uint64,
+        "fp8e4b15": torch.uint8,
+        "fp8e5": torch.uint8,
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+        "f32": torch.float32,
+        "fp32": torch.float32,
+        "fp64": torch.float64,
+    }
+    dtype = dtype_map.get(sig)
+    if dtype is None:
+        return arg
+
+    if isinstance(arg, torch.Tensor):
+        if arg.ndim == 0 and arg.dtype != dtype:
+            return arg.to(dtype=dtype)
+        return arg
+
+    if isinstance(arg, (bool, int, float)):
+        return torch.tensor(arg, dtype=dtype)
+
+    item_fn = getattr(arg, "item", None)
+    if callable(item_fn):
+        try:
+            return torch.tensor(item_fn(), dtype=dtype)
+        except Exception:
+            return arg
+    return arg
+
+
 class MetalUtils:
     """Utility class for Metal device operations."""
 
@@ -62,6 +187,7 @@ class MetalUtils:
         self._command_queue = None
         self._Metal = _get_metal_module()
         self._Foundation = _get_foundation_module()
+        self._torch = _get_torch_module()
 
     @property
     def device(self):
@@ -169,13 +295,42 @@ class MetalUtils:
             binary_bytes=binary_bytes,
         )
 
+    def _load_msl_source_handle(self, source, metadata=None):
+        metadata = metadata or {}
+        torch = self._torch or _get_torch_module()
+        if torch is None or not hasattr(torch, "mps") or not hasattr(
+            torch.mps, "compile_shader"
+        ):
+            raise RuntimeError(
+                "torch.mps.compile_shader is required for Metal runtime launches"
+            )
+
+        if isinstance(source, str):
+            source_text = source
+        elif isinstance(source, (bytes, bytearray, memoryview)):
+            source_text = bytes(source).decode("utf-8")
+        else:
+            raise TypeError(
+                "Metal source payload must be a UTF-8 string or bytes, "
+                f"got: {type(source)}"
+            )
+
+        try:
+            shader_library = torch.mps.compile_shader(source_text)
+        except Exception as e:
+            raise RuntimeError(f"Failed to compile Metal shader source: {e}")
+
+        return TorchMetalKernelHandle(
+            shader_library=shader_library, metadata=metadata, source_text=source_text
+        )
+
     def load_binary(self, *args):
         """
         Load binary with both direct and Triton runtime-compatible signatures.
 
         Supported signatures:
-        - load_binary(binary_bytes, metadata=None) -> MetalKernelHandle
-        - load_binary(name, binary_bytes, shared, device_id)
+        - load_binary(binary_or_source, metadata=None) -> kernel handle
+        - load_binary(name, binary_or_source, shared, device_id)
             -> (module, function, n_regs, n_spills, n_max_threads)
         """
         if len(args) == 0:
@@ -183,22 +338,27 @@ class MetalUtils:
 
         # Direct utility usage used by backend tests.
         if len(args) in (1, 2):
-            binary_bytes = args[0]
+            binary_or_source = args[0]
             metadata = args[1] if len(args) == 2 else None
-            return self._load_metallib_handle(binary_bytes, metadata)
+            if _is_metallib_blob(binary_or_source):
+                return self._load_metallib_handle(bytes(binary_or_source), metadata)
+            return self._load_msl_source_handle(binary_or_source, metadata)
 
         # Triton CompiledKernel runtime contract.
         if len(args) >= 4:
-            name, binary_bytes, _shared, device_id = args[:4]
+            name, binary_or_source, _shared, device_id = args[:4]
             metadata = {"name": name}
-            handle = self._load_metallib_handle(binary_bytes, metadata)
+            if _is_metallib_blob(binary_or_source):
+                handle = self._load_metallib_handle(bytes(binary_or_source), metadata)
+            else:
+                handle = self._load_msl_source_handle(binary_or_source, metadata)
             props = self.get_device_properties(device_id)
-            n_max_threads = props.get("max_threads_per_threadgroup", 1024)
+            n_max_threads = props.get("max_threads_per_threadgroup", 1024) or 1024
             return handle, handle, 0, 0, n_max_threads
 
         raise TypeError(
-            "load_binary() expected either (binary_bytes, metadata=None) "
-            "or (name, binary_bytes, shared, device_id)"
+            "load_binary() expected either (binary_or_source, metadata=None) "
+            "or (name, binary_or_source, shared, device_id)"
         )
 
     def unload_module(self, module):
@@ -227,22 +387,17 @@ class MetalUtils:
     ):
         """Launch a Metal compute kernel."""
         handle = function
-        if not isinstance(handle, MetalKernelHandle):
-            raise RuntimeError("Expected MetalKernelHandle for Metal launch")
+        if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
+            raise RuntimeError("Expected Metal kernel handle for Metal launch")
 
-        kernel_name = (
-            kernel_metadata.get("name") if isinstance(kernel_metadata, dict) else None
-        )
-        if kernel_name is None and hasattr(kernel_metadata, "name"):
-            kernel_name = kernel_metadata.name
-        if kernel_name is None and hasattr(handle, "metadata"):
-            kernel_name = handle.metadata.get("name")
+        kernel_name = _resolve_kernel_name(kernel_metadata, None, handle)
         if not isinstance(kernel_name, str) or kernel_name == "":
             raise RuntimeError(
                 f"Missing/invalid Metal kernel name in launch metadata: {kernel_name!r}"
             )
 
-        block = (256, 1, 1)  # Default threadgroup size
+        num_warps = _extract_num_warps(kernel_metadata) or 4
+        block = (max(1, int(num_warps) * 32), 1, 1)
         grid = (grid_x, grid_y, grid_z)
 
         handle.launch_kernel(
@@ -251,6 +406,48 @@ class MetalUtils:
             grid=grid,
             block=block,
         )
+
+
+class TorchMetalKernelHandle:
+    """Handle backed by torch.mps.compile_shader runtime objects."""
+
+    def __init__(self, shader_library, metadata=None, source_text=None):
+        self.library = shader_library
+        self.metadata = metadata or {}
+        self.source_text = source_text
+        self._kernels = {}
+        self._lock = threading.RLock()
+
+    def available_kernel_names(self):
+        return [name for name in dir(self.library) if not name.startswith("_")]
+
+    def get_kernel(self, name):
+        if not isinstance(name, str) or name == "":
+            raise RuntimeError(f"Invalid Metal kernel function name: {name!r}")
+        kernel = self._kernels.get(name)
+        if kernel is not None:
+            return kernel
+        with self._lock:
+            kernel = self._kernels.get(name)
+            if kernel is not None:
+                return kernel
+            fn = getattr(self.library, name, None)
+            if fn is None:
+                raise RuntimeError(f"Kernel '{name}' not found in shader library")
+            self._kernels[name] = fn
+            return fn
+
+    def launch_kernel(self, name, args=None, grid=(1, 1, 1), block=(256, 1, 1)):
+        kernel = self.get_kernel(name)
+        args = list(args) if args else []
+        gx, gy, gz = (int(grid[0]), int(grid[1]), int(grid[2]))
+        bx, by, bz = (int(block[0]), int(block[1]), int(block[2]))
+        threads = (max(1, gx * bx), max(1, gy * by), max(1, gz * bz))
+        group_size = (max(1, bx), max(1, by), max(1, bz))
+        try:
+            kernel(*args, threads=threads, group_size=group_size)
+        except Exception as e:
+            raise RuntimeError(f"Failed to launch Metal kernel '{name}': {e}")
 
 
 class MetalKernelHandle:
@@ -396,6 +593,7 @@ class MetalLauncher:
     def __init__(self, src, metadata):
         self.metadata = metadata
         self.src = src
+        self._signature_layout = list(src.signature.values()) if hasattr(src, "signature") else []
 
     def __call__(
         self,
@@ -414,35 +612,42 @@ class MetalLauncher:
             launch_enter_hook(kernel_metadata, launch_metadata)
 
         handle = function
-        if not isinstance(handle, MetalKernelHandle):
-            raise RuntimeError("Expected MetalKernelHandle for Metal launch")
+        if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
+            raise RuntimeError("Expected Metal kernel handle for Metal launch")
 
-        kernel_name = None
-        if isinstance(kernel_metadata, dict):
-            kernel_name = kernel_metadata.get("name")
-        elif hasattr(kernel_metadata, "name"):
-            kernel_name = kernel_metadata.name
-        if kernel_name is None and isinstance(self.metadata, dict):
-            kernel_name = self.metadata.get("name")
-        if kernel_name is None and hasattr(handle, "metadata"):
-            kernel_name = handle.metadata.get("name")
-        if not isinstance(kernel_name, str) or kernel_name == "":
-            try:
-                names = list(handle.library.functionNames())
-                if names:
-                    kernel_name = str(names[0])
-            except Exception:
-                pass
+        kernel_name = _resolve_kernel_name(kernel_metadata, self.metadata, handle)
         if not isinstance(kernel_name, str) or kernel_name == "":
             raise RuntimeError(
                 f"Missing/invalid Metal kernel function name: {kernel_name!r}"
             )
 
+        num_warps = (
+            _extract_num_warps(kernel_metadata)
+            or _extract_num_warps(self.metadata)
+            or _extract_num_warps(getattr(handle, "metadata", None))
+            or 4
+        )
+        block = (max(1, int(num_warps) * 32), 1, 1)
+
+        flat_args = _flatten_runtime_args(self._signature_layout, args)
+        runtime_args = []
+        for sig, arg in flat_args:
+            if isinstance(sig, str) and sig.startswith("*"):
+                runtime_args.append(_normalize_pointer_arg(arg))
+            else:
+                runtime_args.append(_normalize_scalar_arg(sig, arg))
+
+        grid = (gridX, gridY, gridZ)
+        if isinstance(handle, MetalKernelHandle):
+            # The PyObjC path dispatches threadgroups as ceil(grid/block), so pass
+            # total thread counts here to preserve Triton's grid semantics.
+            grid = (gridX * block[0], gridY * block[1], gridZ * block[2])
+
         handle.launch_kernel(
             name=kernel_name,
-            args=list(args) if args else [],
-            grid=(gridX, gridY, gridZ),
-            block=(256, 1, 1),
+            args=runtime_args,
+            grid=grid,
+            block=block,
         )
 
         if launch_exit_hook is not None:
@@ -462,11 +667,19 @@ class MetalDriver(DriverBase):
         if sys.platform != "darwin":
             return False
         metal = _get_metal_module()
-        if metal is None:
+        if metal is not None:
+            try:
+                device = metal.MTLCreateSystemDefaultDevice()
+                if device is not None:
+                    return True
+            except Exception:
+                pass
+
+        torch = _get_torch_module()
+        if torch is None:
             return False
         try:
-            device = metal.MTLCreateSystemDefaultDevice()
-            return device is not None
+            return bool(torch.backends.mps.is_available())
         except Exception:
             return False
 
