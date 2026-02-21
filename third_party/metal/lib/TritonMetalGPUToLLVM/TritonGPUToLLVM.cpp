@@ -389,6 +389,20 @@ static void lowerNvidiaArtifactsToMetal(ModuleOp mod) {
   rewriteGlobalInlineAsm(mod);
 }
 
+static void ensureSharedMemorySymbol(ModuleOp mod, unsigned addrSpace) {
+  if (mod.lookupSymbol("global_smem"))
+    return;
+
+  OpBuilder builder(mod.getContext());
+  builder.setInsertionPointToStart(mod.getBody());
+  auto i8Ty = IntegerType::get(mod.getContext(), 8);
+  auto arrayTy = LLVM::LLVMArrayType::get(i8Ty, 0);
+  LLVM::GlobalOp::create(builder, UnknownLoc::get(mod.getContext()), arrayTy,
+                         /*isConstant=*/false, LLVM::Linkage::External,
+                         "global_smem", /*value=*/Attribute(),
+                         /*alignment=*/16, addrSpace);
+}
+
 struct ConvertTritonMetalGPUToLLVM
     : public triton::impl::ConvertTritonMetalGPUToLLVMBase<ConvertTritonMetalGPUToLLVM> {
   using ConvertTritonMetalGPUToLLVMBase<
@@ -409,6 +423,7 @@ struct ConvertTritonMetalGPUToLLVM
             .getValue()
             .split(':')
             .second);
+    ensureSharedMemorySymbol(mod, targetInfo.getSharedAddressSpace());
     TritonGPUToLLVMTypeConverter typeConverter(context, option, targetInfo);
     TritonLLVMFunctionConversionTarget funcTarget(*context);
     TritonLLVMConversionTarget convTarget(*context);

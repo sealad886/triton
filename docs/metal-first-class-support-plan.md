@@ -121,8 +121,17 @@ Acceptance:
       (`arith.addf/subf/mulf/divf`) in `ConvertTritonMetalGPUToLLVM`.
 - [x] Fix compiler artifact loading for mixed Metal outputs (`.metal` source +
       `.metallib` binary) to avoid text decode faults in `CompiledKernel`.
+- [x] Stabilize phi-heavy CFG lowering by hoisting SSA declarations across
+      switch-case blocks in generated MSL.
+- [x] Lower CUDA/OCML libdevice math calls (`__nv_*`, `__ocml_*`) to MSL
+      builtins during LLVM->MSL call translation.
+- [x] Materialize `@global_smem` in Metal LLVM conversion to prevent missing
+      shared-memory base symbols during `ttg.convert_layout` lowering.
 - [ ] Extend translation coverage for complex control-flow constructs
       (phi-heavy CFGs, uncommon intrinsic patterns) used by advanced kernels.
+- [ ] Resolve remaining `tt.reduce` + `ttg.convert_layout` verifier failure
+      (`block with no terminator`, vector<1> undef) in
+      `ConvertTritonMetalGPUToLLVM`.
 
 Acceptance:
 - Kernels that lower through the Metal LLVM pipeline compile through
@@ -208,3 +217,16 @@ Acceptance:
 - 2026-02-21: Fixed `CompiledKernel` artifact loader to treat `.metallib` as a
   binary artifact even when `binary_ext` is `metal`, preventing UTF-8 decode
   crashes during mixed source/binary artifact reads.
+- 2026-02-21: Fixed CFG-scoped SSA lifetime bugs in LLVM->MSL lowering by
+  predeclaring inferred SSA temporaries at function scope; backedge-phi loop
+  kernels now compile to valid `.metallib`.
+- 2026-02-21: Added CUDA/OCML libdevice compatibility lowering in
+  LLVM->MSL translation (e.g. `__nv_expf/__nv_logf/__nv_sqrtf` to
+  `exp/log/sqrt`), unblocking math kernels that still reference shared
+  libdevice symbols.
+- 2026-02-21: Added explicit `@global_smem` symbol materialization in
+  `ConvertTritonMetalGPUToLLVM`, fixing the prior native assertion in
+  `getStackPointer` during reduction-related `ttg.convert_layout` lowering.
+- 2026-02-21: Isolated current reduction blocker to a verifier failure inside
+  LLVM conversion (`block with no terminator`, vector<1> undef) after shared
+  memory base resolution; this is now the active source-level lowering gap.

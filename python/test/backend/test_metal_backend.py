@@ -328,6 +328,37 @@ entry:
         assert isinstance(binary, bytes)
         assert binary[:4] == b"MTLB"
 
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_from_lowered_loop_with_backedge_phi(self):
+        from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+        llvm_ir = """
+define void @loop_kernel(ptr %out, i32 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i32 [ 0, %entry ], [ %next, %body ]
+  %acc = phi i32 [ 0, %entry ], [ %acc_next, %body ]
+  %cmp = icmp slt i32 %i, %n
+  br i1 %cmp, label %body, label %exit
+body:
+  %acc_next = add i32 %acc, %i
+  %next = add i32 %i, 1
+  br label %loop
+exit:
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %acc, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        opts = MetalOptions(arch="apple8")
+        binary = MetalBackend.make_metallib(msl, metadata, opts)
+        assert isinstance(binary, bytes)
+        assert binary[:4] == b"MTLB"
+
 
 # ── Metal IR generation tests ──────────────────────────────────────
 
@@ -456,6 +487,31 @@ entry:
         assert "max(" in msl
         assert "min(" in msl
         assert "= -(" in msl
+
+    def test_make_metal_ir_translates_libdevice_math_calls(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @libdevice_kernel(ptr %out, float %a) {
+entry:
+  %e = call float @__nv_expf(float %a)
+  %l = call float @__nv_logf(float %a)
+  %s = call float @__nv_sqrtf(float %a)
+  %sum = fadd float %e, %l
+  %res = fadd float %sum, %s
+  %p = getelementptr float, ptr %out, i64 0
+  store float %res, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "exp(" in msl
+        assert "log(" in msl
+        assert "sqrt(" in msl
+        assert "__nv_expf" not in msl
+        assert "__nv_logf" not in msl
+        assert "__nv_sqrtf" not in msl
 
     def test_make_metal_ir_translates_llvm_assume(self):
         from third_party.metal.backend.compiler import MetalBackend
