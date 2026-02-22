@@ -816,7 +816,7 @@ class MetalBackend(BaseBackend):
                     continue
 
                 m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(sext|zext|trunc|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$",
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(sext|zext|trunc|fptrunc|fpext|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$",
                     line,
                 )
                 if m:
@@ -1030,7 +1030,7 @@ class MetalBackend(BaseBackend):
                     continue
 
                 m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(sext|zext|trunc|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$",
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(sext|zext|trunc|fptrunc|fpext|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$",
                     line,
                 )
                 if m:

@@ -1110,3 +1110,202 @@ entry:
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
         assert "kernel void vecop_kernel" in msl
         assert "[0]" in msl or "[1]" in msl
+
+
+# ── Scalar-cast edge-type conformance ───────────────────────────────
+
+class TestMetalScalarCastEdgeTypes:
+    """Conformance tests for edge-case scalar types, casts, and complex
+    parameter signatures in the LLVM-IR-to-MSL translator."""
+
+    def test_make_metal_ir_i64_params(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @i64_kernel(ptr addrspace(1) %out, i64 %a, i64 %b) {
+entry:
+  %sum = add i64 %a, %b
+  %p = getelementptr i64, ptr addrspace(1) %out, i64 0
+  store i64 %sum, ptr addrspace(1) %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void i64_kernel" in msl
+        assert "long" in msl
+        assert "constant long&" in msl
+        assert "[[buffer(1)]]" in msl
+        assert "[[buffer(2)]]" in msl
+
+    def test_make_metal_ir_i64_arithmetic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @i64_arith_kernel(ptr addrspace(1) %out, i64 %a, i64 %b) {
+entry:
+  %sum = add i64 %a, %b
+  %prod = mul i64 %sum, %b
+  %shifted = shl i64 %prod, 2
+  %cmp = icmp sgt i64 %shifted, %a
+  %sel = select i1 %cmp, i64 %shifted, i64 %a
+  %p = getelementptr i64, ptr addrspace(1) %out, i64 0
+  store i64 %sel, ptr addrspace(1) %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void i64_arith_kernel" in msl
+        assert "long" in msl
+        assert "+" in msl
+        assert "*" in msl
+        assert "<<" in msl
+        assert ">" in msl
+        assert "?" in msl
+
+    def test_make_metal_ir_half_params(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @half_kernel(ptr addrspace(1) %out, half %a, half %b) {
+entry:
+  %sum = fadd half %a, %b
+  %p = getelementptr half, ptr addrspace(1) %out, i64 0
+  store half %sum, ptr addrspace(1) %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void half_kernel" in msl
+        assert "constant half&" in msl
+        assert "half" in msl
+        assert "[[buffer(1)]]" in msl
+        assert "[[buffer(2)]]" in msl
+
+    def test_make_metal_ir_double_to_float_trunc(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fptrunc_kernel(ptr addrspace(1) %out, double %val) {
+entry:
+  %narrow = fptrunc double %val to float
+  %p = getelementptr float, ptr addrspace(1) %out, i64 0
+  store float %narrow, ptr addrspace(1) %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void fptrunc_kernel" in msl
+        assert "constant double&" in msl
+        assert "(float)" in msl
+
+    def test_make_metal_ir_i8_to_i32_extend(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @extend_kernel(ptr addrspace(1) %out, i8 %a, i8 %b) {
+entry:
+  %sa = sext i8 %a to i32
+  %zb = zext i8 %b to i32
+  %sum = add i32 %sa, %zb
+  %p = getelementptr i32, ptr addrspace(1) %out, i64 0
+  store i32 %sum, ptr addrspace(1) %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void extend_kernel" in msl
+        assert "constant char&" in msl
+        assert "(int)" in msl
+
+    def test_make_metal_ir_multiple_ptr_types(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @mixed_ptr_kernel(ptr addrspace(1) %g_in, ptr addrspace(3) %s_buf, ptr addrspace(1) %g_out, i32 %n) {
+entry:
+  %idx = sext i32 %n to i64
+  %gp = getelementptr float, ptr addrspace(1) %g_in, i64 %idx
+  %val = load float, ptr addrspace(1) %gp
+  %sp = getelementptr float, ptr addrspace(3) %s_buf, i64 0
+  store float %val, ptr addrspace(3) %sp
+  %val2 = load float, ptr addrspace(3) %sp
+  %op = getelementptr float, ptr addrspace(1) %g_out, i64 %idx
+  store float %val2, ptr addrspace(1) %op
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void mixed_ptr_kernel" in msl
+        assert "device" in msl
+        assert "threadgroup" in msl
+        assert "[[buffer(0)]]" in msl
+        assert "[[buffer(1)]]" in msl
+        assert "[[buffer(2)]]" in msl
+        assert "[[buffer(3)]]" in msl
+
+    def test_make_metal_ir_bool_select(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @bool_select_kernel(ptr addrspace(1) %out, i32 %a, i32 %b) {
+entry:
+  %flag = trunc i32 %a to i1
+  %sel = select i1 %flag, i32 %a, i32 %b
+  %p = getelementptr i32, ptr addrspace(1) %out, i64 0
+  store i32 %sel, ptr addrspace(1) %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void bool_select_kernel" in msl
+        assert "(bool)" in msl
+        assert "?" in msl
+
+    def test_make_metal_ir_many_params(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @many_params_kernel(
+    ptr addrspace(1) %buf0,
+    ptr addrspace(1) %buf1,
+    ptr addrspace(1) %buf2,
+    i32 %s0,
+    i64 %s1,
+    float %s2,
+    half %s3,
+    i32 %s4,
+    ptr addrspace(1) %buf3,
+    i32 %s5,
+    ptr addrspace(3) %shared0,
+    i32 %s6
+) {
+entry:
+  %idx = sext i32 %s0 to i64
+  %p0 = getelementptr float, ptr addrspace(1) %buf0, i64 %idx
+  %v0 = load float, ptr addrspace(1) %p0
+  %p1 = getelementptr float, ptr addrspace(1) %buf1, i64 %idx
+  %v1 = load float, ptr addrspace(1) %p1
+  %sum = fadd float %v0, %v1
+  %p2 = getelementptr float, ptr addrspace(1) %buf2, i64 %idx
+  store float %sum, ptr addrspace(1) %p2
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void many_params_kernel" in msl
+        for i in range(12):
+            assert f"[[buffer({i})]]" in msl
+        assert "device float*" in msl
+        assert "constant int&" in msl
+        assert "constant long&" in msl
+        assert "constant float&" in msl
+        assert "constant half&" in msl
+        assert "threadgroup" in msl
