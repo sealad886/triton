@@ -405,6 +405,12 @@ class MetalUtils:
         block = (max(1, int(num_warps) * 32), 1, 1)
         grid = (grid_x, grid_y, grid_z)
 
+        # MetalKernelHandle.launch_kernel computes threadgroups as
+        # ceildiv(grid, block), so pass total-thread counts to preserve
+        # Triton's grid semantics (grid values = number of program instances).
+        if isinstance(handle, MetalKernelHandle):
+            grid = (grid_x * block[0], grid_y * block[1], grid_z * block[2])
+
         handle.launch_kernel(
             name=kernel_name,
             args=list(args) if args else [],

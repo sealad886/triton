@@ -1351,3 +1351,381 @@ entry:
         assert "constant float&" in msl
         assert "constant half&" in msl
         assert "threadgroup" in msl
+
+
+# ── Unsigned-operation correctness (AUDIT-P0-001, AUDIT-P0-002) ─────
+
+
+class TestMetalUnsignedOps:
+    """Regression tests: lshr, udiv, urem must use unsigned MSL semantics."""
+
+    def test_make_metal_ir_lshr_uses_unsigned_shift(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @lshr_kernel(ptr %out, i32 %a) {
+entry:
+  %r = lshr i32 %a, 3
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "unsigned int" in msl, "lshr must cast to unsigned before shifting"
+        assert ">>" in msl
+
+    def test_make_metal_ir_udiv_uses_unsigned_division(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @udiv_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %r = udiv i32 %a, %b
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "unsigned int" in msl, "udiv must cast to unsigned before dividing"
+
+    def test_make_metal_ir_urem_uses_unsigned_remainder(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @urem_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %r = urem i32 %a, %b
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "unsigned int" in msl, "urem must cast to unsigned before remainder"
+
+    def test_make_metal_ir_lshr_i64_uses_unsigned_long(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @lshr64_kernel(ptr %out, i64 %a) {
+entry:
+  %r = lshr i64 %a, 1
+  %p = getelementptr i64, ptr %out, i64 0
+  store i64 %r, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "unsigned long" in msl, "lshr i64 must cast to unsigned long"
+
+    def test_make_metal_ir_sdiv_stays_signed(self):
+        """Signed division (sdiv) must NOT cast to unsigned."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @sdiv_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %r = sdiv i32 %a, %b
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "unsigned" not in msl, "sdiv must use signed division (no unsigned cast)"
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_lshr_udiv_kernel(self):
+        """End-to-end: lshr+udiv kernel compiles to valid metallib."""
+        from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+        llvm_ir = """
+define void @unsigned_ops_kernel(ptr addrspace(1) %out, i32 %a, i32 %b) {
+entry:
+  %sh = lshr i32 %a, 3
+  %dv = udiv i32 %sh, %b
+  %rm = urem i32 %dv, %b
+  %p = getelementptr i32, ptr addrspace(1) %out, i64 0
+  store i32 %rm, ptr addrspace(1) %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        opts = MetalOptions(arch="apple8")
+        binary = MetalBackend.make_metallib(msl, metadata, opts)
+        assert isinstance(binary, bytes) and binary[:4] == b"MTLB"
+
+
+# ── Hex/decimal float constant handling (AUDIT-P1-001, AUDIT-P1-002)─
+
+
+class TestMetalFloatConstants:
+    """Regression tests: LLVM hex float and decimal float constants."""
+
+    def test_constant_to_msl_hex_neg_inf(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @hex_neg_inf_kernel(ptr addrspace(1) %out, ptr addrspace(1) %src, i1 %mask) {
+entry:
+  %v = call float @__metal_predicated_ld_global_f32_p1(float 0xFFF0000000000000, ptr addrspace(1) %src, i1 %mask)
+  %p = getelementptr float, ptr addrspace(1) %out, i64 0
+  store float %v, ptr addrspace(1) %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "-INFINITY" in msl, "hex float 0xFFF... (-inf) must become -INFINITY in MSL"
+        assert "0xFFF0000000000000" not in msl, "raw hex must not appear in MSL output"
+
+    def test_constant_to_msl_hex_pos_inf(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @hex_pos_inf_kernel(ptr %out) {
+entry:
+  %p = getelementptr float, ptr %out, i64 0
+  store float 0x7FF0000000000000, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "INFINITY" in msl
+
+    def test_constant_to_msl_hex_nan(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @hex_nan_kernel(ptr %out) {
+entry:
+  %p = getelementptr float, ptr %out, i64 0
+  store float 0x7FF8000000000000, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "NAN" in msl
+
+    def test_constant_to_msl_hex_regular_float(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @hex_float_kernel(ptr %out, float %a) {
+entry:
+  %r = fadd float %a, 0x3FB99999A0000000
+  %p = getelementptr float, ptr %out, i64 0
+  store float %r, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "0x3FB99999" not in msl, "hex float must be converted to decimal"
+        assert "f" in msl  # should have f suffix
+
+    def test_constant_to_msl_decimal_float_gets_suffix(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @decimal_float_kernel(ptr %out, float %a) {
+entry:
+  %r = fadd float %a, 0.000000e+00
+  %p = getelementptr float, ptr %out, i64 0
+  store float %r, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "0.000000e+00f" in msl, "decimal float must get 'f' suffix"
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_kernel_with_neg_inf(self):
+        """End-to-end: kernel with -inf constant compiles to valid metallib."""
+        from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+        llvm_ir = """
+define void @neg_inf_compile_kernel(ptr addrspace(1) %out, ptr addrspace(1) %src, i1 %mask) {
+entry:
+  %v = call float @__metal_predicated_ld_global_f32_p1(float 0xFFF0000000000000, ptr addrspace(1) %src, i1 %mask)
+  %p = getelementptr float, ptr addrspace(1) %out, i64 0
+  store float %v, ptr addrspace(1) %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        opts = MetalOptions(arch="apple8")
+        binary = MetalBackend.make_metallib(msl, metadata, opts)
+        assert isinstance(binary, bytes) and binary[:4] == b"MTLB"
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_triton_softmax_produces_correct_msl(self):
+        """The softmax kernel uses -inf and must produce correct MSL constants."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _softmax_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=float("-inf"))
+            x_max = tl.max(x, axis=0)
+            x_exp = tl.exp(x - x_max)
+            x_sum = tl.sum(x_exp, axis=0)
+            out = x_exp / x_sum
+            tl.store(out_ptr + offs, out, mask=mask)
+
+        src = triton.compiler.ASTSource(
+            fn=_softmax_kernel,
+            signature={"x_ptr": "*fp32", "out_ptr": "*fp32", "n": "i32"},
+            constexprs={"BLOCK": 128},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        msl = kernel.asm["metal"]
+        if isinstance(msl, bytes):
+            msl = msl.decode()
+        assert "0xFFF" not in msl, "hex float constant must be converted in MSL"
+        assert_metal_compilation_artifacts(kernel)
+
+
+# ── Unsigned icmp predicate correctness (AUDIT-P0-003) ──────────────
+
+
+class TestMetalUnsignedIcmp:
+    """Regression: icmp ult/ule/ugt/uge must cast operands to unsigned."""
+
+    def test_icmp_ult_uses_unsigned_cast(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @ult_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %r = icmp ult i32 %a, %b
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "(unsigned int)" in msl, "icmp ult must cast to unsigned"
+        assert "<" in msl
+
+    def test_icmp_uge_uses_unsigned_cast(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @uge_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %r = icmp uge i32 %a, %b
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "(unsigned int)" in msl, "icmp uge must cast to unsigned"
+        assert ">=" in msl
+
+    def test_icmp_ugt_uses_unsigned_cast(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @ugt_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %r = icmp ugt i32 %a, %b
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "(unsigned int)" in msl, "icmp ugt must cast to unsigned"
+        assert ">" in msl
+
+    def test_icmp_ule_uses_unsigned_cast(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @ule_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %r = icmp ule i32 %a, %b
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "(unsigned int)" in msl, "icmp ule must cast to unsigned"
+        assert "<=" in msl
+
+    def test_icmp_slt_stays_signed(self):
+        """Signed predicates must NOT cast to unsigned."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @slt_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %r = icmp slt i32 %a, %b
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "unsigned" not in msl, "icmp slt must NOT cast to unsigned"
+
+    def test_icmp_eq_stays_neutral(self):
+        """eq/ne are sign-agnostic and must NOT cast."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @eq_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %r = icmp eq i32 %a, %b
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "unsigned" not in msl, "icmp eq must NOT cast to unsigned"
+
+    def test_icmp_ult_i64_uses_unsigned_long(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @ult64_kernel(ptr %out, i64 %a, i64 %b) {
+entry:
+  %r = icmp ult i64 %a, %b
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "unsigned long" in msl, "icmp ult i64 must cast to unsigned long"
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_unsigned_icmp_kernel(self):
+        """End-to-end: kernel with unsigned comparisons compiles."""
+        from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+        llvm_ir = """
+define void @unsigned_cmp_kernel(ptr addrspace(1) %out, i32 %a, i32 %b) {
+entry:
+  %cmp = icmp ult i32 %a, %b
+  %sel = select i1 %cmp, i32 %a, i32 %b
+  %p = getelementptr i32, ptr addrspace(1) %out, i64 0
+  store i32 %sel, ptr addrspace(1) %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        opts = MetalOptions(arch="apple8")
+        binary = MetalBackend.make_metallib(msl, metadata, opts)
+        assert isinstance(binary, bytes) and binary[:4] == b"MTLB"

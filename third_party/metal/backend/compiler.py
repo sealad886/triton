@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -38,7 +39,7 @@ _RE_BINOP = re.compile(
     + r"\s+(.+)$"
 )
 _RE_ICMP = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*icmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$"
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*icmp\s+(\w+)\s+([^ ]+)\s+([^,]+),\s*(.+)$"
 )
 _RE_FCMP = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*fcmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$"
@@ -379,6 +380,18 @@ class MetalBackend(BaseBackend):
             }
             return table.get(llvm_ty, "int")
 
+        _UNSIGNED_MSL_MAP = {
+            "bool": "bool",
+            "char": "unsigned char",
+            "short": "unsigned short",
+            "int": "unsigned int",
+            "long": "unsigned long",
+        }
+
+        def unsigned_msl(msl_ty: str) -> str:
+            """Return the unsigned MSL type for an integer MSL type."""
+            return _UNSIGNED_MSL_MAP.get(msl_ty, f"unsigned {msl_ty}")
+
         def llvm_type_to_msl(llvm_ty: str) -> str:
             llvm_ty = llvm_ty.strip()
             ptr_match = re.match(r"^ptr(?:\s+addrspace\((\d+)\))?$", llvm_ty)
@@ -430,7 +443,20 @@ class MetalBackend(BaseBackend):
                 return "nullptr" if token == "null" else token
             if re.match(r"^-?[0-9]+$", token):
                 return token
-            if re.match(r"^-?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?$", token):
+            # LLVM IR hex float: 0x followed by 16 hex digits encoding an
+            # IEEE-754 double. Convert to the actual floating-point value
+            # so MSL receives a numeric literal, not a huge integer.
+            hex_m = re.match(r"^0x([0-9A-Fa-f]{16})$", token)
+            if hex_m:
+                raw = int(hex_m.group(1), 16)
+                dval = struct.unpack("d", struct.pack("Q", raw))[0]
+                import math
+                if math.isinf(dval):
+                    return "-INFINITY" if dval < 0 else "INFINITY"
+                if math.isnan(dval):
+                    return "NAN"
+                return f"{dval!r}f"
+            if re.match(r"^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$", token):
                 return token if token.endswith("f") else f"{token}f"
             return token
 
@@ -829,7 +855,7 @@ class MetalBackend(BaseBackend):
 
                 m = _RE_ICMP.match(line)
                 if m:
-                    out_ssa, _, _, _ = m.groups()
+                    out_ssa, _, _, _, _ = m.groups()
                     record_ssa_decl(out_ssa, msl_ty="bool")
                     continue
 
@@ -1008,7 +1034,7 @@ class MetalBackend(BaseBackend):
                         raise RuntimeError(
                             f"Unsupported binary operand form in Metal lowering: '{line}'"
                         )
-                    _, lhs = split_typed_value(parts[0])
+                    llvm_ty_binop, lhs = split_typed_value(parts[0])
                     _, rhs = split_typed_value(parts[1])
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
@@ -1018,6 +1044,16 @@ class MetalBackend(BaseBackend):
                         emit(f"{out} = {lhs_expr} {float_bin_map[op]} {rhs_expr};")
                     elif op == "frem":
                         emit(f"{out} = fmod({lhs_expr}, {rhs_expr});")
+                    elif op in ("lshr", "udiv", "urem"):
+                        # These LLVM IR ops have unsigned semantics but MSL
+                        # integer types are signed.  Cast to unsigned before
+                        # the operation to preserve correctness.
+                        msl_ty = llvm_scalar_to_msl(llvm_ty_binop)
+                        u_ty = unsigned_msl(msl_ty)
+                        emit(
+                            f"{out} = ({msl_ty})(({u_ty}){lhs_expr} "
+                            f"{bin_map[op]} ({u_ty}){rhs_expr});"
+                        )
                     else:
                         emit(f"{out} = {lhs_expr} {bin_map[op]} {rhs_expr};")
                     continue
@@ -1037,13 +1073,19 @@ class MetalBackend(BaseBackend):
 
                 m = _RE_ICMP.match(line)
                 if m:
-                    out_ssa, pred, lhs, rhs = m.groups()
+                    out_ssa, pred, llvm_ty_icmp, lhs, rhs = m.groups()
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
                     cmp_op = cmp_map.get(pred)
                     if cmp_op is None:
                         raise RuntimeError(f"Unsupported icmp predicate '{pred}'")
-                    emit(f"{out} = ({to_expr(lhs)} {cmp_op} {to_expr(rhs)});")
+                    lhs_expr = to_expr(lhs)
+                    rhs_expr = to_expr(rhs)
+                    if pred.startswith("u") and pred not in ("eq", "ne"):
+                        u_ty = unsigned_msl(llvm_scalar_to_msl(llvm_ty_icmp))
+                        lhs_expr = f"({u_ty}){lhs_expr}"
+                        rhs_expr = f"({u_ty}){rhs_expr}"
+                    emit(f"{out} = ({lhs_expr} {cmp_op} {rhs_expr});")
                     continue
 
                 m = _RE_FCMP.match(line)
