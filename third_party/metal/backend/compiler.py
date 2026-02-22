@@ -429,6 +429,12 @@ class MetalBackend(BaseBackend):
             spec = re.sub(r",\s*align\s+\d+$", "", spec)
             return spec.strip()
 
+        def normalize_label(label: str) -> str:
+            label = label.strip()
+            if label.startswith('"') and label.endswith('"'):
+                return label[1:-1]
+            return label
+
         func_header = re.search(
             r"define\s+void\s+@([A-Za-z_][A-Za-z0-9_]*)\s*\(",
             src,
@@ -723,6 +729,7 @@ class MetalBackend(BaseBackend):
         for line in cleaned_lines:
             if line.endswith(":"):
                 label = line[:-1].strip().replace("%", "")
+                label = normalize_label(label)
                 current_block = label
                 if label not in blocks:
                     blocks[label] = []
@@ -894,12 +901,14 @@ class MetalBackend(BaseBackend):
                     incoming_pairs = []
                     for incoming in split_top_level(incoming_raw):
                         pair = incoming.strip()
-                        pm = re.match(r"^\[\s*(.+)\s*,\s*%([A-Za-z0-9_.-]+)\s*\]$", pair)
+                        pm = re.match(r'^\[\s*(.+)\s*,\s*%(.+)\s*\]$', pair)
                         if pm is None:
                             raise RuntimeError(
                                 f"Unsupported phi incoming value in Metal lowering: '{pair}'"
                             )
-                        incoming_pairs.append((pm.group(1).strip(), pm.group(2)))
+                        incoming_pairs.append(
+                            (pm.group(1).strip(), normalize_label(pm.group(2)))
+                        )
                     if not incoming_pairs:
                         raise RuntimeError("Malformed phi node with no incoming values")
                     phi_expr = to_expr(incoming_pairs[-1][0])
@@ -1114,9 +1123,9 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = re.match(r"^br\s+label\s+%([A-Za-z0-9_.-]+)$", line)
+                m = re.match(r"^br\s+label\s+%(.+)$", line)
                 if m:
-                    target = m.group(1)
+                    target = normalize_label(m.group(1))
                     target_id = block_ids.get(target)
                     if target_id is None:
                         raise RuntimeError(
@@ -1129,11 +1138,13 @@ class MetalBackend(BaseBackend):
                     break
 
                 m = re.match(
-                    r"^br\s+i1\s+([^,]+),\s+label\s+%([A-Za-z0-9_.-]+),\s+label\s+%([A-Za-z0-9_.-]+)$",
+                    r"^br\s+i1\s+([^,]+),\s+label\s+%([^,]+),\s+label\s+%(.+)$",
                     line,
                 )
                 if m:
                     cond, t_lbl, f_lbl = m.groups()
+                    t_lbl = normalize_label(t_lbl)
+                    f_lbl = normalize_label(f_lbl)
                     t_id = block_ids.get(t_lbl)
                     f_id = block_ids.get(f_lbl)
                     if t_id is None or f_id is None:
