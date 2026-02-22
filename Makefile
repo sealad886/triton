@@ -77,6 +77,12 @@ test-proton: all
 	$(PYTEST) --tb=short -s third_party/proton/test/test_override.py
 	$(PYTEST) --tb=short -s third_party/proton/test/test_instrumentation.py::test_overhead
 
+.PHONY: test-metal
+test-metal:
+	$(PYTEST) --tb=short -v python/test/backend/test_metal_backend.py
+	$(PYTHON) scripts/test_metal_smoke.py
+	$(PYTHON) scripts/test_metal_reduction.py
+
 .PHONY: test-python
 test-python: test-unit test-regression test-interpret test-proton
 

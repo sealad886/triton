@@ -153,7 +153,7 @@ Acceptance:
       teardown markers (`cleanup_sync_pre/post`) for failure classification.
 - [x] Integrate harness execution into `scripts/test_metal_smoke.py` for
       repeated validation in both CPU and MPS modes.
-- [ ] Add automated CI artifact upload/reporting for harness run directories.
+- [x] Add automated CI artifact upload/reporting for harness run directories.
 
 Acceptance:
 - Native crashes can be localized to compute, transfer/sync, or cleanup
@@ -263,3 +263,8 @@ Acceptance:
   many-params). Total test count: 70 (all passing).
 - 2026-02-22: All Phase 1, Phase 5, and Phase 6 items now complete. Only
   remaining item: Phase 6 CI artifact upload/reporting (infrastructure task).
+- 2026-02-22: Added `metal-smoke-and-harness` job to
+  `.github/workflows/metal-macos-tests.yml` that runs smoke tests, reduction
+  tests, and uploads `artifacts/metal-harness-runs/` via
+  `actions/upload-artifact@v4` with 14-day retention. Added `test-metal`
+  Makefile target. All Phase 6 items now complete. **All phases complete.**
