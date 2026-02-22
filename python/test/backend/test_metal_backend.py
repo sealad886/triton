@@ -63,11 +63,13 @@ kernel void write_constant(
 
 # ── MetalOptions tests ──────────────────────────────────────────────
 
+
 class TestMetalOptions:
     def test_default_construction(self):
         # Must import from the backend location — this mirrors how Triton
         # discovers backends at runtime.
         from third_party.metal.backend.compiler import MetalOptions
+
         opts = MetalOptions()
         assert opts.num_warps == 4
         assert opts.num_stages == 2
@@ -76,6 +78,7 @@ class TestMetalOptions:
 
     def test_custom_options(self):
         from third_party.metal.backend.compiler import MetalOptions
+
         opts = MetalOptions(num_warps=8, debug=True, arch="apple9")
         assert opts.num_warps == 8
         assert opts.debug is True
@@ -83,6 +86,7 @@ class TestMetalOptions:
 
     def test_hash_deterministic(self):
         from third_party.metal.backend.compiler import MetalOptions
+
         opts = MetalOptions(num_warps=4, arch="apple8")
         h1 = opts.hash()
         h2 = opts.hash()
@@ -91,6 +95,7 @@ class TestMetalOptions:
 
     def test_hash_varies_with_options(self):
         from third_party.metal.backend.compiler import MetalOptions
+
         opts_a = MetalOptions(num_warps=4, arch="apple8")
         opts_b = MetalOptions(num_warps=8, arch="apple9")
         assert opts_a.hash() != opts_b.hash()
@@ -98,10 +103,12 @@ class TestMetalOptions:
 
 # ── MetalBackend interface tests ────────────────────────────────────
 
+
 class TestMetalBackend:
     def test_supports_target(self):
         from third_party.metal.backend.compiler import MetalBackend
         from triton.backends.compiler import GPUTarget
+
         assert MetalBackend.supports_target(GPUTarget("metal", "apple8", 32))
         assert not MetalBackend.supports_target(GPUTarget("cuda", 90, 32))
         assert not MetalBackend.supports_target(GPUTarget("hip", "gfx942", 64))
@@ -109,6 +116,7 @@ class TestMetalBackend:
     def test_init(self):
         from third_party.metal.backend.compiler import MetalBackend
         from triton.backends.compiler import GPUTarget
+
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
         assert backend.binary_ext == "metal"
@@ -116,6 +124,7 @@ class TestMetalBackend:
     def test_parse_options(self):
         from third_party.metal.backend.compiler import MetalBackend
         from triton.backends.compiler import GPUTarget
+
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
         opts = backend.parse_options({"num_warps": 8, "debug": True})
@@ -126,6 +135,7 @@ class TestMetalBackend:
     def test_add_stages(self):
         from third_party.metal.backend.compiler import MetalBackend
         from triton.backends.compiler import GPUTarget, Language
+
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
         opts = backend.parse_options({})
@@ -162,6 +172,7 @@ class TestMetalBackend:
     def test_load_dialects_no_error(self):
         from third_party.metal.backend.compiler import MetalBackend
         from triton.backends.compiler import GPUTarget
+
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
         # load_dialects should not raise
@@ -170,6 +181,7 @@ class TestMetalBackend:
     def test_get_module_map_empty(self):
         from third_party.metal.backend.compiler import MetalBackend
         from triton.backends.compiler import GPUTarget
+
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
         assert backend.get_module_map() == {}
@@ -177,11 +189,13 @@ class TestMetalBackend:
 
 # ── Compiler xcrun integration ──────────────────────────────────────
 
+
 class TestMetalCompilation:
     @skip_non_darwin
     @skip_no_xcrun
     def test_compile_metallib(self, metal_source):
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
         opts = MetalOptions(arch="apple8")
         metadata = {}
         binary = MetalBackend.make_metallib(metal_source, metadata, opts)
@@ -194,6 +208,7 @@ class TestMetalCompilation:
     @skip_no_xcrun
     def test_compile_trivial_kernel(self, trivial_metal_source):
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
         opts = MetalOptions(arch="apple8")
         metadata = {}
         binary = MetalBackend.make_metallib(trivial_metal_source, metadata, opts)
@@ -204,6 +219,7 @@ class TestMetalCompilation:
     @skip_no_xcrun
     def test_compile_debug_mode(self, metal_source):
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
         opts = MetalOptions(arch="apple8", debug=True)
         metadata = {}
         binary = MetalBackend.make_metallib(metal_source, metadata, opts)
@@ -212,6 +228,7 @@ class TestMetalCompilation:
 
     def test_compile_fails_without_xcrun(self, metal_source):
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
         opts = MetalOptions(arch="apple8")
         with patch("third_party.metal.backend.compiler._xcrun_path") as mock_xcrun:
             mock_xcrun.side_effect = RuntimeError("xcrun not found")
@@ -395,9 +412,11 @@ exit:
 
 # ── Metal IR generation tests ──────────────────────────────────────
 
+
 class TestMetalIRGeneration:
     def test_make_metal_ir_extracts_kernel_name(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         llvm_ir = "define void @my_kernel(ptr %arg0, i32 %arg1) {\nret void\n}"
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
@@ -406,6 +425,7 @@ class TestMetalIRGeneration:
 
     def test_make_metal_ir_pointer_args(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         llvm_ir = "define void @test_kernel(ptr %a, ptr %b, i32 %n) {\nret void\n}"
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
@@ -415,12 +435,14 @@ class TestMetalIRGeneration:
 
     def test_make_metal_ir_no_kernel_raises(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         llvm_ir = "declare void @not_a_definition()"
         with pytest.raises(RuntimeError, match="No kernel function found"):
             MetalBackend.make_metal_ir(llvm_ir, {}, None)
 
     def test_make_metal_ir_reserved_name_is_sanitized(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         llvm_ir = "define void @kernel(ptr %arg0) {\nret void\n}"
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
@@ -429,6 +451,7 @@ class TestMetalIRGeneration:
 
     def test_make_metal_ir_translates_helper_calls(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         llvm_ir = """
 define void @my_kernel(ptr addrspace(1) %0, ptr addrspace(1) %1, i32 %2) {
   %3 = call i32 @__metal_get_threadgroup_position_in_grid_x()
@@ -565,16 +588,19 @@ entry:
 
 # ── Driver tests ────────────────────────────────────────────────────
 
+
 class TestMetalDriver:
     @skip_non_darwin
     def test_driver_is_active(self):
         from third_party.metal.backend.driver import MetalDriver
+
         # On macOS with Metal hardware this should be True
         assert MetalDriver.is_active() is True
 
     @skip_non_darwin
     def test_get_current_target(self):
         from third_party.metal.backend.driver import MetalDriver
+
         driver = MetalDriver()
         target = driver.get_current_target()
         assert target.backend == "metal"
@@ -584,6 +610,7 @@ class TestMetalDriver:
     @skip_non_darwin
     def test_get_device_properties(self):
         from third_party.metal.backend.driver import MetalUtils
+
         utils = MetalUtils()
         props = utils.get_device_properties()
         assert "name" in props
@@ -643,6 +670,7 @@ class TestMetalDriver:
 
     def test_map_python_to_cpp_type(self):
         from third_party.metal.backend.driver import MetalDriver
+
         driver = MetalDriver.__new__(MetalDriver)
         assert driver.map_python_to_cpp_type("*fp32") == "MTLBufferPtr"
         assert driver.map_python_to_cpp_type("i32") == "int32_t"
@@ -651,9 +679,11 @@ class TestMetalDriver:
 
     def test_get_active_torch_device(self):
         from third_party.metal.backend.driver import MetalDriver
+
         driver = MetalDriver.__new__(MetalDriver)
         try:
             import torch
+
             device = driver.get_active_torch_device()
             assert str(device) == "mps"
         except ImportError:
@@ -662,33 +692,39 @@ class TestMetalDriver:
 
 # ── GPU family detection ────────────────────────────────────────────
 
+
 class TestGPUFamilyDetection:
     def test_detect_m1(self):
         from third_party.metal.backend.driver import _detect_gpu_family
+
         mock_device = MagicMock()
         mock_device.name.return_value = "Apple M1"
         assert _detect_gpu_family(mock_device) == "apple7"
 
     def test_detect_m2(self):
         from third_party.metal.backend.driver import _detect_gpu_family
+
         mock_device = MagicMock()
         mock_device.name.return_value = "Apple M2 Pro"
         assert _detect_gpu_family(mock_device) == "apple8"
 
     def test_detect_m3(self):
         from third_party.metal.backend.driver import _detect_gpu_family
+
         mock_device = MagicMock()
         mock_device.name.return_value = "Apple M3 Max"
         assert _detect_gpu_family(mock_device) == "apple9"
 
     def test_detect_m4(self):
         from third_party.metal.backend.driver import _detect_gpu_family
+
         mock_device = MagicMock()
         mock_device.name.return_value = "Apple M4"
         assert _detect_gpu_family(mock_device) == "apple9"
 
     def test_detect_unknown_defaults(self):
         from third_party.metal.backend.driver import _detect_gpu_family
+
         mock_device = MagicMock()
         mock_device.name.return_value = "Unknown GPU"
         assert _detect_gpu_family(mock_device) == "apple8"
@@ -696,12 +732,14 @@ class TestGPUFamilyDetection:
 
 # ── Kernel handle tests ────────────────────────────────────────────
 
+
 class TestMetalKernelHandle:
     @skip_non_darwin
     @skip_no_xcrun
     def test_load_and_get_pipeline(self, metal_source):
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
         from third_party.metal.backend.driver import MetalUtils
+
         opts = MetalOptions(arch="apple8")
         binary = MetalBackend.make_metallib(metal_source, {}, opts)
         utils = MetalUtils()
@@ -714,6 +752,7 @@ class TestMetalKernelHandle:
     def test_pipeline_caching(self, metal_source):
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
         from third_party.metal.backend.driver import MetalUtils
+
         opts = MetalOptions(arch="apple8")
         binary = MetalBackend.make_metallib(metal_source, {}, opts)
         utils = MetalUtils()
@@ -727,6 +766,7 @@ class TestMetalKernelHandle:
     def test_missing_kernel_raises(self, metal_source):
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
         from third_party.metal.backend.driver import MetalUtils
+
         opts = MetalOptions(arch="apple8")
         binary = MetalBackend.make_metallib(metal_source, {}, opts)
         utils = MetalUtils()
@@ -736,6 +776,7 @@ class TestMetalKernelHandle:
 
 
 # ── End-to-end kernel launch ────────────────────────────────────────
+
 
 class TestMetalKernelLaunch:
     @skip_non_darwin
@@ -770,6 +811,7 @@ class TestMetalKernelLaunch:
 
 
 # ── Dynamic-loop reduction kernels ──────────────────────────────────
+
 
 class TestMetalDynamicReduction:
     @skip_non_darwin
@@ -869,6 +911,7 @@ class TestMetalDynamicReduction:
 
 
 # ── Complex CFG patterns in LLVM IR ─────────────────────────────────
+
 
 class TestMetalComplexCFG:
     def test_make_metal_ir_nested_branches(self):
@@ -998,6 +1041,7 @@ entry:
 
 # ── Uncommon intrinsic patterns ─────────────────────────────────────
 
+
 class TestMetalUncommonIntrinsics:
     def test_make_metal_ir_ctpop(self):
         from third_party.metal.backend.compiler import MetalBackend
@@ -1113,6 +1157,7 @@ entry:
 
 
 # ── Scalar-cast edge-type conformance ───────────────────────────────
+
 
 class TestMetalScalarCastEdgeTypes:
     """Conformance tests for edge-case scalar types, casts, and complex
