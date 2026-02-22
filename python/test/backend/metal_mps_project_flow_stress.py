@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import time
-from functools import reduce
-from operator import mul
 
 import torch
 
 from metal_harness_utils import (
     CrashSafeRunLogger,
     RunConfig,
+    dtype_from_name,
+    numel,
     parse_common_args,
     require_mode,
     set_determinism,
@@ -34,18 +34,6 @@ kernel void fused_axpy(
     }
 }
 """
-
-
-def _dtype_from_name(name: str) -> torch.dtype:
-    if name == "float16":
-        return torch.float16
-    if name == "float32":
-        return torch.float32
-    raise ValueError(f"Unsupported dtype: {name}")
-
-
-def _numel(shape: tuple[int, ...]) -> int:
-    return int(reduce(mul, shape, 1))
 
 
 def _compute_cpu_step(x: torch.Tensor, y: torch.Tensor, alpha: float) -> torch.Tensor:
@@ -79,8 +67,8 @@ def main() -> int:
     logger.write_environment(torch, args.mode)
 
     device = torch.device(args.mode)
-    dtype = _dtype_from_name(args.dtype)
-    n = _numel(args.shape)
+    dtype = dtype_from_name(args.dtype)
+    n = numel(args.shape)
     alpha = 1.0009765625
     launch_group = min(256, max(1, n))
     transfers = 0

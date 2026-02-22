@@ -22,6 +22,31 @@ from triton import knobs
 from triton._C.libtriton import ir, llvm, passes
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 
+# ── Shared LLVM IR regex constants ──────────────────────────────────
+# Used by both the SSA declaration pass and the code generation pass
+# inside make_metal_ir to keep the two passes in sync.
+
+_SSA_NAME_RE = r"%[-A-Za-z0-9._]+"
+_LLVM_FLAGS = r"(?:\s+(?:nsw|nuw|nsz|nnan|ninf|arcp|contract|reassoc|afn|fast|exact|disjoint))*"
+
+_RE_CALL_OUT = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*(?:tail\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
+)
+_RE_BINOP = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)"
+    + _LLVM_FLAGS
+    + r"\s+(.+)$"
+)
+_RE_ICMP = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*icmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$"
+)
+_RE_FCMP = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*fcmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$"
+)
+_RE_CAST = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*(sext|zext|trunc|fptrunc|fpext|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$"
+)
+
 
 @dataclass(frozen=True)
 class MetalOptions:
@@ -258,8 +283,6 @@ class MetalBackend(BaseBackend):
         """
         uses_shared_smem = "@global_smem" in src
         shared_bytes = max(int(metadata.get("shared", 0) or 0), 1)
-
-        _LLVM_FLAGS = r"(?:\s+(?:nsw|nuw|nsz|nnan|ninf|arcp|contract|reassoc|afn|fast|exact|disjoint))*"
 
         def split_top_level(text: str, sep: str = ",") -> list[str]:
             parts = []
@@ -777,21 +800,13 @@ class MetalBackend(BaseBackend):
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(?:tail\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$",
-                    line,
-                )
+                m = _RE_CALL_OUT.match(line)
                 if m:
                     out_ssa, ret_spec, _, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=extract_call_ret_type(ret_spec))
                     continue
 
-                m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)"
-                    + _LLVM_FLAGS
-                    + r"\s+(.+)$",
-                    line,
-                )
+                m = _RE_BINOP.match(line)
                 if m:
                     out_ssa, _, operands_spec = m.groups()
                     parts = split_top_level(operands_spec)
@@ -812,28 +827,19 @@ class MetalBackend(BaseBackend):
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*icmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$",
-                    line,
-                )
+                m = _RE_ICMP.match(line)
                 if m:
                     out_ssa, _, _, _ = m.groups()
                     record_ssa_decl(out_ssa, msl_ty="bool")
                     continue
 
-                m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*fcmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$",
-                    line,
-                )
+                m = _RE_FCMP.match(line)
                 if m:
                     out_ssa, _, _, _ = m.groups()
                     record_ssa_decl(out_ssa, msl_ty="bool")
                     continue
 
-                m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(sext|zext|trunc|fptrunc|fpext|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$",
-                    line,
-                )
+                m = _RE_CAST.match(line)
                 if m:
                     out_ssa, _, _, dst_ty = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=dst_ty.strip())
@@ -948,10 +954,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {phi_expr};")
                     continue
 
-                m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(?:tail\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$",
-                    line,
-                )
+                m = _RE_CALL_OUT.match(line)
                 if m:
                     out_ssa, _, fn, args_raw = m.groups()
                     args = [to_expr(v) for v in parse_call_args(args_raw)]
@@ -997,12 +1000,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{fn}({', '.join(args)});")
                     continue
 
-                m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)"
-                    + _LLVM_FLAGS
-                    + r"\s+(.+)$",
-                    line,
-                )
+                m = _RE_BINOP.match(line)
                 if m:
                     out_ssa, op, operands_spec = m.groups()
                     parts = split_top_level(operands_spec)
@@ -1037,10 +1035,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = -({to_expr(val)});")
                     continue
 
-                m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*icmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$",
-                    line,
-                )
+                m = _RE_ICMP.match(line)
                 if m:
                     out_ssa, pred, lhs, rhs = m.groups()
                     out = msl_id(out_ssa)
@@ -1051,10 +1046,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = ({to_expr(lhs)} {cmp_op} {to_expr(rhs)});")
                     continue
 
-                m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*fcmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$",
-                    line,
-                )
+                m = _RE_FCMP.match(line)
                 if m:
                     out_ssa, pred, lhs, rhs = m.groups()
                     out = msl_id(out_ssa)
@@ -1064,10 +1056,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {fcmp_expr(pred, lhs_expr, rhs_expr)};")
                     continue
 
-                m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(sext|zext|trunc|fptrunc|fpext|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$",
-                    line,
-                )
+                m = _RE_CAST.match(line)
                 if m:
                     out_ssa, op, src_spec, dst_ty = m.groups()
                     out = msl_id(out_ssa)

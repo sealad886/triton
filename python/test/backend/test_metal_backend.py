@@ -27,6 +27,13 @@ skip_no_xcrun = pytest.mark.skipif(
 )
 
 
+def assert_metal_compilation_artifacts(kernel):
+    """Verify that a compiled kernel contains LLIR, MSL source, and a valid metallib."""
+    assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
+    assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
+    assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+
+
 @pytest.fixture
 def metal_source():
     """Simple Metal compute kernel for testing."""
@@ -317,9 +324,7 @@ merge:
             constexprs={"BLOCK": 128},
         )
         kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
-        assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
-        assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
-        assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+        assert_metal_compilation_artifacts(kernel)
 
     @skip_non_darwin
     @skip_no_xcrun
@@ -350,9 +355,7 @@ merge:
             constexprs={"BM": 16, "BN": 32},
         )
         kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
-        assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
-        assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
-        assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+        assert_metal_compilation_artifacts(kernel)
 
     @skip_non_darwin
     @skip_no_xcrun
@@ -841,9 +844,7 @@ class TestMetalDynamicReduction:
             constexprs={"BLOCK": 128},
         )
         kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
-        assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
-        assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
-        assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+        assert_metal_compilation_artifacts(kernel)
 
     @skip_non_darwin
     @skip_no_xcrun
@@ -872,9 +873,7 @@ class TestMetalDynamicReduction:
             constexprs={"BLOCK": 128},
         )
         kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
-        assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
-        assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
-        assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+        assert_metal_compilation_artifacts(kernel)
 
     @skip_non_darwin
     @skip_no_xcrun
@@ -905,9 +904,7 @@ class TestMetalDynamicReduction:
             constexprs={"BLOCK": 128},
         )
         kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
-        assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
-        assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
-        assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+        assert_metal_compilation_artifacts(kernel)
 
 
 # ── Complex CFG patterns in LLVM IR ─────────────────────────────────

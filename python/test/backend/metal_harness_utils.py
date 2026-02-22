@@ -17,6 +17,28 @@ from typing import Any
 
 import numpy as np
 
+from functools import reduce
+from operator import mul
+
+
+def dtype_from_name(name: str):
+    """Convert a dtype name string to a torch dtype.
+
+    Import torch lazily so the module can be imported without torch installed.
+    """
+    import torch
+
+    if name == "float16":
+        return torch.float16
+    if name == "float32":
+        return torch.float32
+    raise ValueError(f"Unsupported dtype: {name}")
+
+
+def numel(shape: tuple[int, ...]) -> int:
+    """Return the number of elements for a given shape tuple."""
+    return int(reduce(mul, shape, 1))
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

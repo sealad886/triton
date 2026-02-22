@@ -93,6 +93,15 @@ def _resolve_kernel_name(kernel_metadata, launcher_metadata, handle):
     return kernel_name
 
 
+def _resolve_and_validate_kernel_name(kernel_metadata, launcher_metadata, handle):
+    kernel_name = _resolve_kernel_name(kernel_metadata, launcher_metadata, handle)
+    if not isinstance(kernel_name, str) or kernel_name == "":
+        raise RuntimeError(
+            f"Missing/invalid Metal kernel name in launch metadata: {kernel_name!r}"
+        )
+    return kernel_name
+
+
 def _flatten_signature_value(sig, arg, out):
     if isinstance(sig, tuple):
         if not isinstance(arg, (list, tuple)) or len(sig) != len(arg):
@@ -390,11 +399,7 @@ class MetalUtils:
         if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
             raise RuntimeError("Expected Metal kernel handle for Metal launch")
 
-        kernel_name = _resolve_kernel_name(kernel_metadata, None, handle)
-        if not isinstance(kernel_name, str) or kernel_name == "":
-            raise RuntimeError(
-                f"Missing/invalid Metal kernel name in launch metadata: {kernel_name!r}"
-            )
+        kernel_name = _resolve_and_validate_kernel_name(kernel_metadata, None, handle)
 
         num_warps = _extract_num_warps(kernel_metadata) or 4
         block = (max(1, int(num_warps) * 32), 1, 1)
@@ -615,11 +620,7 @@ class MetalLauncher:
         if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
             raise RuntimeError("Expected Metal kernel handle for Metal launch")
 
-        kernel_name = _resolve_kernel_name(kernel_metadata, self.metadata, handle)
-        if not isinstance(kernel_name, str) or kernel_name == "":
-            raise RuntimeError(
-                f"Missing/invalid Metal kernel function name: {kernel_name!r}"
-            )
+        kernel_name = _resolve_and_validate_kernel_name(kernel_metadata, self.metadata, handle)
 
         num_warps = (
             _extract_num_warps(kernel_metadata)

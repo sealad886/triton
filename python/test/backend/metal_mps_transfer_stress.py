@@ -3,31 +3,19 @@
 from __future__ import annotations
 
 import time
-from functools import reduce
-from operator import mul
 
 import torch
 
 from metal_harness_utils import (
     CrashSafeRunLogger,
     RunConfig,
+    dtype_from_name,
+    numel,
     parse_common_args,
     require_mode,
     set_determinism,
     sync_mode,
 )
-
-
-def _dtype_from_name(name: str) -> torch.dtype:
-    if name == "float16":
-        return torch.float16
-    if name == "float32":
-        return torch.float32
-    raise ValueError(f"Unsupported dtype: {name}")
-
-
-def _numel(shape: tuple[int, ...]) -> int:
-    return int(reduce(mul, shape, 1))
 
 
 def main() -> int:
@@ -57,8 +45,8 @@ def main() -> int:
     logger.write_environment(torch, args.mode)
 
     device = torch.device(args.mode)
-    dtype = _dtype_from_name(args.dtype)
-    n = _numel(args.shape)
+    dtype = dtype_from_name(args.dtype)
+    n = numel(args.shape)
     transfer_count = 0
     last_checksum = 0.0
     started = time.perf_counter()
