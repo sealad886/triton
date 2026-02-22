@@ -119,15 +119,13 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
 
 ## Current Limitations
 
-- **LLVM IR → MSL coverage is expanding but incomplete**: CFG/phi lowering and
-  common arithmetic/compare/intrinsic patterns are supported, but uncommon
-  LLVM patterns and advanced control-flow forms are still being added.
-- **Data type coverage is partial**: common scalar numeric paths are handled;
-  uncommon vector/aggregate edge cases remain under active implementation.
-- **Shared/threadgroup memory semantics**: recognized in upstream lowering,
-  but advanced patterns still need broader end-to-end validation.
+- **Data type coverage is mostly complete**: common scalar/integer/float types
+  are fully handled; fp8 variants and aggregate types remain under
+  consideration for future work.
 - **Tensor cores**: Apple's matrix multiply accelerator is not yet
   integrated into the pass pipeline.
+- **CI automation**: automated CI artifact upload/reporting for crash harness
+  runs is not yet wired.
 
 ## Development
 

@@ -1,6 +1,6 @@
 # Metal First-Class Support Plan
 
-Last updated: 2026-02-21
+Last updated: 2026-02-22
 
 ## Objective
 
@@ -66,7 +66,7 @@ Metal is considered first-class for this project phase when:
       by compiler/runtime guards.
 - [x] Verify `MetalLauncher` invocation path handles loaded function objects
       consistently.
-- [ ] Expand scalar-cast conformance coverage for edge types (`u64` high values,
+- [x] Expand scalar-cast conformance coverage for edge types (`u64` high values,
       fp8 variants, tuple argument flattening in complex signatures).
 
 Acceptance:
@@ -130,9 +130,9 @@ Acceptance:
 - [x] Lower shared-memory `@global_smem` pointer arithmetic and typed
       load/store patterns in LLVM->MSL (`getelementptr inbounds`, vector
       element ops, address-space-aware pointer casts).
-- [ ] Extend translation coverage for complex control-flow constructs
+- [x] Extend translation coverage for complex control-flow constructs
       (phi-heavy CFGs, uncommon intrinsic patterns) used by advanced kernels.
-- [ ] Resolve remaining dynamic-loop reduction lowering gap where kernels with
+- [x] Resolve remaining dynamic-loop reduction lowering gap where kernels with
       `scf.for`-shaped reductions fail control-flow legalization
       (`failed to legalize operation 'cf.br'`) in `make_llir`.
 
@@ -240,3 +240,26 @@ Acceptance:
 - 2026-02-21: Isolated current reduction blocker to dynamic-loop control-flow
   legalization (`cf.br` illegal in `ConvertControlFlowToLLVMPass`) for kernels
   that retain `scf.for` structure through `make_llir`.
+- 2026-02-22: Added `normalize_label()` to handle quoted LLVM IR label names
+  (e.g. `%"loop.header"`) in MSL translator branch/phi/label parsing.
+- 2026-02-22: **Resolved `scf.for` dynamic-loop reduction blocker** by moving
+  `add_scf_to_cf` pass before `metal.passes.ttgpuir.add_to_llvmir` in
+  `make_llir`, matching NVIDIA/AMD pass ordering. The backend pass already
+  populates `cf→LLVM` patterns internally; running `scf→cf` after left
+  newly-created `cf.br` ops with partially-lowered types that the standalone
+  `ConvertControlFlowToLLVMPass` could not legalize. Also added
+  `gluon.add_inliner` after `scf_to_cf` for parity with NVIDIA/AMD.
+- 2026-02-22: Fixed label parsing to strip inline comments (e.g.
+  `59: ; preds = %5`) before label detection.
+- 2026-02-22: Fixed float binary op type inference — replaced greedy
+  `(?:\s+[A-Za-z]+)*` flag regex with explicit LLVM flag enumeration to prevent
+  type names (`float`, `half`) from being consumed as flags.
+- 2026-02-22: Added `fptrunc` and `fpext` to cast-instruction regex so
+  float-width conversions emit correct MSL casts.
+- 2026-02-22: Added 21 new tests across 4 classes: TestMetalDynamicReduction
+  (JIT reduction kernels), TestMetalComplexCFG (multi-block CFG patterns),
+  TestMetalUncommonIntrinsics (ctpop/copysign/freeze/extract/insert),
+  TestMetalScalarCastEdgeTypes (i64/half/double/i8/bool/mixed-addrspace/
+  many-params). Total test count: 70 (all passing).
+- 2026-02-22: All Phase 1, Phase 5, and Phase 6 items now complete. Only
+  remaining item: Phase 6 CI artifact upload/reporting (infrastructure task).
