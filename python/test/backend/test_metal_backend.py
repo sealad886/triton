@@ -767,3 +767,346 @@ class TestMetalKernelLaunch:
         # Note: this test runs on real GPU hardware
         # We just verify no crash — readback verification depends on
         # Metal buffer storage mode.
+
+
+# ── Dynamic-loop reduction kernels ──────────────────────────────────
+
+class TestMetalDynamicReduction:
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_triton_reduce_sum_1d(self):
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _reduce_sum_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            total = tl.sum(x, axis=0)
+            if pid == 0:
+                tl.store(out_ptr, total)
+
+        src = triton.compiler.ASTSource(
+            fn=_reduce_sum_kernel,
+            signature={
+                "x_ptr": "*fp32",
+                "out_ptr": "*fp32",
+                "n": "i32",
+            },
+            constexprs={"BLOCK": 128},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
+        assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
+        assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_triton_reduce_max_1d(self):
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _reduce_max_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=float("-inf"))
+            mx = tl.max(x, axis=0)
+            if pid == 0:
+                tl.store(out_ptr, mx)
+
+        src = triton.compiler.ASTSource(
+            fn=_reduce_max_kernel,
+            signature={
+                "x_ptr": "*fp32",
+                "out_ptr": "*fp32",
+                "n": "i32",
+            },
+            constexprs={"BLOCK": 128},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
+        assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
+        assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_triton_reduce_softmax(self):
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _softmax_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=float("-inf"))
+            x_max = tl.max(x, axis=0)
+            x_exp = tl.exp(x - x_max)
+            x_sum = tl.sum(x_exp, axis=0)
+            out = x_exp / x_sum
+            tl.store(out_ptr + offs, out, mask=mask)
+
+        src = triton.compiler.ASTSource(
+            fn=_softmax_kernel,
+            signature={
+                "x_ptr": "*fp32",
+                "out_ptr": "*fp32",
+                "n": "i32",
+            },
+            constexprs={"BLOCK": 128},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
+        assert "metal" in kernel.asm and b"kernel void" in kernel.asm["metal"]
+        assert "metallib" in kernel.asm and kernel.asm["metallib"][:4] == b"MTLB"
+
+
+# ── Complex CFG patterns in LLVM IR ─────────────────────────────────
+
+class TestMetalComplexCFG:
+    def test_make_metal_ir_nested_branches(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @nested_branch_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %c0 = icmp sgt i32 %a, 0
+  br i1 %c0, label %outer_then, label %outer_else
+outer_then:
+  %c1 = icmp sgt i32 %b, 10
+  br i1 %c1, label %inner_then, label %inner_else
+inner_then:
+  br label %inner_merge
+inner_else:
+  br label %inner_merge
+inner_merge:
+  %iv = phi i32 [ 100, %inner_then ], [ 200, %inner_else ]
+  br label %final
+outer_else:
+  br label %final
+final:
+  %fv = phi i32 [ %iv, %inner_merge ], [ 300, %outer_else ]
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %fv, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void nested_branch_kernel" in msl
+        assert "__triton_pred_block" in msl
+        assert "switch (__pc)" in msl
+
+    def test_make_metal_ir_switch_like_cascade(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @cascade_kernel(ptr %out, i32 %sel) {
+entry:
+  %c0 = icmp eq i32 %sel, 0
+  br i1 %c0, label %case0, label %check1
+check1:
+  %c1 = icmp eq i32 %sel, 1
+  br i1 %c1, label %case1, label %check2
+check2:
+  %c2 = icmp eq i32 %sel, 2
+  br i1 %c2, label %case2, label %default_case
+case0:
+  br label %done
+case1:
+  br label %done
+case2:
+  br label %done
+default_case:
+  br label %done
+done:
+  %r = phi i32 [ 10, %case0 ], [ 20, %case1 ], [ 30, %case2 ], [ 99, %default_case ]
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void cascade_kernel" in msl
+        assert "__triton_pred_block ==" in msl
+        # Four-way phi must produce nested ternaries
+        assert "?" in msl
+
+    def test_make_metal_ir_loop_with_multiple_exits(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @multi_exit_kernel(ptr %out, i32 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i32 [ 0, %entry ], [ %next, %body ]
+  %acc = phi i32 [ 0, %entry ], [ %acc2, %body ]
+  %bound = icmp slt i32 %i, %n
+  br i1 %bound, label %body, label %exit_normal
+body:
+  %acc2 = add i32 %acc, %i
+  %early = icmp eq i32 %acc2, 42
+  %next = add i32 %i, 1
+  br i1 %early, label %exit_early, label %loop
+exit_early:
+  br label %merge
+exit_normal:
+  br label %merge
+merge:
+  %result = phi i32 [ %acc2, %exit_early ], [ %acc, %exit_normal ]
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %result, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void multi_exit_kernel" in msl
+        assert "__triton_pred_block" in msl
+        assert "continue;" in msl
+
+    def test_make_metal_ir_quoted_labels(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @quoted_label_kernel(ptr %out, i1 %cond) {
+entry:
+  br i1 %cond, label %"loop.header", label %"exit.block"
+"loop.header":
+  br label %"exit.block"
+"exit.block":
+  %v = phi i32 [ 1, %"loop.header" ], [ 2, %entry ]
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %v, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void quoted_label_kernel" in msl
+        assert "__triton_pred_block ==" in msl
+
+
+# ── Uncommon intrinsic patterns ─────────────────────────────────────
+
+class TestMetalUncommonIntrinsics:
+    def test_make_metal_ir_ctpop(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @ctpop_kernel(ptr %out, i32 %val) {
+entry:
+  %pc = call i32 @llvm.ctpop.i32(i32 %val)
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %pc, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "popcount(" in msl
+        assert "llvm.ctpop" not in msl
+
+    def test_make_metal_ir_copysign(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @copysign_kernel(ptr %out, float %mag, float %sgn) {
+entry:
+  %r = call float @llvm.copysign.f32(float %mag, float %sgn)
+  %p = getelementptr float, ptr %out, i64 0
+  store float %r, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "copysign(" in msl
+        assert "llvm.copysign" not in msl
+
+    def test_make_metal_ir_exp2_log2(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @exp2_log2_kernel(ptr %out, float %a) {
+entry:
+  %e = call float @llvm.exp2.f32(float %a)
+  %l = call float @llvm.log2.f32(float %e)
+  %p = getelementptr float, ptr %out, i64 0
+  store float %l, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "exp2(" in msl
+        assert "log2(" in msl
+        assert "llvm.exp2" not in msl
+        assert "llvm.log2" not in msl
+
+    def test_make_metal_ir_ocml_math(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @ocml_kernel(ptr %out, float %a) {
+entry:
+  %e = call float @__ocml_exp_f32(float %a)
+  %s = call float @__ocml_sin_f32(float %a)
+  %sum = fadd float %e, %s
+  %p = getelementptr float, ptr %out, i64 0
+  store float %sum, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "exp(" in msl
+        assert "sin(" in msl
+        assert "__ocml_exp" not in msl
+        assert "__ocml_sin" not in msl
+
+    def test_make_metal_ir_freeze_instruction(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @freeze_kernel(ptr %out, i32 %a) {
+entry:
+  %f = freeze i32 %a
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %f, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void freeze_kernel" in msl
+        # freeze should pass through the value
+        assert "= arg1;" in msl or "= v_a;" in msl or "arg1" in msl
+
+    def test_make_metal_ir_extractelement_insertelement(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @vecop_kernel(ptr %out, float %a, float %b) {
+entry:
+  %v0 = insertelement <4 x float> undef, float %a, i32 0
+  %v1 = insertelement <4 x float> %v0, float %b, i32 1
+  %e = extractelement <4 x float> %v1, i32 0
+  %p = getelementptr float, ptr %out, i64 0
+  store float %e, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "kernel void vecop_kernel" in msl
+        assert "[0]" in msl or "[1]" in msl

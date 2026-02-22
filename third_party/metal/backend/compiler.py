@@ -184,6 +184,18 @@ class MetalBackend(BaseBackend):
         pm.enable_debug()
         passes.ttgpuir.add_combine_tensor_select_and_if(pm)
         passes.ttgpuir.add_allocate_warp_groups(pm)
+
+        # Lower structured control flow (scf.for/if) to cf dialect BEFORE
+        # the backend-specific GPU→LLVM pass, matching NVIDIA/AMD ordering.
+        # The backend pass populates cf→LLVM patterns internally with its
+        # Triton-aware type converter. If scf→cf runs AFTER add_to_llvmir,
+        # the resulting cf.br ops carry partially-lowered types that the
+        # standalone ConvertControlFlowToLLVMPass cannot legalize.
+        passes.convert.add_scf_to_cf(pm)
+
+        if hasattr(passes, "gluon") and hasattr(passes.gluon, "add_inliner"):
+            passes.gluon.add_inliner(pm)
+
         if hasattr(passes.convert, "add_index_to_llvmir"):
             passes.convert.add_index_to_llvmir(pm)
 
@@ -196,7 +208,6 @@ class MetalBackend(BaseBackend):
         passes.ttgpuir.add_canonicalize_llvm_ir(pm)
         passes.common.add_cse(pm)
 
-        passes.convert.add_scf_to_cf(pm)
         passes.convert.add_cf_to_llvmir(pm)
         passes.convert.add_arith_to_llvmir(pm)
         passes.common.add_canonicalizer(pm)
@@ -246,6 +257,8 @@ class MetalBackend(BaseBackend):
         """
         uses_shared_smem = "@global_smem" in src
         shared_bytes = max(int(metadata.get("shared", 0) or 0), 1)
+
+        _LLVM_FLAGS = r"(?:\s+(?:nsw|nuw|nsz|nnan|ninf|arcp|contract|reassoc|afn|fast|exact|disjoint))*"
 
         def split_top_level(text: str, sep: str = ",") -> list[str]:
             parts = []
@@ -719,7 +732,8 @@ class MetalBackend(BaseBackend):
             if not line:
                 continue
             line = re.sub(r",\s*!dbg\s*![0-9]+.*$", "", line)
-            if line.startswith(";"):
+            line = re.sub(r"\s*;.*$", "", line).rstrip()
+            if not line:
                 continue
             cleaned_lines.append(line)
 
@@ -727,8 +741,9 @@ class MetalBackend(BaseBackend):
         block_order = ["entry"]
         current_block = "entry"
         for line in cleaned_lines:
-            if line.endswith(":"):
-                label = line[:-1].strip().replace("%", "")
+            label_match = re.match(r'^([A-Za-z0-9_."]+):$', line)
+            if label_match:
+                label = label_match.group(1).replace("%", "")
                 label = normalize_label(label)
                 current_block = label
                 if label not in blocks:
@@ -767,7 +782,7 @@ class MetalBackend(BaseBackend):
                     continue
 
                 m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)(?:\s+[A-Za-z]+)*\s+(.+)$",
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)" + _LLVM_FLAGS + r"\s+(.+)$",
                     line,
                 )
                 if m:
@@ -780,7 +795,7 @@ class MetalBackend(BaseBackend):
                     continue
 
                 m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*fneg(?:\s+[A-Za-z]+)*\s+(.+?)\s+(.+)$",
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*fneg" + _LLVM_FLAGS + r"\s+(.+?)\s+(.+)$",
                     line,
                 )
                 if m:
@@ -958,7 +973,7 @@ class MetalBackend(BaseBackend):
                     continue
 
                 m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)(?:\s+[A-Za-z]+)*\s+(.+)$",
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)" + _LLVM_FLAGS + r"\s+(.+)$",
                     line,
                 )
                 if m:
@@ -983,7 +998,7 @@ class MetalBackend(BaseBackend):
                     continue
 
                 m = re.match(
-                    r"^(%[-A-Za-z0-9._]+)\s*=\s*fneg(?:\s+[A-Za-z]+)*\s+[^ ]+\s+(.+)$",
+                    r"^(%[-A-Za-z0-9._]+)\s*=\s*fneg" + _LLVM_FLAGS + r"\s+[^ ]+\s+(.+)$",
                     line,
                 )
                 if m:
