@@ -4507,3 +4507,45 @@ define void @collision_kernel(ptr %out, i32 %n) {
         assert len(int_decls) >= 2, (
             f"Expected at least 2 distinct x_0* declarations; got: {int_decls}"
         )
+
+
+class TestMetalAudit2AttrGroupWithDebugMetadata:
+    """AUDIT2-001: Attr-group refs masked by debug metadata on same line."""
+
+    def test_call_attr_group_before_dbg(self):
+        """#N before ,!dbg must be stripped by the second cleaning pass."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @attrdbg_kernel(ptr %out) {
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x() #3, !dbg !5
+  store i32 %tid, ptr %out
+  ret void
+}
+!llvm.dbg.cu = !{}
+!5 = !{}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "thread_position_in_threadgroup.x" in msl, (
+            "Call with #N before !dbg was not matched after line cleaning"
+        )
+
+    def test_void_call_attr_group_before_comment(self):
+        """#N before ; comment must be stripped."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @attrcomment_kernel(ptr %p) {
+  call void @llvm.lifetime.start.p0(i64 4, ptr %p) #1 ; mark start
+  call void @llvm.lifetime.end.p0(i64 4, ptr %p) #1 ; mark end
+  ret void
+}
+declare void @llvm.lifetime.start.p0(i64, ptr)
+declare void @llvm.lifetime.end.p0(i64, ptr)
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "UNSUPPORTED" not in msl, (
+            "Void call with #N before ; comment was not cleaned properly"
+        )

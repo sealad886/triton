@@ -1277,6 +1277,10 @@ class MetalBackend(BaseBackend):
             # Combined line-cleaning: strip debug metadata, trailing
             # comments, and attribute-group references in one pass.
             line = _RE_LINE_CLEAN.sub("", line).rstrip()
+            # Second pass: catch attribute-group refs (e.g. " #3") that
+            # were masked by debug metadata or comments on the same line.
+            if "#" in line:
+                line = _RE_ATTR_GROUP_STRIP.sub("", line).rstrip()
             if not line:
                 continue
             cleaned_lines.append(line)
