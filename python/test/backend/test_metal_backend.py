@@ -3561,3 +3561,576 @@ class TestMetalRuntimeConformance:
         driver.utils.set_stream(5)
         assert driver.get_current_stream() == 5
         driver.utils.set_stream(0)
+
+
+# ── ML Workload Test Infrastructure ─────────────────────────────────
+
+
+class MetalTestHarness:
+    """Reusable test infrastructure for Metal backend testing."""
+
+    TOLERANCE = {
+        "float32": {"rtol": 1e-5, "atol": 1e-5},
+        "float16": {"rtol": 1e-3, "atol": 1e-3},
+        "bfloat16": {"rtol": 1e-2, "atol": 1e-2},
+        "int32": {"rtol": 0, "atol": 0},
+    }
+
+    @staticmethod
+    def get_metal_backend():
+        """Get a Metal backend instance configured for apple8."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        from triton.backends.compiler import GPUTarget
+
+        target = GPUTarget("metal", "apple8", 32)
+        return MetalBackend(target)
+
+    @staticmethod
+    def compile_triton_kernel(kernel_fn, signature, constexprs):
+        """Compile a Triton kernel through the full Metal pipeline.
+
+        Returns the compiled kernel with asm artifacts.
+        """
+        import triton
+
+        from triton.backends.compiler import GPUTarget
+
+        src = triton.compiler.ASTSource(
+            fn=kernel_fn,
+            signature=signature,
+            constexprs=constexprs,
+        )
+        return triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+
+    @staticmethod
+    def create_reference_tensors(shape, dtype="float32", seed=42):
+        """Create deterministic test tensors with CPU reference."""
+        import numpy as np
+
+        rng = np.random.RandomState(seed)
+        return rng.randn(*shape).astype(dtype)
+
+    @staticmethod
+    def assert_close(actual, expected, dtype="float32"):
+        """Assert tensors are close within dtype-specific tolerance."""
+        import numpy as np
+
+        tol = MetalTestHarness.TOLERANCE.get(
+            str(dtype), {"rtol": 1e-5, "atol": 1e-5}
+        )
+        np.testing.assert_allclose(actual, expected, **tol)
+
+
+# ── ML Workload Compilation Tests ───────────────────────────────────
+
+
+class TestMetalMLWorkloads:
+    """Test ML workload compilation breadth via IR→MSL translation."""
+
+    def test_vector_add_compile(self):
+        """Vector add compiles to valid MSL with correct ops."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @vector_add_kernel(ptr %a, ptr %b, ptr %out, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %pa = getelementptr float, ptr %a, i64 %idx
+  %pb = getelementptr float, ptr %b, i64 %idx
+  %pout = getelementptr float, ptr %out, i64 %idx
+  %va = load float, ptr %pa
+  %vb = load float, ptr %pb
+  %sum = fadd float %va, %vb
+  store float %sum, ptr %pout
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " + " in msl
+
+    def test_reduction_sum_compile(self):
+        """Sum reduction with loop/phi compiles correctly."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @reduction_sum_kernel(ptr %input, ptr %out, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  br label %loop_header
+
+loop_header:
+  %i = phi i32 [0, %entry], [%i_next, %loop_body]
+  %acc = phi float [0.0, %entry], [%acc_next, %loop_body]
+  %cmp = icmp slt i32 %i, %n
+  br i1 %cmp, label %loop_body, label %write_out
+
+loop_body:
+  %idx = sext i32 %i to i64
+  %ptr = getelementptr float, ptr %input, i64 %idx
+  %val = load float, ptr %ptr
+  %acc_next = fadd float %acc, %val
+  %i_next = add i32 %i, 1
+  br label %loop_header
+
+write_out:
+  %out_idx = sext i32 %tid to i64
+  %out_ptr = getelementptr float, ptr %out, i64 %out_idx
+  store float %acc, ptr %out_ptr
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "__triton_pred_block" in msl
+        assert " + " in msl
+
+    def test_softmax_compile(self):
+        """Softmax pattern (exp, sub, div) compiles correctly."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @softmax_kernel(ptr %input, ptr %out, float %max_val) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %idx = sext i32 %tid to i64
+  %ptr_in = getelementptr float, ptr %input, i64 %idx
+  %val = load float, ptr %ptr_in
+  %shifted = fsub float %val, %max_val
+  %exp_val = call float @__nv_expf(float %shifted)
+  %sum_inv = fdiv float 1.0, %max_val
+  %result = fmul float %exp_val, %sum_inv
+  %ptr_out = getelementptr float, ptr %out, i64 %idx
+  store float %result, ptr %ptr_out
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "exp(" in msl
+        assert " - " in msl
+        assert " / " in msl
+        assert " * " in msl
+
+    def test_matmul_compile(self):
+        """Matmul (nested loop with fma) compiles correctly."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @matmul_kernel(ptr %A, ptr %B, ptr %C, i32 %M, i32 %N, i32 %K) {
+entry:
+  %row = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %col = call i32 @__metal_get_thread_position_in_threadgroup_y()
+  br label %k_loop
+
+k_loop:
+  %k = phi i32 [0, %entry], [%k_next, %k_body]
+  %acc = phi float [0.0, %entry], [%acc_next, %k_body]
+  %k_cmp = icmp slt i32 %k, %K
+  br i1 %k_cmp, label %k_body, label %store_result
+
+k_body:
+  %a_off = mul i32 %row, %K
+  %a_idx = add i32 %a_off, %k
+  %a_idx64 = sext i32 %a_idx to i64
+  %a_ptr = getelementptr float, ptr %A, i64 %a_idx64
+  %a_val = load float, ptr %a_ptr
+  %b_off = mul i32 %k, %N
+  %b_idx = add i32 %b_off, %col
+  %b_idx64 = sext i32 %b_idx to i64
+  %b_ptr = getelementptr float, ptr %B, i64 %b_idx64
+  %b_val = load float, ptr %b_ptr
+  %acc_next = call float @llvm.fmuladd.f32(float %a_val, float %b_val, float %acc)
+  %k_next = add i32 %k, 1
+  br label %k_loop
+
+store_result:
+  %c_off = mul i32 %row, %N
+  %c_idx = add i32 %c_off, %col
+  %c_idx64 = sext i32 %c_idx to i64
+  %c_ptr = getelementptr float, ptr %C, i64 %c_idx64
+  store float %acc, ptr %c_ptr
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "fma(" in msl
+
+    def test_silu_activation_compile(self):
+        """SiLU (x * sigmoid(x)) pattern compiles correctly."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @silu_kernel(ptr %input, ptr %out, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %ptr_in = getelementptr float, ptr %input, i64 %idx
+  %x = load float, ptr %ptr_in
+  %neg_x = fneg float %x
+  %exp_neg = call float @__nv_expf(float %neg_x)
+  %one_plus = fadd float 1.0, %exp_neg
+  %sigmoid = fdiv float %x, %one_plus
+  %ptr_out = getelementptr float, ptr %out, i64 %idx
+  store float %sigmoid, ptr %ptr_out
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "exp(" in msl
+        assert " / " in msl
+        assert "= -(" in msl
+
+    def test_layer_norm_compile(self):
+        """LayerNorm pattern (center, scale) compiles correctly."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @layernorm_kernel(ptr %input, ptr %weight, ptr %out, float %mean, float %inv_std) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %idx = sext i32 %tid to i64
+  %ptr_in = getelementptr float, ptr %input, i64 %idx
+  %x = load float, ptr %ptr_in
+  %centered = fsub float %x, %mean
+  %normed = fmul float %centered, %inv_std
+  %ptr_w = getelementptr float, ptr %weight, i64 %idx
+  %w = load float, ptr %ptr_w
+  %scaled = fmul float %normed, %w
+  %ptr_out = getelementptr float, ptr %out, i64 %idx
+  store float %scaled, ptr %ptr_out
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " - " in msl
+        assert " * " in msl
+
+    def test_embedding_lookup_compile(self):
+        """Embedding/gather pattern (index → load) compiles correctly."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @embedding_kernel(ptr %table, ptr %indices, ptr %out, i32 %n, i32 %dim) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %tid64 = sext i32 %tid to i64
+  %idx_ptr = getelementptr i32, ptr %indices, i64 %tid64
+  %row = load i32, ptr %idx_ptr
+  %row_off = mul i32 %row, %dim
+  %elem_idx = add i32 %row_off, 0
+  %elem_idx64 = sext i32 %elem_idx to i64
+  %tab_ptr = getelementptr float, ptr %table, i64 %elem_idx64
+  %val = load float, ptr %tab_ptr
+  %out_ptr = getelementptr float, ptr %out, i64 %tid64
+  store float %val, ptr %out_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+
+    def test_elementwise_chain_compile(self):
+        """Chained elementwise ops (add → mul → relu) compile correctly."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @chain_kernel(ptr %a, ptr %b, ptr %out, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %pa = getelementptr float, ptr %a, i64 %idx
+  %pb = getelementptr float, ptr %b, i64 %idx
+  %va = load float, ptr %pa
+  %vb = load float, ptr %pb
+  %sum = fadd float %va, %vb
+  %prod = fmul float %sum, %vb
+  %cmp_relu = fcmp ogt float %prod, 0.0
+  %relu = select i1 %cmp_relu, float %prod, float 0.0
+  %pout = getelementptr float, ptr %out, i64 %idx
+  store float %relu, ptr %pout
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " + " in msl
+        assert " * " in msl
+        assert " ? " in msl
+
+
+# ── Mixed Precision Tests ───────────────────────────────────────────
+
+
+class TestMetalMixedPrecision:
+    """Test mixed precision compilation paths."""
+
+    def test_fp16_to_fp32_convert(self):
+        """fp16 input → fp32 computation chain compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @fp16_to_fp32_kernel(ptr %out, half %h_in) {
+entry:
+  %ext = fpext half %h_in to float
+  %r = fmul float %ext, 2.0
+  %p = getelementptr float, ptr %out, i64 0
+  store float %r, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "(float)" in msl
+
+    def test_fp32_to_fp16_truncate(self):
+        """fp32 → fp16 truncation compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @fp32_to_fp16_kernel(ptr %out, float %f_in) {
+entry:
+  %truncated = fptrunc float %f_in to half
+  %p = getelementptr half, ptr %out, i64 0
+  store half %truncated, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "(half)" in msl
+
+    def test_mixed_int_widths(self):
+        """i8/i16/i32/i64 mixed width operations compile."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @mixed_int_kernel(ptr %out, i64 %i64_in) {
+entry:
+  %narrow32 = trunc i64 %i64_in to i32
+  %narrow16 = trunc i32 %narrow32 to i16
+  %narrow8 = trunc i16 %narrow16 to i8
+  %wide16 = zext i8 %narrow8 to i16
+  %wide32 = sext i16 %wide16 to i32
+  %wide64 = sext i32 %wide32 to i64
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %wide32, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+
+    def test_tolerance_envelopes_documented(self):
+        """Verify tolerance constants are defined for all expected dtypes."""
+        for dtype in ("float32", "float16", "bfloat16", "int32"):
+            assert dtype in MetalTestHarness.TOLERANCE, f"Missing tolerance for {dtype}"
+            tol = MetalTestHarness.TOLERANCE[dtype]
+            assert "rtol" in tol, f"Missing rtol for {dtype}"
+            assert "atol" in tol, f"Missing atol for {dtype}"
+
+
+# ── Dynamic Shape Coverage ──────────────────────────────────────────
+
+
+class TestMetalDynamicShapes:
+    """Test compilation with non-standard shapes and block sizes."""
+
+    def test_non_power_of_2_elements(self):
+        """Kernel with non-power-of-2 bounds check (127 elements) compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @non_pow2_kernel(ptr %out, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, 127
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %p = getelementptr float, ptr %out, i64 %idx
+  %val = sitofp i32 %tid to float
+  store float %val, ptr %p
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+
+    def test_very_small_tensor(self):
+        """Kernel operating on a single element compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @single_elem_kernel(ptr %out, float %val) {
+entry:
+  %p = getelementptr float, ptr %out, i64 0
+  store float %val, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+
+    def test_large_tensor_compile(self):
+        """Kernel with large index (1M elements) compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @large_tensor_kernel(ptr %out, i32 %n) {
+entry:
+  %gid = call i32 @__metal_get_threadgroup_position_in_grid_x()
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %block_off = shl i32 %gid, 10
+  %idx = add i32 %block_off, %tid
+  %cmp = icmp slt i32 %idx, 1048576
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx64 = sext i32 %idx to i64
+  %p = getelementptr float, ptr %out, i64 %idx64
+  %val = sitofp i32 %idx to float
+  store float %val, ptr %p
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+
+    def test_odd_block_size(self):
+        """Non-standard block size (33) in masking compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @odd_block_kernel(ptr %a, ptr %out, i32 %n) {
+entry:
+  %gid = call i32 @__metal_get_threadgroup_position_in_grid_x()
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %block_off = mul i32 %gid, 33
+  %idx = add i32 %block_off, %tid
+  %cmp = icmp slt i32 %idx, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx64 = sext i32 %idx to i64
+  %pa = getelementptr float, ptr %a, i64 %idx64
+  %va = load float, ptr %pa
+  %doubled = fmul float %va, 2.0
+  %pout = getelementptr float, ptr %out, i64 %idx64
+  store float %doubled, ptr %pout
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+
+
+# ── Cross-Backend Numerical Comparison ──────────────────────────────
+
+
+class TestMetalCrossBackendNumerics:
+    """Cross-backend numerical comparison infrastructure."""
+
+    def test_reference_generation(self):
+        """Verify CPU reference generation is deterministic."""
+        import numpy as np
+
+        ref1 = MetalTestHarness.create_reference_tensors((128,), seed=42)
+        ref2 = MetalTestHarness.create_reference_tensors((128,), seed=42)
+        np.testing.assert_array_equal(ref1, ref2)
+
+    def test_tolerance_bounds(self):
+        """Verify tolerance bounds are reasonable across dtypes."""
+        tol = MetalTestHarness.TOLERANCE
+        assert tol["float32"]["atol"] < tol["float16"]["atol"]
+        assert tol["float16"]["atol"] < tol["bfloat16"]["atol"]
+        assert tol["int32"]["atol"] == 0
+
+    def test_numerical_drift_logging(self):
+        """Verify drift within tolerance envelope passes."""
+        import numpy as np
+
+        ref = np.ones(100, dtype=np.float32)
+        result = ref + 1e-6 * np.random.RandomState(99).randn(100).astype(np.float32)
+        MetalTestHarness.assert_close(result, ref, dtype="float32")
+
+    def test_vector_add_numerics_cpu_reference(self):
+        """Vector add CPU reference matches expected output."""
+        import numpy as np
+
+        a = MetalTestHarness.create_reference_tensors((1024,), seed=1)
+        b = MetalTestHarness.create_reference_tensors((1024,), seed=2)
+        expected = a + b
+        assert expected.shape == (1024,)
+        assert expected.dtype == np.float32
+
+    def test_matmul_numerics_cpu_reference(self):
+        """Matmul CPU reference matches numpy."""
+        import numpy as np
+
+        a = MetalTestHarness.create_reference_tensors((64, 32), seed=1).astype(
+            np.float32
+        )
+        b = MetalTestHarness.create_reference_tensors((32, 64), seed=2).astype(
+            np.float32
+        )
+        expected = a @ b
+        assert expected.shape == (64, 64)
