@@ -1913,3 +1913,511 @@ entry:
         opts = MetalOptions(arch="apple8")
         binary = MetalBackend.make_metallib(msl, metadata, opts)
         assert isinstance(binary, bytes) and binary[:4] == b"MTLB"
+
+
+# ── Phase 7: New intrinsics ────────────────────────────────────────
+
+
+class TestMetalNewIntrinsics:
+    """Tests for Phase 7 Task 1.1 — missing intrinsic batch."""
+
+    def test_ctlz_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @ctlz_kernel(ptr %out, i32 %val) {
+entry:
+  %r = call i32 @llvm.ctlz.i32(i32 %val, i1 false)
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "clz(" in msl
+        assert "llvm.ctlz" not in msl
+
+    def test_cttz_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @cttz_kernel(ptr %out, i32 %val) {
+entry:
+  %r = call i32 @llvm.cttz.i32(i32 %val, i1 false)
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "ctz(" in msl
+        assert "llvm.cttz" not in msl
+
+    def test_bitreverse_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @bitrev_kernel(ptr %out, i32 %val) {
+entry:
+  %r = call i32 @llvm.bitreverse.i32(i32 %val)
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "reverse_bits(" in msl
+
+    def test_bswap_i32_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @bswap32_kernel(ptr %out, i32 %val) {
+entry:
+  %r = call i32 @llvm.bswap.i32(i32 %val)
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert ">> 24" in msl
+        assert "<< 24" in msl
+        assert "0xFF00" in msl
+
+    def test_bswap_i64_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @bswap64_kernel(ptr %out, i64 %val) {
+entry:
+  %r = call i64 @llvm.bswap.i64(i64 %val)
+  %p = getelementptr i64, ptr %out, i64 0
+  store i64 %r, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert ">> 56" in msl
+        assert "<< 56" in msl
+        assert "unsigned long" in msl
+
+    def test_fshr_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fshr_kernel(ptr %out, i32 %a, i32 %b, i32 %c) {
+entry:
+  %r = call i32 @llvm.fshr.i32(i32 %a, i32 %b, i32 %c)
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "unsigned int" in msl
+        assert ">>" in msl
+        assert "<<" in msl
+
+    def test_fshl_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fshl_kernel(ptr %out, i32 %a, i32 %b, i32 %c) {
+entry:
+  %r = call i32 @llvm.fshl.i32(i32 %a, i32 %b, i32 %c)
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %r, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "unsigned int" in msl
+        assert "<<" in msl
+        assert ">>" in msl
+
+    def test_lifetime_start_end_skipped(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @lifetime_kernel(ptr %out) {
+entry:
+  call void @llvm.lifetime.start.p0(i64 4, ptr %out)
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 42, ptr %p
+  call void @llvm.lifetime.end.p0(i64 4, ptr %out)
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "(void)0;" in msl
+        assert "llvm.lifetime" not in msl
+
+    def test_powi_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @powi_kernel(ptr %out, float %base, i32 %exp) {
+entry:
+  %r = call float @llvm.powi.f32(float %base, i32 %exp)
+  %p = getelementptr float, ptr %out, i64 0
+  store float %r, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "powr(" in msl
+        assert "static_cast<float>" in msl
+
+    def test_memcpy_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @memcpy_kernel(ptr %dst, ptr %src, i64 %n) {
+entry:
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 %n, i1 false)
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "for (int __i" in msl
+        assert "device char*" in msl
+
+    def test_memset_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @memset_kernel(ptr %dst, i8 %val, i64 %n) {
+entry:
+  call void @llvm.memset.p0.i64(ptr %dst, i8 %val, i64 %n, i1 false)
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "for (int __i" in msl
+        assert "(char)" in msl
+
+
+# ── Phase 7: Atomic operations ─────────────────────────────────────
+
+
+class TestMetalAtomicOps:
+    """Tests for Phase 7 Task 1.3 — atomicrmw and cmpxchg."""
+
+    def test_atomicrmw_add(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @atomic_add_kernel(ptr addrspace(1) %out, i32 %val) {
+entry:
+  %old = atomicrmw add ptr addrspace(1) %out, i32 %val monotonic
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "atomic_fetch_add_explicit" in msl
+        assert "memory_order_relaxed" in msl
+        assert "atomic_int" in msl
+
+    def test_atomicrmw_xchg(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @atomic_xchg_kernel(ptr addrspace(1) %out, i32 %val) {
+entry:
+  %old = atomicrmw xchg ptr addrspace(1) %out, i32 %val seq_cst
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "atomic_exchange_explicit" in msl
+        assert "memory_order_seq_cst" in msl
+
+    def test_atomicrmw_or_acquire(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @atomic_or_kernel(ptr addrspace(1) %out, i32 %val) {
+entry:
+  %old = atomicrmw or ptr addrspace(1) %out, i32 %val acquire
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "atomic_fetch_or_explicit" in msl
+        assert "memory_order_acquire" in msl
+
+    def test_cmpxchg_basic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @cmpxchg_kernel(ptr addrspace(1) %ptr, i32 %expected, i32 %desired) {
+entry:
+  %result = cmpxchg ptr addrspace(1) %ptr, i32 %expected, i32 %desired acq_rel monotonic
+  %val = extractvalue {i32, i1} %result, 0
+  %success = extractvalue {i32, i1} %result, 1
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "atomic_compare_exchange_weak_explicit" in msl
+        assert "memory_order_acq_rel" in msl
+        assert "memory_order_relaxed" in msl
+        assert ".field0" in msl
+        assert ".field1" in msl
+
+    def test_memory_ordering_map(self):
+        from third_party.metal.backend.compiler import _MEMORY_ORDER_MAP
+
+        assert _MEMORY_ORDER_MAP["monotonic"] == "memory_order_relaxed"
+        assert _MEMORY_ORDER_MAP["acquire"] == "memory_order_acquire"
+        assert _MEMORY_ORDER_MAP["release"] == "memory_order_release"
+        assert _MEMORY_ORDER_MAP["acq_rel"] == "memory_order_acq_rel"
+        assert _MEMORY_ORDER_MAP["seq_cst"] == "memory_order_seq_cst"
+
+    def test_atomic_op_map_coverage(self):
+        from third_party.metal.backend.compiler import _ATOMIC_OP_MAP
+
+        assert "add" in _ATOMIC_OP_MAP
+        assert "sub" in _ATOMIC_OP_MAP
+        assert "xchg" in _ATOMIC_OP_MAP
+        assert "and" in _ATOMIC_OP_MAP
+        assert "or" in _ATOMIC_OP_MAP
+        assert "xor" in _ATOMIC_OP_MAP
+        assert "max" in _ATOMIC_OP_MAP
+        assert "min" in _ATOMIC_OP_MAP
+        assert "umax" in _ATOMIC_OP_MAP
+        assert "umin" in _ATOMIC_OP_MAP
+        assert "fadd" in _ATOMIC_OP_MAP
+
+
+# ── Phase 7: Aggregate operations ──────────────────────────────────
+
+
+class TestMetalAggregateOps:
+    """Tests for Phase 7 Task 1.2 — extractvalue, insertvalue, overflow intrinsics."""
+
+    def test_extractvalue_basic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @ev_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %result = call {i32, i1} @llvm.sadd.with.overflow.i32(i32 %a, i32 %b)
+  %val = extractvalue {i32, i1} %result, 0
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %val, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert ".field0" in msl
+        assert "__triton_aggr_" in msl
+
+    def test_insertvalue_basic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @iv_kernel(ptr %out, i32 %a) {
+entry:
+  %result = call {i32, i1} @llvm.sadd.with.overflow.i32(i32 %a, i32 %a)
+  %modified = insertvalue {i32, i1} %result, i32 99, 0
+  %val = extractvalue {i32, i1} %modified, 0
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %val, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert ".field0" in msl
+
+    def test_sadd_with_overflow(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @sadd_ov_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %result = call {i32, i1} @llvm.sadd.with.overflow.i32(i32 %a, i32 %b)
+  %val = extractvalue {i32, i1} %result, 0
+  %ov = extractvalue {i32, i1} %result, 1
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %val, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert ".field0 =" in msl
+        assert ".field1 =" in msl
+        assert "+" in msl
+
+    def test_uadd_with_overflow(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @uadd_ov_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %result = call {i32, i1} @llvm.uadd.with.overflow.i32(i32 %a, i32 %b)
+  %val = extractvalue {i32, i1} %result, 0
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %val, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert ".field0 =" in msl
+        assert ".field1 =" in msl
+
+    def test_ssub_with_overflow(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @ssub_ov_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %result = call {i32, i1} @llvm.ssub.with.overflow.i32(i32 %a, i32 %b)
+  %val = extractvalue {i32, i1} %result, 0
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %val, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert ".field0 =" in msl
+        assert "-" in msl
+
+    def test_struct_typedef_emitted(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @struct_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %result = call {i32, i1} @llvm.sadd.with.overflow.i32(i32 %a, i32 %b)
+  %val = extractvalue {i32, i1} %result, 0
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %val, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "struct __triton_aggr_" in msl
+        assert "int field0;" in msl
+        assert "bool field1;" in msl
+
+
+# ── Phase 7: alloca / switch / fence ───────────────────────────────
+
+
+class TestMetalMiscInstructions:
+    """Tests for Phase 7 Task 1.4 — alloca, switch, fence."""
+
+    def test_alloca_basic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @alloca_kernel(ptr %out, i32 %val) {
+entry:
+  %ptr = alloca i32, align 4
+  store i32 %val, ptr %ptr
+  %loaded = load i32, ptr %ptr
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %loaded, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "_storage" in msl
+        assert "thread int*" in msl
+
+    def test_switch_instruction(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @switch_kernel(ptr %out, i32 %sel) {
+entry:
+  switch i32 %sel, label %default [
+    i32 0, label %case0
+    i32 1, label %case1
+  ]
+case0:
+  %p0 = getelementptr i32, ptr %out, i64 0
+  store i32 10, ptr %p0
+  ret void
+case1:
+  %p1 = getelementptr i32, ptr %out, i64 0
+  store i32 20, ptr %p1
+  ret void
+default:
+  %pd = getelementptr i32, ptr %out, i64 0
+  store i32 99, ptr %pd
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "switch (" in msl
+        assert "case 0:" in msl
+        assert "case 1:" in msl
+        assert "default:" in msl
+
+    def test_fence_workgroup(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fence_kernel(ptr %out) {
+entry:
+  fence syncscope("workgroup") release
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 1, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "threadgroup_barrier(mem_flags::mem_threadgroup)" in msl
+
+    def test_fence_no_scope(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fence_noscope_kernel(ptr %out) {
+entry:
+  fence seq_cst
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 1, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "threadgroup_barrier(mem_flags::mem_device)" in msl
+
+    def test_fence_subgroup(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fence_sub_kernel(ptr %out) {
+entry:
+  fence syncscope("subgroup") acquire
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 1, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "simdgroup_barrier(mem_flags::mem_threadgroup)" in msl
+
+    def test_alloca_with_load_store(self):
+        """alloca + load/store roundtrip produces thread-local variable."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @alloca_ls_kernel(ptr %out, i32 %val) {
+entry:
+  %ptr = alloca i32, align 4
+  store i32 %val, ptr %ptr
+  %loaded = load i32, ptr %ptr
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %loaded, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "_storage" in msl
+        assert "thread int*" in msl
+        assert "loaded" in msl

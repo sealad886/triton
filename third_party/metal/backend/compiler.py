@@ -142,6 +142,39 @@ _RE_BR = re.compile(r"^br\s+label\s+%(.+)$")
 _RE_BR_COND = re.compile(r"^br\s+i1\s+([^,]+),\s+label\s+%([^,]+),\s+label\s+%(.+)$")
 _RE_PHI_INCOMING = re.compile(r"^\[\s*(.+)\s*,\s*%(.+)\s*\]$")
 
+# ── Phase 7: LLVM surface generalization patterns ──────────────────
+_RE_EXTRACTVALUE = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*extractvalue\s+(\{[^}]+\})\s+(\S+),\s*(\d+)$"
+)
+_RE_INSERTVALUE = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*insertvalue\s+(\{[^}]+\})\s+(\S+),\s+(\S+)\s+(\S+),\s*(\d+)$"
+)
+_RE_ATOMICRMW = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*atomicrmw\s+"
+    r"(add|sub|xchg|and|or|xor|max|min|umax|umin|fadd)\s+"
+    r"ptr(?:\s+addrspace\((\d+)\))?\s+(\S+),\s+"
+    r"(\S+)\s+(\S+)\s+"
+    r"(monotonic|acquire|release|acq_rel|seq_cst)"
+)
+_RE_CMPXCHG = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*cmpxchg(?:\s+weak)?\s+"
+    r"ptr(?:\s+addrspace\((\d+)\))?\s+(\S+),\s+"
+    r"(\S+)\s+(\S+),\s+"
+    r"\S+\s+(\S+)\s+"
+    r"(monotonic|acquire|release|acq_rel|seq_cst)\s+"
+    r"(monotonic|acquire|release|acq_rel|seq_cst)"
+)
+_RE_ALLOCA = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*alloca\s+(\S+)(?:,\s*align\s+\d+)?$"
+)
+_RE_SWITCH = re.compile(
+    r"^switch\s+(\S+)\s+(\S+),\s*label\s+%(\S+)\s*\[(.+)\]$"
+)
+_RE_SWITCH_CASE = re.compile(r"(\S+)\s+(-?\d+),\s*label\s+%(\S+)")
+_RE_FENCE = re.compile(
+    r"^fence\s+(?:syncscope\(\"(\w+)\"\)\s+)?(monotonic|acquire|release|acq_rel|seq_cst)$"
+)
+
 # ── Module-level constant data structures (PERF-003) ───────────────
 _MSL_RESERVED_IDENTIFIERS = frozenset(
     {
@@ -257,6 +290,28 @@ _LLVM_SCALAR_TO_MSL = {
     "half": "half",
     "float": "float",
     "double": "double",
+}
+
+_MEMORY_ORDER_MAP = {
+    "monotonic": "memory_order_relaxed",
+    "acquire": "memory_order_acquire",
+    "release": "memory_order_release",
+    "acq_rel": "memory_order_acq_rel",
+    "seq_cst": "memory_order_seq_cst",
+}
+
+_ATOMIC_OP_MAP = {
+    "add": "atomic_fetch_add_explicit",
+    "sub": "atomic_fetch_sub_explicit",
+    "xchg": "atomic_exchange_explicit",
+    "and": "atomic_fetch_and_explicit",
+    "or": "atomic_fetch_or_explicit",
+    "xor": "atomic_fetch_xor_explicit",
+    "max": "atomic_fetch_max_explicit",
+    "min": "atomic_fetch_min_explicit",
+    "umax": "atomic_fetch_max_explicit",
+    "umin": "atomic_fetch_min_explicit",
+    "fadd": "atomic_fetch_add_explicit",
 }
 
 # ── Pre-compiled libdevice patterns (PERF-004) ─────────────────────
@@ -600,6 +655,17 @@ class MetalBackend(BaseBackend):
                 return "void"
             if "void" in ret_spec.split():
                 return "void"
+            if "{" in ret_spec:
+                start = ret_spec.index("{")
+                depth = 0
+                for i in range(start, len(ret_spec)):
+                    if ret_spec[i] == "{":
+                        depth += 1
+                    elif ret_spec[i] == "}":
+                        depth -= 1
+                    if depth == 0:
+                        return ret_spec[start : i + 1]
+                return ret_spec[start:]
             vec_match = _RE_CALL_RET_VEC.search(ret_spec)
             if vec_match:
                 return vec_match.group(0)
@@ -798,6 +864,24 @@ class MetalBackend(BaseBackend):
             pointee = m[-1] if m else "float"
             ptr_elem[p["llvm_name"]] = llvm_scalar_to_msl(pointee)
 
+        aggregate_type_structs: dict[str, tuple[str, list[str]]] = {}
+        struct_defs: list[str] = []
+
+        def get_aggregate_struct_name(agg_type_str: str) -> tuple[str, list[str]]:
+            agg_type_str = agg_type_str.strip()
+            if agg_type_str in aggregate_type_structs:
+                return aggregate_type_structs[agg_type_str]
+            idx = len(aggregate_type_structs)
+            name = f"__triton_aggr_{idx}"
+            inner = agg_type_str.strip("{ }")
+            field_types = [llvm_type_to_msl(t.strip()) for t in inner.split(",")]
+            aggregate_type_structs[agg_type_str] = (name, field_types)
+            fields = "".join(
+                f"  {ft} field{i};\n" for i, ft in enumerate(field_types)
+            )
+            struct_defs.append(f"struct {name} {{\n{fields}}};")
+            return name, field_types
+
         ssa = {}
         param_lines = []
         for p in params:
@@ -893,6 +977,46 @@ class MetalBackend(BaseBackend):
                 return f"min({args[0]}, {args[1]})"
             if fn.startswith("llvm.ctpop.") and len(args) == 1:
                 return f"popcount({args[0]})"
+            if fn.startswith("llvm.ctlz.") and len(args) >= 1:
+                return f"clz({args[0]})"
+            if fn.startswith("llvm.cttz.") and len(args) >= 1:
+                return f"ctz({args[0]})"
+            if fn.startswith("llvm.bitreverse.") and len(args) == 1:
+                return f"reverse_bits({args[0]})"
+            if fn == "llvm.bswap.i32" and len(args) == 1:
+                a = args[0]
+                return (
+                    f"((({a}) >> 24) | ((({a}) >> 8) & 0xFF00) | "
+                    f"((({a}) << 8) & 0xFF0000) | (({a}) << 24))"
+                )
+            if fn == "llvm.bswap.i64" and len(args) == 1:
+                a = args[0]
+                return (
+                    f"(((unsigned long)({a}) >> 56) | "
+                    f"(((unsigned long)({a}) >> 40) & 0xFF00UL) | "
+                    f"(((unsigned long)({a}) >> 24) & 0xFF0000UL) | "
+                    f"(((unsigned long)({a}) >> 8) & 0xFF000000UL) | "
+                    f"(((unsigned long)({a}) << 8) & 0xFF00000000UL) | "
+                    f"(((unsigned long)({a}) << 24) & 0xFF0000000000UL) | "
+                    f"(((unsigned long)({a}) << 40) & 0xFF000000000000UL) | "
+                    f"((unsigned long)({a}) << 56))"
+                )
+            if fn.startswith("llvm.fshr.") and len(args) == 3:
+                bits = "32" if "i32" in fn else "64"
+                u_ty = "unsigned int" if "i32" in fn else "unsigned long"
+                return (
+                    f"(({u_ty})({args[1]}) >> ({args[2]} & ({bits} - 1))) | "
+                    f"(({u_ty})({args[0]}) << ({bits} - ({args[2]} & ({bits} - 1))))"
+                )
+            if fn.startswith("llvm.fshl.") and len(args) == 3:
+                bits = "32" if "i32" in fn else "64"
+                u_ty = "unsigned int" if "i32" in fn else "unsigned long"
+                return (
+                    f"(({u_ty})({args[0]}) << ({args[2]} & ({bits} - 1))) | "
+                    f"(({u_ty})({args[1]}) >> ({bits} - ({args[2]} & ({bits} - 1))))"
+                )
+            if fn.startswith("llvm.powi.") and len(args) == 2:
+                return f"powr({args[0]}, static_cast<float>({args[1]}))"
 
             # LLVM IR emitted by shared Triton pipelines can still reference
             # CUDA/OCML-style libdevice symbols. Lower these to equivalent MSL
@@ -950,6 +1074,23 @@ class MetalBackend(BaseBackend):
             if not line:
                 continue
             cleaned_lines.append(line)
+
+        joined_lines: list[str] = []
+        i_join = 0
+        while i_join < len(cleaned_lines):
+            ln = cleaned_lines[i_join]
+            if ln.startswith("switch ") and "[" in ln and "]" not in ln:
+                parts = [ln]
+                while i_join + 1 < len(cleaned_lines):
+                    i_join += 1
+                    parts.append(cleaned_lines[i_join])
+                    if "]" in cleaned_lines[i_join]:
+                        break
+                joined_lines.append(" ".join(parts))
+            else:
+                joined_lines.append(ln)
+            i_join += 1
+        cleaned_lines = joined_lines
 
         blocks = {"entry": []}
         block_order = ["entry"]
@@ -1011,7 +1152,12 @@ class MetalBackend(BaseBackend):
                 m = _RE_CALL_OUT.match(line)
                 if m:
                     out_ssa, ret_spec, _, _ = m.groups()
-                    record_ssa_decl(out_ssa, llvm_ty=extract_call_ret_type(ret_spec))
+                    ret_type = extract_call_ret_type(ret_spec)
+                    if ret_type.startswith("{"):
+                        struct_name, _ = get_aggregate_struct_name(ret_type)
+                        record_ssa_decl(out_ssa, msl_ty=struct_name)
+                    else:
+                        record_ssa_decl(out_ssa, llvm_ty=ret_type)
                     continue
 
                 m = _RE_GEP_DECL.match(line)
@@ -1076,6 +1222,48 @@ class MetalBackend(BaseBackend):
                 if m:
                     out_ssa, vec_ty, _, _, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=vec_ty)
+                    continue
+
+                m = _RE_EXTRACTVALUE.match(line)
+                if m:
+                    out_ssa, agg_type, _, idx_str = m.groups()
+                    _, field_types = get_aggregate_struct_name(agg_type)
+                    idx = int(idx_str)
+                    ft = field_types[idx] if idx < len(field_types) else "int"
+                    record_ssa_decl(out_ssa, msl_ty=ft)
+                    continue
+
+                m = _RE_INSERTVALUE.match(line)
+                if m:
+                    out_ssa, agg_type, _, _, _, _ = m.groups()
+                    struct_name, _ = get_aggregate_struct_name(agg_type)
+                    record_ssa_decl(out_ssa, msl_ty=struct_name)
+                    continue
+
+                m = _RE_ATOMICRMW.match(line)
+                if m:
+                    out_ssa = m.group(1)
+                    val_type = m.group(5)
+                    record_ssa_decl(out_ssa, llvm_ty=val_type.strip())
+                    continue
+
+                m = _RE_CMPXCHG.match(line)
+                if m:
+                    out_ssa = m.group(1)
+                    val_type = m.group(4)
+                    agg_type = "{" + val_type.strip() + ", i1}"
+                    struct_name, _ = get_aggregate_struct_name(agg_type)
+                    record_ssa_decl(out_ssa, msl_ty=struct_name)
+                    continue
+
+                m = _RE_ALLOCA.match(line)
+                if m:
+                    out_ssa, elem_type = m.groups()
+                    msl_ty = llvm_scalar_to_msl(elem_type.strip())
+                    record_ssa_decl(out_ssa, msl_ty=f"thread {msl_ty}*")
+                    storage_name = f"{msl_id(out_ssa)}_storage"
+                    if storage_name not in ssa_decl_types:
+                        ssa_decl_types[storage_name] = msl_ty
                     continue
 
         body_lines = [
@@ -1211,6 +1399,22 @@ class MetalBackend(BaseBackend):
                     args = [to_expr(v) for v in parse_call_args(args_raw)]
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
+                    if fn.startswith("llvm.sadd.with.overflow.") and len(args) == 2:
+                        emit(f"{out}.field0 = {args[0]} + {args[1]};")
+                        emit(f"{out}.field1 = (({args[0]} ^ {out}.field0) & ({args[1]} ^ {out}.field0)) < 0;")
+                        continue
+                    if fn.startswith("llvm.uadd.with.overflow.") and len(args) == 2:
+                        emit(f"{out}.field0 = {args[0]} + {args[1]};")
+                        emit(f"{out}.field1 = {out}.field0 < {args[0]};")
+                        continue
+                    if fn.startswith("llvm.ssub.with.overflow.") and len(args) == 2:
+                        emit(f"{out}.field0 = {args[0]} - {args[1]};")
+                        emit(f"{out}.field1 = (({args[0]} ^ {args[1]}) & ({args[0]} ^ {out}.field0)) < 0;")
+                        continue
+                    if fn.startswith("llvm.usub.with.overflow.") and len(args) == 2:
+                        emit(f"{out}.field0 = {args[0]} - {args[1]};")
+                        emit(f"{out}.field1 = {args[0]} < {args[1]};")
+                        continue
                     lowered_intrinsic = lower_intrinsic(fn, args)
                     if lowered_intrinsic is not None:
                         emit(f"{out} = {lowered_intrinsic};")
@@ -1329,6 +1533,26 @@ class MetalBackend(BaseBackend):
                         emit("threadgroup_barrier(mem_flags::mem_none);")
                     elif fn.startswith("llvm.assume"):
                         emit("(void)0;")
+                    elif (
+                        fn.startswith("llvm.lifetime.start")
+                        or fn.startswith("llvm.lifetime.end")
+                    ):
+                        emit("(void)0;")
+                    elif fn.startswith("llvm.memcpy") and len(args) >= 3:
+                        emit(
+                            f"for (int __i = 0; __i < {args[2]}; __i++) "
+                            f"((device char*){args[0]})[__i] = ((device char*){args[1]})[__i];"
+                        )
+                    elif fn.startswith("llvm.memset") and len(args) >= 3:
+                        emit(
+                            f"for (int __i = 0; __i < {args[2]}; __i++) "
+                            f"((device char*){args[0]})[__i] = (char){args[1]};"
+                        )
+                    elif fn.startswith("llvm.memmove") and len(args) >= 3:
+                        emit(
+                            f"for (int __i = 0; __i < {args[2]}; __i++) "
+                            f"((device char*){args[0]})[__i] = ((device char*){args[1]})[__i];"
+                        )
                     else:
                         emit(f"{fn}({', '.join(args)});")
                     continue
@@ -1384,6 +1608,93 @@ class MetalBackend(BaseBackend):
                         emit(f"{out}[{to_expr(idx)}] = {to_expr(val)};")
                     continue
 
+                m = _RE_EXTRACTVALUE.match(line)
+                if m:
+                    out_ssa, _, src_val, idx_str = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"{out} = {to_expr(src_val)}.field{idx_str};")
+                    continue
+
+                m = _RE_INSERTVALUE.match(line)
+                if m:
+                    out_ssa, _, agg_val, _, elem_val, idx_str = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"{out} = {to_expr(agg_val)};")
+                    emit(f"{out}.field{idx_str} = {to_expr(elem_val)};")
+                    continue
+
+                m = _RE_ATOMICRMW.match(line)
+                if m:
+                    out_ssa, op, addr_space, ptr, val_type, val, ordering = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    msl_ty = llvm_scalar_to_msl(val_type.strip())
+                    atomic_func = _ATOMIC_OP_MAP.get(op, "atomic_fetch_add_explicit")
+                    msl_order = _MEMORY_ORDER_MAP.get(ordering, "memory_order_relaxed")
+                    emit(
+                        f"{out} = {atomic_func}("
+                        f"reinterpret_cast<{msl_addr_space(addr_space)} atomic_{msl_ty}*>({to_expr(ptr)}), "
+                        f"{to_expr(val)}, {msl_order});"
+                    )
+                    continue
+
+                m = _RE_CMPXCHG.match(line)
+                if m:
+                    out_ssa, addr_space, ptr, val_type, expected, desired, success_order, fail_order = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    msl_ty = llvm_scalar_to_msl(val_type.strip())
+                    msl_success = _MEMORY_ORDER_MAP.get(success_order, "memory_order_relaxed")
+                    msl_fail = _MEMORY_ORDER_MAP.get(fail_order, "memory_order_relaxed")
+                    emit(f"{out}.field0 = {to_expr(expected)};")
+                    emit(
+                        f"{out}.field1 = atomic_compare_exchange_weak_explicit("
+                        f"reinterpret_cast<{msl_addr_space(addr_space)} atomic_{msl_ty}*>({to_expr(ptr)}), "
+                        f"&{out}.field0, {to_expr(desired)}, {msl_success}, {msl_fail});"
+                    )
+                    continue
+
+                m = _RE_ALLOCA.match(line)
+                if m:
+                    out_ssa, elem_type = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"{out} = &{out}_storage;")
+                    continue
+
+                m = _RE_SWITCH.match(line)
+                if m:
+                    val_type, val, default_label, cases_str = m.groups()
+                    default_label = normalize_label(default_label)
+                    default_id = block_ids.get(default_label)
+                    emit(f"__triton_pred_block = {block_id};")
+                    emit(f"switch ({to_expr(val)}) {{")
+                    for cm in _RE_SWITCH_CASE.finditer(cases_str):
+                        case_val = cm.group(2)
+                        case_label = normalize_label(cm.group(3))
+                        case_id = block_ids.get(case_label)
+                        if case_id is not None:
+                            emit(f"  case {case_val}: __pc = {case_id}; break;")
+                    if default_id is not None:
+                        emit(f"  default: __pc = {default_id}; break;")
+                    emit("}")
+                    emit("continue;")
+                    terminated = True
+                    break
+
+                m = _RE_FENCE.match(line)
+                if m:
+                    syncscope, ordering = m.groups()
+                    if syncscope in ("workgroup", "threadgroup"):
+                        emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
+                    elif syncscope in ("subgroup", "wavefront"):
+                        emit("simdgroup_barrier(mem_flags::mem_threadgroup);")
+                    else:
+                        emit("threadgroup_barrier(mem_flags::mem_device);")
+                    continue
+
                 if line.startswith("unreachable"):
                     emit("return;")
                     terminated = True
@@ -1403,10 +1714,15 @@ class MetalBackend(BaseBackend):
             "#include <metal_stdlib>",
             "using namespace metal;",
             "",
+        ]
+        msl_lines.extend(struct_defs)
+        if struct_defs:
+            msl_lines.append("")
+        msl_lines.extend([
             f"kernel void {msl_kernel_name}(",
             ",\n".join(param_lines),
             ") {",
-        ]
+        ])
         msl_lines.extend(body_lines)
         msl_lines.append("}")
         msl_lines.append("")
