@@ -18,6 +18,28 @@ from triton.backends.driver import DriverBase
 
 logger = logging.getLogger(__name__)
 
+# ── Lazy module-level imports ────────────────────────────────────────
+
+_numpy_module = None
+_numpy_checked = False
+
+
+def _get_numpy_module():
+    """Lazily import numpy once."""
+    global _numpy_module, _numpy_checked
+    if not _numpy_checked:
+        try:
+            import numpy
+            _numpy_module = numpy
+        except ImportError:
+            pass
+        _numpy_checked = True
+    return _numpy_module
+
+
+def _ceildiv(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
 # ── Argument packing format map ─────────────────────────────────────
 
 _ARG_PACK_FORMAT: dict[str, str] = {
@@ -161,31 +183,38 @@ def _normalize_pointer_arg(arg):
     return arg
 
 
+# Map signature type string → torch dtype ATTRIBUTE NAME (resolved lazily).
+_TORCH_DTYPE_MAP: dict[str, str] = {
+    "i1": "bool",
+    "i8": "int8",
+    "i16": "int16",
+    "i32": "int32",
+    "i64": "int64",
+    "u1": "bool",
+    "u8": "uint8",
+    "u16": "uint16",
+    "u32": "uint32",
+    "u64": "uint64",
+    "fp8e4b15": "uint8",
+    "fp8e5": "uint8",
+    "fp16": "float16",
+    "bf16": "bfloat16",
+    "f32": "float32",
+    "fp32": "float32",
+    "fp64": "float64",
+}
+
+
 def _normalize_scalar_arg(sig, arg):
     torch = _get_torch_module()
     if torch is None:
         return arg
 
-    dtype_map = {
-        "i1": torch.bool,
-        "i8": torch.int8,
-        "i16": torch.int16,
-        "i32": torch.int32,
-        "i64": torch.int64,
-        "u1": torch.bool,
-        "u8": torch.uint8,
-        "u16": torch.uint16,
-        "u32": torch.uint32,
-        "u64": torch.uint64,
-        "fp8e4b15": torch.uint8,
-        "fp8e5": torch.uint8,
-        "fp16": torch.float16,
-        "bf16": torch.bfloat16,
-        "f32": torch.float32,
-        "fp32": torch.float32,
-        "fp64": torch.float64,
-    }
-    dtype = dtype_map.get(sig)
+    dtype_name = _TORCH_DTYPE_MAP.get(sig)
+    if dtype_name is None:
+        return arg
+
+    dtype = getattr(torch, dtype_name, None)
     if dtype is None:
         return arg
 
@@ -665,13 +694,10 @@ class MetalKernelHandle:
             if scratch is not None:
                 encoder.setBuffer_offset_atIndex_(scratch, 0, num_args)
 
-        def ceildiv(a: int, b: int) -> int:
-            return (a + b - 1) // b
-
         threadgroups = (
-            ceildiv(grid[0], block[0]),
-            ceildiv(grid[1], block[1]),
-            ceildiv(grid[2], block[2]),
+            _ceildiv(grid[0], block[0]),
+            _ceildiv(grid[1], block[1]),
+            _ceildiv(grid[2], block[2]),
         )
 
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(threadgroups, block)
@@ -696,14 +722,8 @@ def _bind_argument(device, encoder, idx, arg, arg_type: str | None = None):
         arg: The argument value
         arg_type: Optional explicit type hint ('i32', 'i64', 'f32', 'f64', 'f16', etc.)
     """
-    try:
-        import numpy as np
-
-        has_numpy = True
-    except ImportError:
-        has_numpy = False
-
-    if has_numpy and isinstance(arg, np.ndarray):
+    np = _get_numpy_module()
+    if np is not None and isinstance(arg, np.ndarray):
         nbytes = arg.nbytes
         buf = device.newBufferWithBytes_length_options_(arg.tobytes(), nbytes, 0)
         encoder.setBuffer_offset_atIndex_(buf, 0, idx)
