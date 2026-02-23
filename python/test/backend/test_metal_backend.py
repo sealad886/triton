@@ -2066,8 +2066,8 @@ entry:
 }
 """
         msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
-        assert "powr(" in msl
-        assert "static_cast<float>" in msl
+        assert "pown(" in msl, "llvm.powi must lower to pown() (handles negative bases)"
+        assert "powr(" not in msl, "powr() requires x >= 0; must not be used for powi"
 
     def test_memcpy_intrinsic(self):
         from third_party.metal.backend.compiler import MetalBackend
@@ -4548,4 +4548,46 @@ declare void @llvm.lifetime.end.p0(i64, ptr)
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
         assert "UNSUPPORTED" not in msl, (
             "Void call with #N before ; comment was not cleaned properly"
+        )
+
+
+class TestMetalAudit2PowiUsePown:
+    """AUDIT2-002: llvm.powi must lower to pown(), not powr().
+
+    MSL powr(x, y) requires x >= 0 (undefined for negative bases).
+    MSL pown(x, y) handles negative bases with integer exponents correctly.
+    """
+
+    def test_powi_lowers_to_pown(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @powi_kernel(ptr %out, float %base, i32 %exp) {
+  %r = call float @llvm.powi.f32.i32(float %base, i32 %exp)
+  store float %r, ptr %out
+  ret void
+}
+declare float @llvm.powi.f32.i32(float, i32)
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "pown(" in msl, "llvm.powi should lower to pown(), not powr()"
+        assert "powr(" not in msl, "powr() requires x >= 0; pown() must be used"
+
+    def test_powi_no_float_cast_on_exponent(self):
+        """pown() takes int exponent directly — no static_cast<float> needed."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @powi_cast_kernel(ptr %out, float %x, i32 %n) {
+  %r = call float @llvm.powi.f32.i32(float %x, i32 %n)
+  store float %r, ptr %out
+  ret void
+}
+declare float @llvm.powi.f32.i32(float, i32)
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "static_cast<float>" not in msl, (
+            "pown() takes integer exponent; float cast is unnecessary"
         )

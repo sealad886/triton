@@ -1221,7 +1221,7 @@ class MetalBackend(BaseBackend):
                     f"(({u_ty})({b}) >> ({bits} - ({c} & ({bits} - 1)))))"
                 )
             if fn.startswith("llvm.powi.") and nargs == 2:
-                return f"powr({args[0]}, static_cast<float>({args[1]}))"
+                return f"pown({args[0]}, {args[1]})"
 
             # LLVM IR emitted by shared Triton pipelines can still reference
             # CUDA/OCML-style libdevice symbols. Lower these to equivalent MSL
