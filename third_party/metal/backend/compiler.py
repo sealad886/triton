@@ -26,6 +26,22 @@ from triton import knobs
 from triton._C.libtriton import ir, llvm, passes
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 
+# ── Compile observability ───────────────────────────────────────────
+
+_METAL_DEBUG = os.environ.get('TRITON_METAL_DEBUG', '').lower() in ('1', 'true', 'yes')
+
+
+def _compile_provenance(options: 'MetalOptions | None', src_hash: str) -> None:
+    """Log compile provenance for debugging."""
+    if not _METAL_DEBUG:
+        return
+    print("[TRITON_METAL_DEBUG] Compile provenance:")
+    print(f"  Options hash: {options.hash() if options is not None else 'N/A'}")
+    print(f"  Source hash: {src_hash[:16]}")
+    print(f"  SDK version: {_get_metal_sdk_version()}")
+    print(f"  Target arch: {getattr(options, 'arch', 'N/A')}")
+
+
 # ── Unsupported IR diagnostics ──────────────────────────────────────
 
 
@@ -546,53 +562,64 @@ class MetalBackend(BaseBackend):
         return mod
 
     def make_llir(self, src, metadata, options):
+        import time as _time
+
         mod = src
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
-        passes.ttgpuir.add_combine_tensor_select_and_if(pm)
-        passes.ttgpuir.add_allocate_warp_groups(pm)
+
+        def _run_pass(add_fn, name: str, *args: Any) -> None:
+            """Add a pass and optionally time it when TRITON_METAL_DEBUG is set."""
+            t0 = _time.monotonic()
+            add_fn(*args) if args else add_fn(pm)
+            if _METAL_DEBUG:
+                elapsed = _time.monotonic() - t0
+                print(f"[TRITON_METAL_DEBUG] Pass {name}: {elapsed:.3f}s")
+
+        _run_pass(passes.ttgpuir.add_combine_tensor_select_and_if, "combine_tensor_select_and_if", pm)
+        _run_pass(passes.ttgpuir.add_allocate_warp_groups, "allocate_warp_groups", pm)
 
         # Lower structured control flow (scf.for/if) to cf dialect BEFORE
         # the backend-specific GPU→LLVM pass, matching NVIDIA/AMD ordering.
-        # The backend pass populates cf→LLVM patterns internally with its
-        # Triton-aware type converter. If scf→cf runs AFTER add_to_llvmir,
-        # the resulting cf.br ops carry partially-lowered types that the
-        # standalone ConvertControlFlowToLLVMPass cannot legalize.
-        passes.convert.add_scf_to_cf(pm)
+        _run_pass(passes.convert.add_scf_to_cf, "scf_to_cf", pm)
 
         if hasattr(passes, "gluon") and hasattr(passes.gluon, "add_inliner"):
-            passes.gluon.add_inliner(pm)
+            _run_pass(passes.gluon.add_inliner, "gluon_inliner", pm)
 
         if hasattr(passes.convert, "add_index_to_llvmir"):
-            passes.convert.add_index_to_llvmir(pm)
+            _run_pass(passes.convert.add_index_to_llvmir, "index_to_llvmir", pm)
 
         import triton._C.libtriton.metal as metal
 
-        passes.ttgpuir.add_allocate_shared_memory(pm)
-        passes.ttgpuir.add_allocate_global_scratch_memory(pm)
+        _run_pass(passes.ttgpuir.add_allocate_shared_memory, "allocate_shared_memory", pm)
+        _run_pass(passes.ttgpuir.add_allocate_global_scratch_memory, "allocate_global_scratch_memory", pm)
 
-        metal.passes.ttgpuir.add_to_llvmir(pm)
-        passes.ttgpuir.add_canonicalize_llvm_ir(pm)
-        passes.common.add_cse(pm)
+        _run_pass(metal.passes.ttgpuir.add_to_llvmir, "metal_to_llvmir", pm)
+        _run_pass(passes.ttgpuir.add_canonicalize_llvm_ir, "canonicalize_llvm_ir", pm)
+        _run_pass(passes.common.add_cse, "cse_1", pm)
 
         # Some kernels (for example blocked matmul with tt.dot in a K-loop)
         # can retain residual scf control-flow after backend conversion. Run a
         # second scf->cf sweep before cf->llvm to avoid cf.br legalization
         # failures on leftover structured branches.
-        passes.convert.add_scf_to_cf(pm)
+        _run_pass(passes.convert.add_scf_to_cf, "scf_to_cf_2", pm)
 
-        passes.convert.add_cf_to_llvmir(pm)
-        passes.convert.add_arith_to_llvmir(pm)
-        passes.common.add_canonicalizer(pm)
-        passes.common.add_cse(pm)
-        passes.common.add_symbol_dce(pm)
+        _run_pass(passes.convert.add_cf_to_llvmir, "cf_to_llvmir", pm)
+        _run_pass(passes.convert.add_arith_to_llvmir, "arith_to_llvmir", pm)
+        _run_pass(passes.common.add_canonicalizer, "canonicalizer", pm)
+        _run_pass(passes.common.add_cse, "cse_2", pm)
+        _run_pass(passes.common.add_symbol_dce, "symbol_dce", pm)
 
         if not hasattr(passes, "llvmir") or not hasattr(passes.llvmir, "add_di_scope"):
             pass
         else:
-            passes.llvmir.add_di_scope(pm)
+            _run_pass(passes.llvmir.add_di_scope, "di_scope", pm)
 
+        t0 = _time.monotonic()
         pm.run(mod, "make_llir")
+        if _METAL_DEBUG:
+            elapsed = _time.monotonic() - t0
+            print(f"[TRITON_METAL_DEBUG] pm.run(make_llir): {elapsed:.3f}s")
 
         # MLIR module -> LLVM IR text
         llvm.init_targets()
@@ -628,6 +655,10 @@ class MetalBackend(BaseBackend):
         """
         Convert LLVM IR text to Metal Shading Language source.
         """
+        if _METAL_DEBUG:
+            src_hash = hashlib.sha256(src.encode()).hexdigest()
+            _compile_provenance(opt, src_hash)
+
         uses_shared_smem = "@global_smem" in src
         shared_bytes = max(int(metadata.get("shared", 0) or 0), 1)
 
@@ -1784,14 +1815,18 @@ class MetalBackend(BaseBackend):
                         break
                 ctx_before = all_codegen_lines[max(0, line_idx - 2):line_idx] if line_idx > 0 else []
                 ctx_after = all_codegen_lines[line_idx + 1:line_idx + 3] if line_idx >= 0 else []
+                category = _classify_unsupported_ir(line)
                 entry = UnsupportedIREntry(
                     line_number=line_idx + 1,
                     line=line,
                     context_before=list(ctx_before),
                     context_after=list(ctx_after),
-                    category=_classify_unsupported_ir(line),
+                    category=category,
                 )
                 unsupported_lines.append(entry)
+                if _METAL_DEBUG:
+                    opcode = line.strip().split()[0] if line.strip() else "UNKNOWN"
+                    print(f"[TRITON_METAL_DEBUG] Failure signature: UNSUPPORTED_IR_{category}_{opcode}")
                 if best_effort:
                     emit(f"// UNSUPPORTED: {line}")
                     continue
@@ -1948,4 +1983,15 @@ class MetalBackend(BaseBackend):
     @functools.lru_cache()
     def hash(self):
         version = _get_metal_sdk_version()
-        return f"{version}-{self.target.arch}"
+
+        try:
+            import triton
+            triton_version = triton.__version__
+        except (ImportError, AttributeError):
+            triton_version = "dev"
+
+        backend_hash = hashlib.sha256(
+            open(__file__, 'rb').read()
+        ).hexdigest()[:12]
+
+        return f"{version}-{self.target.arch}-{triton_version}-{backend_hash}"

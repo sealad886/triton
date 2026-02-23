@@ -18,6 +18,8 @@ on:
       - "python/test/backend/metal_*"
       - "scripts/test_metal_*"
       - "setup.py"
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6 AM UTC
 
 jobs:
   metal-unit-tests:

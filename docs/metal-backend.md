@@ -127,6 +127,77 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
 - **CI automation**: automated CI artifact upload/reporting for crash harness
   runs is not yet wired.
 
+## Troubleshooting
+
+### "torch.mps.compile_shader not available"
+
+This error means your PyTorch version does not support MPS shader compilation.
+- **Fix**: upgrade to PyTorch 2.1+ (`pip install --upgrade torch`).
+- **Alternative**: the Metal backend will fall back to the PyObjC `.metallib`
+  loading path automatically if `compile_shader` is unavailable.
+
+### "Unsupported LLVM IR" errors
+
+The Metal translator handles a broad but not exhaustive set of LLVM IR
+instructions. If you see unsupported-IR errors:
+1. Set `TRITON_METAL_DEBUG=1` to get structured failure signatures and
+   a detailed diagnostic report.
+2. Check `~/.triton/metal_unsupported_ir.log` for the full list of
+   unsupported instructions with context.
+3. Consider using `best_effort=True` in `MetalOptions` to emit partial MSL
+   with unsupported lines commented out.
+
+### metallib compilation fails
+
+Common causes:
+- **Xcode CLI tools not installed**: run `xcode-select --install`.
+- **Wrong SDK version**: ensure `xcrun metal --version` succeeds.
+- **Syntax errors in generated MSL**: set `TRITON_METAL_DEBUG=1` and inspect
+  the generated MSL source for issues.
+
+### MPS instability / segfaults
+
+- Use CPU mode (`--mode cpu`) for the stress harnesses to isolate whether
+  the issue is in Metal dispatch or computation logic.
+- Enable the Metal validation layer via Xcode's GPU diagnostics or by setting
+  `MTL_DEBUG_LAYER=1` in your environment.
+- Check `docs/metal-mps-crash-incident-report.md` for known patterns.
+
+## Performance Tuning
+
+### Block sizes
+
+Start with `BLOCK_SIZE=128`. Tune downward for kernels with high register
+pressure. Apple Silicon has 32KB shared memory per threadgroup; exceeding
+this silently degrades performance via memory spilling.
+
+### Memory access
+
+- Use shared memory (`threadgroup` address space) for reductions (`tl.sum`,
+  `tl.max`) — the Metal backend automatically maps `@global_smem` to
+  threadgroup memory.
+- Coalesce global memory loads: access patterns where consecutive threads
+  read consecutive addresses perform best on Apple GPUs.
+
+### Matrix multiplication
+
+The current implementation uses FMA (fused multiply-add) fallback for
+`tt.dot` operations. `simdgroup_matrix` integration is planned but not yet
+wired into the accelerate_matmul pass. For now:
+- Use smaller tile sizes (e.g. 16×16 instead of 32×32).
+- The `optimize_dot_operands` pass is enabled; `accelerate_matmul` is
+  disabled.
+
+## Compatibility Notes
+
+- **macOS 14+** required (Metal 3.0 API).
+- **Xcode 15+** recommended for the `xcrun metal` compiler toolchain.
+- **PyTorch 2.1+** for `torch.mps.compile_shader` support.
+- **Apple GPU family**: `apple7` (M1) minimum. `apple9` (M3/M4) required
+  for bf16 support.
+- See [metal-compatibility-matrix.md](metal-compatibility-matrix.md) for the
+  full compatibility matrix.
+
 ## Development
 
 ### Running tests
