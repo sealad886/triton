@@ -12,13 +12,12 @@ import sys
 import traceback
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import reduce
+from operator import mul
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-
-from functools import reduce
-from operator import mul
 
 
 def dtype_from_name(name: str):
@@ -122,9 +121,7 @@ def parse_common_args(description: str, default_tag: str) -> argparse.Namespace:
 
 def _macos_version() -> str:
     try:
-        out = subprocess.check_output(
-            ["sw_vers", "-productVersion"], text=True
-        ).strip()
+        out = subprocess.check_output(["sw_vers", "-productVersion"], text=True).strip()
         if out:
             return out
     except Exception:
@@ -144,7 +141,9 @@ def require_mode(mode: str, torch_module: Any) -> None:
     if mode != "mps":
         raise RuntimeError(f"Unsupported mode: {mode!r}")
     if not torch_module.backends.mps.is_built():
-        raise RuntimeError("Requested mode 'mps' but this torch build has no MPS support")
+        raise RuntimeError(
+            "Requested mode 'mps' but this torch build has no MPS support"
+        )
     if not torch_module.backends.mps.is_available():
         raise RuntimeError("Requested mode 'mps' but MPS is unavailable on this host")
 
@@ -316,7 +315,8 @@ class CrashSafeRunLogger:
             "exception_message": str(exc),
         }
         self._write_json_atomic(self.summary_path, summary)
-        self.write_state("python_exception", self.last_iter, self.last_stage or "unknown")
+        self.write_state(
+            "python_exception", self.last_iter, self.last_stage or "unknown"
+        )
         self.event("run_failed", summary=summary)
         self._events_fp.close()
-

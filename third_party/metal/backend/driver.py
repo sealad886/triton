@@ -307,8 +307,10 @@ class MetalUtils:
     def _load_msl_source_handle(self, source, metadata=None):
         metadata = metadata or {}
         torch = self._torch or _get_torch_module()
-        if torch is None or not hasattr(torch, "mps") or not hasattr(
-            torch.mps, "compile_shader"
+        if (
+            torch is None
+            or not hasattr(torch, "mps")
+            or not hasattr(torch.mps, "compile_shader")
         ):
             raise RuntimeError(
                 "torch.mps.compile_shader is required for Metal runtime launches"
@@ -604,7 +606,9 @@ class MetalLauncher:
     def __init__(self, src, metadata):
         self.metadata = metadata
         self.src = src
-        self._signature_layout = list(src.signature.values()) if hasattr(src, "signature") else []
+        self._signature_layout = (
+            list(src.signature.values()) if hasattr(src, "signature") else []
+        )
 
     def __call__(
         self,
@@ -626,7 +630,9 @@ class MetalLauncher:
         if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
             raise RuntimeError("Expected Metal kernel handle for Metal launch")
 
-        kernel_name = _resolve_and_validate_kernel_name(kernel_metadata, self.metadata, handle)
+        kernel_name = _resolve_and_validate_kernel_name(
+            kernel_metadata, self.metadata, handle
+        )
 
         num_warps = (
             _extract_num_warps(kernel_metadata)

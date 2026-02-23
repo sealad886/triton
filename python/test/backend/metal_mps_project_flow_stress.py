@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 
 import torch
-
 from metal_harness_utils import (
     CrashSafeRunLogger,
     RunConfig,
@@ -85,7 +84,9 @@ def main() -> int:
         if args.mode == "mps":
             logger.mark_checkpoint(-1, "compile_shader_start")
             if not hasattr(torch.mps, "compile_shader"):
-                raise RuntimeError("torch.mps.compile_shader is unavailable in this torch build")
+                raise RuntimeError(
+                    "torch.mps.compile_shader is unavailable in this torch build"
+                )
             shader = torch.mps.compile_shader(_MSL_SOURCE)
             kernel = shader.fused_axpy
             logger.mark_checkpoint(-1, "compile_shader_done")

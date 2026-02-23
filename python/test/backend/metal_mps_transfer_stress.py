@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 
 import torch
-
 from metal_harness_utils import (
     CrashSafeRunLogger,
     RunConfig,
