@@ -313,3 +313,7 @@ Acceptance:
 - 2026-02-23: Extended LLVM→MSL lowering for nested GEP constant expressions
   (notably `@global_smem` offset forms) and added `llvm.fmuladd.* -> fma(...)`
   intrinsic lowering, unblocking MSL compilation of FMA-heavy blocked GEMM.
+- 2026-02-23: Final verification run on this branch:
+  `python/test/backend/test_metal_backend.py` => **95 passed**,
+  `scripts/test_metal_smoke.py` => all smoke/harness checks passed in both
+  CPU and MPS modes with persisted run artifacts.
