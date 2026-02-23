@@ -6,6 +6,7 @@ LLVM IR to AIR (Apple Intermediate Representation) and then to .metallib binarie
 via xcrun.
 """
 
+import dataclasses
 import functools
 import hashlib
 import math
@@ -15,6 +16,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -23,6 +25,47 @@ from typing import Any, Dict, Tuple
 from triton import knobs
 from triton._C.libtriton import ir, llvm, passes
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
+
+# ── Unsupported IR diagnostics ──────────────────────────────────────
+
+
+@dataclasses.dataclass
+class UnsupportedIREntry:
+    """A single LLVM IR line that the Metal translator could not lower."""
+
+    line_number: int
+    line: str
+    context_before: list[str]
+    context_after: list[str]
+    category: str  # 'instruction', 'intrinsic', 'metadata', 'unknown'
+
+
+def _classify_unsupported_ir(line: str) -> str:
+    """Classify an unsupported LLVM IR line into a diagnostic category."""
+    stripped = line.strip()
+    if stripped.startswith("!") or stripped.startswith("attributes"):
+        return "metadata"
+    if "call" in stripped and "@llvm." in stripped:
+        return "intrinsic"
+    if any(
+        stripped.startswith(op)
+        for op in [
+            "invoke",
+            "resume",
+            "landingpad",
+            "indirectbr",
+            "catchswitch",
+            "catchret",
+            "catchpad",
+            "cleanupret",
+            "cleanuppad",
+        ]
+    ):
+        return "instruction"
+    if stripped.startswith("%"):
+        return "instruction"
+    return "unknown"
+
 
 # ── Shared LLVM IR regex constants ──────────────────────────────────
 # Used by both the SSA declaration pass and the code generation pass
@@ -364,6 +407,7 @@ class MetalOptions:
     sanitize_overflow: bool = True
     launch_cooperative_grid: bool = False
     instrumentation_mode: str = ""
+    best_effort: bool = False
 
     def __post_init__(self):
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
@@ -1282,6 +1326,12 @@ class MetalBackend(BaseBackend):
             ]
         )
 
+        best_effort = getattr(opt, "best_effort", False) if opt is not None else False
+        unsupported_lines: list[UnsupportedIREntry] = []
+        all_codegen_lines: list[str] = []
+        for blk in block_order:
+            all_codegen_lines.extend(blocks.get(blk, []))
+
         for block in block_order:
             block_id = block_ids[block]
             instrs = blocks.get(block, [])
@@ -1700,7 +1750,25 @@ class MetalBackend(BaseBackend):
                     terminated = True
                     break
 
-                raise RuntimeError(f"Unsupported LLVM IR in Metal lowering: '{line}'")
+                line_idx = -1
+                for _i, _l in enumerate(all_codegen_lines):
+                    if _l is line:
+                        line_idx = _i
+                        break
+                ctx_before = all_codegen_lines[max(0, line_idx - 2):line_idx] if line_idx > 0 else []
+                ctx_after = all_codegen_lines[line_idx + 1:line_idx + 3] if line_idx >= 0 else []
+                entry = UnsupportedIREntry(
+                    line_number=line_idx + 1,
+                    line=line,
+                    context_before=list(ctx_before),
+                    context_after=list(ctx_after),
+                    category=_classify_unsupported_ir(line),
+                )
+                unsupported_lines.append(entry)
+                if best_effort:
+                    emit(f"// UNSUPPORTED: {line}")
+                    continue
+
 
             if not terminated:
                 emit("return;")
@@ -1709,6 +1777,50 @@ class MetalBackend(BaseBackend):
         body_lines.append("    default: return;")
         body_lines.append("    }")
         body_lines.append("  }")
+
+        if unsupported_lines:
+            from collections import Counter
+
+            counts = Counter(e.category for e in unsupported_lines)
+            total = len(unsupported_lines)
+            cat_summary = ", ".join(
+                f"{n} {cat}" for cat, n in sorted(counts.items())
+            )
+
+            artifact_dir = os.environ.get(
+                "TRITON_CACHE_DIR", os.path.expanduser("~/.triton")
+            )
+            os.makedirs(artifact_dir, exist_ok=True)
+            artifact_path = os.path.join(artifact_dir, "metal_unsupported_ir.log")
+            with open(artifact_path, "w") as flog:
+                flog.write(f"Metal IR Translation Diagnostic Report\n")
+                flog.write(f"======================================\n\n")
+                flog.write(f"Total unsupported lines: {total}\n")
+                for cat, n in sorted(counts.items()):
+                    flog.write(f"  {cat}: {n}\n")
+                flog.write(f"\nDetails:\n")
+                flog.write(f"--------\n\n")
+                for i, e in enumerate(unsupported_lines, 1):
+                    flog.write(f"[{i}] Line {e.line_number} ({e.category}):\n")
+                    for cb in e.context_before:
+                        flog.write(f"    | {cb}\n")
+                    flog.write(f"  > | {e.line}\n")
+                    for ca in e.context_after:
+                        flog.write(f"    | {ca}\n")
+                    flog.write(f"\n")
+
+            preview = "; ".join(
+                e.line for e in unsupported_lines[:3]
+            )
+            msg = (
+                f"{total} unsupported LLVM IR lines ({cat_summary}). "
+                f"See {artifact_path} for details. "
+                f"First unsupported: {preview}"
+            )
+            if best_effort:
+                warnings.warn(msg, stacklevel=2)
+            else:
+                raise RuntimeError(msg)
 
         msl_lines = [
             "#include <metal_stdlib>",

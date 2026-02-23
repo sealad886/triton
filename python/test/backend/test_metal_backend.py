@@ -2421,3 +2421,492 @@ entry:
         assert "_storage" in msl
         assert "thread int*" in msl
         assert "loaded" in msl
+
+
+# ── Corpus-Driven Translation Tests (Phase 7 – Task 1.6) ────────────
+
+
+class TestMetalLLVMIRCorpus:
+    """Validate the translator handles all IR patterns from real Triton kernels."""
+
+    def test_corpus_vector_add(self):
+        """Basic ops: add, load, store, gep, br."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @vec_add_kernel(ptr %a, ptr %b, ptr %out, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %pa = getelementptr float, ptr %a, i64 %idx
+  %pb = getelementptr float, ptr %b, i64 %idx
+  %pout = getelementptr float, ptr %out, i64 %idx
+  %va = load float, ptr %pa
+  %vb = load float, ptr %pb
+  %sum = fadd float %va, %vb
+  store float %sum, ptr %pout
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "fadd" not in msl  # should be lowered to +
+
+    def test_corpus_reduction(self):
+        """Reduction kernel: phi, fcmp, fadd, select, branch patterns."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @reduce_kernel(ptr %input, ptr %out, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp_bounds = icmp slt i32 %tid, %n
+  br i1 %cmp_bounds, label %loop_header, label %done
+
+loop_header:
+  %i = phi i32 [0, %entry], [%i_next, %loop_body]
+  %acc = phi float [0.0, %entry], [%acc_next, %loop_body]
+  %loop_cmp = icmp slt i32 %i, %n
+  br i1 %loop_cmp, label %loop_body, label %write_out
+
+loop_body:
+  %idx = sext i32 %i to i64
+  %ptr = getelementptr float, ptr %input, i64 %idx
+  %val = load float, ptr %ptr
+  %cmp_gt = fcmp ogt float %val, %acc
+  %acc_next = select i1 %cmp_gt, float %val, float %acc
+  %i_next = add i32 %i, 1
+  br label %loop_header
+
+write_out:
+  %out_idx = sext i32 %tid to i64
+  %out_ptr = getelementptr float, ptr %out, i64 %out_idx
+  store float %acc, ptr %out_ptr
+  br label %done
+
+done:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "__triton_pred_block" in msl  # phi lowering
+
+    def test_corpus_matmul(self):
+        """Matmul-like kernel: nested loops with phi, fmuladd, gep chains."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @matmul_kernel(ptr %A, ptr %B, ptr %C, i32 %M, i32 %N, i32 %K) {
+entry:
+  %row = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %col = call i32 @__metal_get_thread_position_in_threadgroup_y()
+  br label %k_loop
+
+k_loop:
+  %k = phi i32 [0, %entry], [%k_next, %k_body]
+  %acc = phi float [0.0, %entry], [%acc_next, %k_body]
+  %k_cmp = icmp slt i32 %k, %K
+  br i1 %k_cmp, label %k_body, label %store_result
+
+k_body:
+  %a_off = mul i32 %row, %K
+  %a_idx = add i32 %a_off, %k
+  %a_idx64 = sext i32 %a_idx to i64
+  %a_ptr = getelementptr float, ptr %A, i64 %a_idx64
+  %a_val = load float, ptr %a_ptr
+  %b_off = mul i32 %k, %N
+  %b_idx = add i32 %b_off, %col
+  %b_idx64 = sext i32 %b_idx to i64
+  %b_ptr = getelementptr float, ptr %B, i64 %b_idx64
+  %b_val = load float, ptr %b_ptr
+  %acc_next = call float @llvm.fmuladd.f32(float %a_val, float %b_val, float %acc)
+  %k_next = add i32 %k, 1
+  br label %k_loop
+
+store_result:
+  %c_off = mul i32 %row, %N
+  %c_idx = add i32 %c_off, %col
+  %c_idx64 = sext i32 %c_idx to i64
+  %c_ptr = getelementptr float, ptr %C, i64 %c_idx64
+  store float %acc, ptr %c_ptr
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "fma(" in msl  # fmuladd -> fma
+
+    def test_corpus_atomics(self):
+        """Kernel with atomicrmw add."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @atomic_add_kernel(ptr %data, ptr %out) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %idx = sext i32 %tid to i64
+  %ptr = getelementptr i32, ptr %data, i64 %idx
+  %val = load i32, ptr %ptr
+  %old = atomicrmw add ptr %out, i32 %val seq_cst
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "atomic_fetch_add_explicit" in msl
+
+    def test_corpus_mixed_types(self):
+        """Kernel with fptrunc, fpext, sext, zext, trunc."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @mixed_types_kernel(ptr %out, float %f_in, i64 %i_in) {
+entry:
+  %h = fptrunc float %f_in to half
+  %d = fpext float %f_in to double
+  %narrow = trunc i64 %i_in to i32
+  %wide = sext i32 %narrow to i64
+  %unsigned_wide = zext i32 %narrow to i64
+  %from_float = fptosi float %f_in to i32
+  %to_float = sitofp i32 %from_float to float
+  %p = getelementptr float, ptr %out, i64 0
+  store float %to_float, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "(half)" in msl  # fptrunc
+        assert "(double)" in msl  # fpext
+
+    def test_corpus_intrinsic_math(self):
+        """Kernel with intrinsic math calls: fabs, sqrt, exp, log."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @math_kernel(ptr %out, float %x) {
+entry:
+  %a = call float @llvm.fabs.f32(float %x)
+  %b = call float @llvm.sqrt.f32(float %a)
+  %c = call float @llvm.exp.f32(float %b)
+  %d = call float @llvm.log.f32(float %c)
+  %e = call float @llvm.sin.f32(float %d)
+  %f = call float @llvm.cos.f32(float %e)
+  %p = getelementptr float, ptr %out, i64 0
+  store float %f, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "fabs(" in msl
+        assert "sqrt(" in msl
+        assert "exp(" in msl
+        assert "log(" in msl
+        assert "sin(" in msl
+        assert "cos(" in msl
+
+    def test_corpus_switch_pattern(self):
+        """Switch statement pattern with multiple cases."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @switch_kernel(ptr %out, i32 %selector) {
+entry:
+  switch i32 %selector, label %default [i32 0, label %case0 i32 1, label %case1 i32 2, label %case2]
+
+case0:
+  %p0 = getelementptr i32, ptr %out, i64 0
+  store i32 10, ptr %p0
+  br label %done
+
+case1:
+  %p1 = getelementptr i32, ptr %out, i64 0
+  store i32 20, ptr %p1
+  br label %done
+
+case2:
+  %p2 = getelementptr i32, ptr %out, i64 0
+  store i32 30, ptr %p2
+  br label %done
+
+default:
+  %pd = getelementptr i32, ptr %out, i64 0
+  store i32 -1, ptr %pd
+  br label %done
+
+done:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "switch" in msl
+        assert "case 0:" in msl
+        assert "case 1:" in msl
+
+    def test_corpus_freeze_and_fneg(self):
+        """Freeze and fneg instructions."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @freeze_fneg_kernel(ptr %out, float %x) {
+entry:
+  %frozen = freeze float %x
+  %neg = fneg float %frozen
+  %p = getelementptr float, ptr %out, i64 0
+  store float %neg, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "-(" in msl  # fneg
+
+    def test_corpus_extractinsert_value(self):
+        """extractvalue / insertvalue with aggregate types."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @aggr_kernel(ptr %out, i32 %a, i32 %b) {
+entry:
+  %r = call {i32, i1} @llvm.sadd.with.overflow.i32(i32 %a, i32 %b)
+  %sum = extractvalue {i32, i1} %r, 0
+  %overflow = extractvalue {i32, i1} %r, 1
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %sum, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "field0" in msl
+
+    def test_corpus_alloca_pattern(self):
+        """alloca + thread-local variable pattern."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @alloca_kernel(ptr %out, i32 %val) {
+entry:
+  %tmp = alloca i32, align 4
+  store i32 %val, ptr %tmp
+  %loaded = load i32, ptr %tmp
+  %doubled = add i32 %loaded, %loaded
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %doubled, ptr %p
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert "_storage" in msl
+        assert "thread int*" in msl
+
+
+class TestMetalUnsupportedIRDiagnostics:
+    """Verify the structured diagnostic system for unsupported LLVM IR."""
+
+    def test_unsupported_ir_raises_with_summary(self):
+        """Hitting unsupported lines produces a RuntimeError with a summary."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @bad_kernel(ptr %out) {
+entry:
+  invoke void @some_func() to label %next unwind label %pad
+
+next:
+  ret void
+
+pad:
+  %lp = landingpad token cleanup
+  ret void
+}
+"""
+        with pytest.raises(RuntimeError, match="unsupported LLVM IR"):
+            MetalBackend.make_metal_ir(ir, {}, None)
+
+    def test_unsupported_ir_diagnostic_categories(self):
+        """Diagnostic entries are classified correctly."""
+        from third_party.metal.backend.compiler import (
+            _classify_unsupported_ir,
+        )
+
+        assert _classify_unsupported_ir("invoke void @foo()") == "instruction"
+        assert _classify_unsupported_ir("resume { ptr, i32 } %r") == "instruction"
+        assert _classify_unsupported_ir("landingpad token cleanup") == "instruction"
+        assert _classify_unsupported_ir("indirectbr ptr %addr, [label %a]") == "instruction"
+        assert _classify_unsupported_ir("!0 = !{i32 1}") == "metadata"
+        assert _classify_unsupported_ir("attributes #0 = { nounwind }") == "metadata"
+        assert _classify_unsupported_ir(
+            "%r = call i32 @llvm.some.unknown.intrinsic(i32 %x)"
+        ) == "intrinsic"
+        assert _classify_unsupported_ir("something completely unknown") == "unknown"
+
+    def test_unsupported_ir_artifact_file(self):
+        """Diagnostic artifact file is written on unsupported IR."""
+        import tempfile
+
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @artifact_kernel(ptr %out) {
+entry:
+  invoke void @some_func() to label %next unwind label %pad
+
+next:
+  ret void
+
+pad:
+  %lp = landingpad token cleanup
+  ret void
+}
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"TRITON_CACHE_DIR": tmpdir}):
+                with pytest.raises(RuntimeError):
+                    MetalBackend.make_metal_ir(ir, {}, None)
+                artifact_path = os.path.join(tmpdir, "metal_unsupported_ir.log")
+                assert os.path.exists(artifact_path)
+                content = open(artifact_path).read()
+                assert "invoke" in content
+                assert "instruction" in content or "unknown" in content
+
+    def test_best_effort_mode_emits_comments(self):
+        """best_effort=True emits UNSUPPORTED comments instead of raising."""
+        from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+        ir = """\
+define void @besteffort_kernel(ptr %out) {
+entry:
+  invoke void @some_func() to label %next unwind label %pad
+
+next:
+  ret void
+
+pad:
+  %lp = landingpad token cleanup
+  ret void
+}
+"""
+        opt = MetalOptions(best_effort=True)
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"TRITON_CACHE_DIR": tmpdir}):
+                with pytest.warns(match="unsupported LLVM IR"):
+                    msl = MetalBackend.make_metal_ir(ir, {}, opt)
+                assert "// UNSUPPORTED:" in msl
+                assert "kernel void" in msl
+                artifact_path = os.path.join(tmpdir, "metal_unsupported_ir.log")
+                assert os.path.exists(artifact_path)
+
+    def test_best_effort_no_unsupported_no_warning(self):
+        """best_effort=True with fully supported IR produces no warnings."""
+        from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+        ir = """\
+define void @clean_kernel(ptr %out, i32 %val) {
+entry:
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %val, ptr %p
+  ret void
+}
+"""
+        opt = MetalOptions(best_effort=True)
+        import warnings as w
+
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            msl = MetalBackend.make_metal_ir(ir, {}, opt)
+        metal_warns = [x for x in caught if "unsupported" in str(x.message).lower()]
+        assert len(metal_warns) == 0
+        assert "kernel void" in msl
+        assert "UNSUPPORTED" not in msl
+
+    def test_unsupported_ir_entry_dataclass(self):
+        """UnsupportedIREntry is a proper dataclass with expected fields."""
+        from third_party.metal.backend.compiler import UnsupportedIREntry
+
+        entry = UnsupportedIREntry(
+            line_number=5,
+            line="invoke void @foo()",
+            context_before=["br label %bb1"],
+            context_after=["ret void"],
+            category="instruction",
+        )
+        assert entry.line_number == 5
+        assert entry.category == "instruction"
+        assert len(entry.context_before) == 1
+        assert len(entry.context_after) == 1
+
+    def test_error_message_includes_first_lines(self):
+        """The RuntimeError message includes up to the first 3 unsupported lines."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @multi_unsup_kernel(ptr %out) {
+entry:
+  invoke void @a() to label %b1 unwind label %pad
+b1:
+  invoke void @b() to label %b2 unwind label %pad
+b2:
+  invoke void @c() to label %b3 unwind label %pad
+b3:
+  invoke void @d() to label %done unwind label %pad
+done:
+  ret void
+pad:
+  %lp = landingpad token cleanup
+  ret void
+}
+"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"TRITON_CACHE_DIR": tmpdir}):
+                with pytest.raises(RuntimeError) as ctx:
+                    MetalBackend.make_metal_ir(ir, {}, None)
+                msg = str(ctx.value)
+                assert "unsupported LLVM IR" in msg.lower() or "unsupported" in msg.lower()
+                assert "invoke" in msg
+
+    def test_normal_path_zero_overhead(self):
+        """The normal (all-supported) path completes without diagnostics."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @normal_kernel(ptr %a, ptr %b, ptr %out) {
+entry:
+  %p_a = getelementptr float, ptr %a, i64 0
+  %p_b = getelementptr float, ptr %b, i64 0
+  %p_out = getelementptr float, ptr %out, i64 0
+  %va = load float, ptr %p_a
+  %vb = load float, ptr %p_b
+  %sum = fadd float %va, %vb
+  store float %sum, ptr %p_out
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "kernel void" in msl
+        assert "UNSUPPORTED" not in msl
