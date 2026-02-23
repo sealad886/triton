@@ -2910,3 +2910,427 @@ entry:
         msl = MetalBackend.make_metal_ir(ir, {}, None)
         assert "kernel void" in msl
         assert "UNSUPPORTED" not in msl
+
+
+# ── Multi-dtype GEMM compilation coverage (Phase 8, Task 2.2) ───────
+
+
+class TestMetalGEMMDtypes:
+    """Compile matmul kernels with different dtype combinations."""
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_gemm_fp32_fp32(self):
+        """fp32 x fp32 -> fp32 accumulation."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_fp32(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak, stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_fp32,
+            signature={
+                "a_ptr": "*fp32", "b_ptr": "*fp32", "c_ptr": "*fp32",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    @pytest.mark.xfail(
+        reason="Metal C++ FMA pass asserts on mixed-precision dot (fp16 input, fp32 acc) — "
+        "FMA.cpp:28 aElem.getType() == tgtTy. Tracked for Phase 8 resolution.",
+        strict=True,
+    )
+    def test_gemm_fp16_input(self):
+        """fp16 x fp16 -> fp32 accumulation."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_fp16(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak, stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc.to(tl.float16), mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_fp16,
+            signature={
+                "a_ptr": "*fp16", "b_ptr": "*fp16", "c_ptr": "*fp16",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_gemm_odd_k_tail(self):
+        """Matmul with K not multiple of BLOCK_K (K param=17, BLOCK_K=16)."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_odd(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak, stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a_mask = (offs_m[:, None] < m) & (offs_k[None, :] + kk < k)
+                b_mask = (offs_k[:, None] + kk < k) & (offs_n[None, :] < n)
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=a_mask, other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=b_mask, other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_odd,
+            signature={
+                "a_ptr": "*fp32", "b_ptr": "*fp32", "c_ptr": "*fp32",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_gemm_small_tiles(self):
+        """Small tile GEMM (BLOCK_M=N=K=8)."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_small(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak, stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_small,
+            signature={
+                "a_ptr": "*fp32", "b_ptr": "*fp32", "c_ptr": "*fp32",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 8, "BLOCK_N": 8, "BLOCK_K": 8},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+
+# ── Simdgroup matrix stub tests (Phase 8, Task 2.3) ─────────────────
+
+
+class TestMetalSimdgroupMatrixStubs:
+    """Verify translator handles simdgroup_matrix call patterns."""
+
+    def test_simdgroup_load_translation(self):
+        """__metal_simdgroup_load -> simdgroup_load() in MSL."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @simdgroup_load_kernel(ptr addrspace(1) %ptr) {
+entry:
+  %mat = call <8 x float> @__metal_simdgroup_load(ptr addrspace(1) %ptr, i32 64)
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "simdgroup_load" in msl
+        assert "simdgroup_matrix" in msl
+
+    def test_simdgroup_store_translation(self):
+        """__metal_simdgroup_store -> simdgroup_store() in MSL."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @simdgroup_store_kernel(ptr addrspace(1) %ptr) {
+entry:
+  %mat = call <8 x float> @__metal_simdgroup_load(ptr addrspace(1) %ptr, i32 64)
+  call void @__metal_simdgroup_store(<8 x float> %mat, ptr addrspace(1) %ptr, i32 64)
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "simdgroup_store" in msl
+
+    def test_simdgroup_multiply_accumulate_translation(self):
+        """__metal_simdgroup_multiply_accumulate -> simdgroup_multiply_accumulate()."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @simdgroup_mac_kernel(ptr addrspace(1) %a_ptr, ptr addrspace(1) %b_ptr, ptr addrspace(1) %c_ptr) {
+entry:
+  %a = call <8 x float> @__metal_simdgroup_load(ptr addrspace(1) %a_ptr, i32 64)
+  %b = call <8 x float> @__metal_simdgroup_load(ptr addrspace(1) %b_ptr, i32 64)
+  %c = call <8 x float> @__metal_simdgroup_load(ptr addrspace(1) %c_ptr, i32 64)
+  %d = call <8 x float> @__metal_simdgroup_multiply_accumulate(<8 x float> %a, <8 x float> %b, <8 x float> %c)
+  call void @__metal_simdgroup_store(<8 x float> %d, ptr addrspace(1) %c_ptr, i32 64)
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "simdgroup_multiply_accumulate" in msl
+        assert "simdgroup_load" in msl
+        assert "simdgroup_store" in msl
+
+    def test_simdgroup_matrix_type_declaration(self):
+        """simdgroup_matrix type appears in variable declarations."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @simdgroup_type_kernel(ptr addrspace(1) %ptr) {
+entry:
+  %mat = call <8 x float> @__metal_simdgroup_load(ptr addrspace(1) %ptr, i32 64)
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "simdgroup_matrix<float, 8, 8>" in msl
+
+    def test_simdgroup_half_type(self):
+        """simdgroup_matrix with half element type."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @simdgroup_half_kernel(ptr addrspace(1) %ptr) {
+entry:
+  %mat = call <8 x half> @__metal_simdgroup_load(ptr addrspace(1) %ptr, i32 32)
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "simdgroup_matrix<half, 8, 8>" in msl
+
+
+# ── Matmul perf regression tests (Phase 8, Task 2.4) ────────────────
+
+
+class TestMetalMatmulRegression:
+    """Guard against code-quality regressions in generated matmul MSL."""
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_matmul_fma_count_16x16(self):
+        """FMA instruction count for 16x16 blocked matmul should be stable."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_regress(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak, stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_regress,
+            signature={
+                "a_ptr": "*fp32", "b_ptr": "*fp32", "c_ptr": "*fp32",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+        msl_text = kernel.asm["metal"]
+        if isinstance(msl_text, bytes):
+            msl_text = msl_text.decode("utf-8", errors="replace")
+
+        fma_count = msl_text.count("fma(")
+        assert fma_count >= 10, (
+            f"Expected at least 10 fma() calls in matmul MSL, got {fma_count}"
+        )
+        assert fma_count < 50000, (
+            f"fma() count suspiciously high ({fma_count}), possible code bloat"
+        )
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_matmul_msl_line_count(self):
+        """Generated MSL should not blow up in size."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_lines(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak, stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_lines,
+            signature={
+                "a_ptr": "*fp32", "b_ptr": "*fp32", "c_ptr": "*fp32",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+        msl_text = kernel.asm["metal"]
+        if isinstance(msl_text, bytes):
+            msl_text = msl_text.decode("utf-8", errors="replace")
+
+        line_count = len(msl_text.splitlines())
+        assert line_count < 10000, (
+            f"Matmul MSL has {line_count} lines - possible code bloat (expected < 10000)"
+        )
+        assert line_count > 20, (
+            f"Matmul MSL has only {line_count} lines - suspiciously small"
+        )

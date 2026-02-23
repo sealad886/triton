@@ -530,7 +530,7 @@ class MetalBackend(BaseBackend):
         passes.ttgpuir.add_optimize_thread_locality(pm)
         # passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
-        # passes.ttgpuir.add_optimize_dot_operands(pm, True)
+        passes.ttgpuir.add_optimize_dot_operands(pm, True)
         passes.ttir.add_loop_aware_cse(pm)
         passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
@@ -1195,9 +1195,21 @@ class MetalBackend(BaseBackend):
 
                 m = _RE_CALL_OUT.match(line)
                 if m:
-                    out_ssa, ret_spec, _, _ = m.groups()
+                    out_ssa, ret_spec, fn_name, _ = m.groups()
                     ret_type = extract_call_ret_type(ret_spec)
-                    if ret_type.startswith("{"):
+                    if fn_name in (
+                        "__metal_simdgroup_load",
+                        "__metal_simdgroup_multiply_accumulate",
+                    ):
+                        elem_ty = "float"
+                        vec_m = _RE_VEC_TYPE.match(ret_type)
+                        if vec_m:
+                            elem_ty = llvm_scalar_to_msl(vec_m.group(2))
+                        record_ssa_decl(
+                            out_ssa,
+                            msl_ty=f"simdgroup_matrix<{elem_ty}, 8, 8>",
+                        )
+                    elif ret_type.startswith("{"):
                         struct_name, _ = get_aggregate_struct_name(ret_type)
                         record_ssa_decl(out_ssa, msl_ty=struct_name)
                     else:
@@ -1481,6 +1493,16 @@ class MetalBackend(BaseBackend):
                         emit(f"{out} = simd_shuffle_up({args[0]}, {args[1]});")
                     elif fn == "__metal_simd_shuffle" and len(args) == 2:
                         emit(f"{out} = simd_shuffle({args[0]}, {args[1]});")
+                    elif fn == "__metal_simdgroup_load" and len(args) == 2:
+                        emit(
+                            f"simdgroup_load({out}, "
+                            f"(const device float*){args[0]}, {args[1]});"
+                        )
+                    elif fn == "__metal_simdgroup_multiply_accumulate" and len(args) == 3:
+                        emit(
+                            f"simdgroup_multiply_accumulate("
+                            f"{out}, {args[0]}, {args[1]}, {args[2]});"
+                        )
                     else:
                         emit(f"{out} = {fn}({', '.join(args)});")
                     continue
@@ -1581,6 +1603,11 @@ class MetalBackend(BaseBackend):
                         emit(f"if ({args[2]}) {{ *{args[1]} = {args[0]}; }}")
                     elif fn == "__metal_simdgroup_barrier":
                         emit("threadgroup_barrier(mem_flags::mem_none);")
+                    elif fn == "__metal_simdgroup_store" and len(args) == 3:
+                        emit(
+                            f"simdgroup_store({args[0]}, "
+                            f"(device float*){args[1]}, {args[2]});"
+                        )
                     elif fn.startswith("llvm.assume"):
                         emit("(void)0;")
                     elif (
