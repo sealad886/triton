@@ -136,10 +136,15 @@ _RE_VEC_TYPE = re.compile(r"^<\s*(\d+)\s+x\s+(.+)\s*>$")
 _RE_ALIGN_STRIP = re.compile(r",\s*align\s+\d+$")
 _RE_CONST_INT = re.compile(r"^-?[0-9]+$")
 _RE_CONST_HEX_FLOAT = re.compile(r"^0x([0-9A-Fa-f]{16})$")
+_RE_CONST_HEX_HALF = re.compile(r"^0xH([0-9A-Fa-f]{4})$")
+_RE_CONST_HEX_BFLOAT = re.compile(r"^0xR([0-9A-Fa-f]{4})$")
 _RE_CONST_FLOAT = re.compile(r"^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$")
 _RE_CALL_RET_VEC = re.compile(r"<\s*\d+\s+x\s+[^>]+\s*>")
 _RE_CALL_RET_PTR = re.compile(r"ptr(?:\s+addrspace\(\d+\))?")
 _RE_CALL_RET_SCALAR = re.compile(r"\bi\d+\b|\bi1\b|\bhalf\b|\bfloat\b|\bdouble\b")
+
+# LLVM IR attribute-group reference stripping (applied during line cleaning)
+_RE_ATTR_GROUP_STRIP = re.compile(r"\s+#\d+\s*$")
 
 # SSA declaration pass patterns (types needed but not full codegen)
 _RE_PHI_DECL = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+(.+?)\s+\[")
@@ -738,6 +743,8 @@ class MetalBackend(BaseBackend):
                 parts.append(tail)
             return parts
 
+        _msl_id_used: dict[str, str] = {}  # msl_name -> llvm_name that claimed it
+
         def msl_id(llvm_name: str) -> str:
             raw = llvm_name.lstrip("%")
             raw = _RE_MSL_ID_CLEAN.sub("_", raw)
@@ -747,6 +754,18 @@ class MetalBackend(BaseBackend):
                 raw = f"v{raw}"
             if raw in _MSL_RESERVED_IDENTIFIERS:
                 raw = f"v_{raw}"
+            # Disambiguate collisions: different LLVM names (e.g. %foo.bar
+            # vs %foo_bar) can map to the same MSL identifier after
+            # character replacement.
+            owner = _msl_id_used.get(raw)
+            if owner is not None and owner != llvm_name:
+                suffix = 2
+                candidate = f"{raw}_{suffix}"
+                while candidate in _msl_id_used:
+                    suffix += 1
+                    candidate = f"{raw}_{suffix}"
+                raw = candidate
+            _msl_id_used[raw] = llvm_name
             return raw
 
         def llvm_scalar_to_msl(llvm_ty: str) -> str:
@@ -827,6 +846,38 @@ class MetalBackend(BaseBackend):
                 if math.isnan(dval):
                     return "NAN"
                 return f"{dval!r}f"
+            # LLVM IR half-precision hex float: 0xH followed by 4 hex digits
+            # encoding an IEEE-754 binary16 value.
+            hex_h = _RE_CONST_HEX_HALF.match(token)
+            if hex_h:
+                raw16 = int(hex_h.group(1), 16)
+                # Decode IEEE-754 binary16 → Python float
+                sign = (raw16 >> 15) & 1
+                exp = (raw16 >> 10) & 0x1F
+                frac = raw16 & 0x3FF
+                if exp == 0:
+                    hval = (-1) ** sign * (2 ** -14) * (frac / 1024.0)
+                elif exp == 0x1F:
+                    if frac:
+                        return "NAN"
+                    return "-INFINITY" if sign else "INFINITY"
+                else:
+                    hval = (-1) ** sign * (2 ** (exp - 15)) * (1.0 + frac / 1024.0)
+                if hval == 0.0 and sign:
+                    return "(-0.0h)"
+                return f"(half)({hval!r}f)"
+            # LLVM IR bfloat16 hex float: 0xR followed by 4 hex digits.
+            hex_bf = _RE_CONST_HEX_BFLOAT.match(token)
+            if hex_bf:
+                raw_bf = int(hex_bf.group(1), 16)
+                # bfloat16 is the upper 16 bits of an IEEE-754 float32
+                f32_bits = raw_bf << 16
+                fval = struct.unpack("f", struct.pack("I", f32_bits))[0]
+                if math.isinf(fval):
+                    return "-INFINITY" if fval < 0 else "INFINITY"
+                if math.isnan(fval):
+                    return "NAN"
+                return f"{fval!r}f"
             if _RE_CONST_FLOAT.match(token):
                 return token if token.endswith("f") else f"{token}f"
             return token
@@ -1104,16 +1155,24 @@ class MetalBackend(BaseBackend):
             if fn.startswith("llvm.fshr.") and nargs == 3:
                 bits = "32" if "i32" in fn else "64"
                 u_ty = "unsigned int" if "i32" in fn else "unsigned long"
+                a, b, c = args[0], args[1], args[2]
+                # Guard against UB: when shift % bits == 0, shifting by
+                # the full bit width is undefined in C/MSL.  Use a
+                # ternary so the complementary shift is only evaluated
+                # when the amount is non-zero.
                 return (
-                    f"(({u_ty})({args[1]}) >> ({args[2]} & ({bits} - 1))) | "
-                    f"(({u_ty})({args[0]}) << ({bits} - ({args[2]} & ({bits} - 1))))"
+                    f"(({c} & ({bits} - 1)) == 0 ? ({u_ty})({b}) : "
+                    f"(({u_ty})({b}) >> ({c} & ({bits} - 1))) | "
+                    f"(({u_ty})({a}) << ({bits} - ({c} & ({bits} - 1)))))"
                 )
             if fn.startswith("llvm.fshl.") and nargs == 3:
                 bits = "32" if "i32" in fn else "64"
                 u_ty = "unsigned int" if "i32" in fn else "unsigned long"
+                a, b, c = args[0], args[1], args[2]
                 return (
-                    f"(({u_ty})({args[0]}) << ({args[2]} & ({bits} - 1))) | "
-                    f"(({u_ty})({args[1]}) >> ({bits} - ({args[2]} & ({bits} - 1))))"
+                    f"(({c} & ({bits} - 1)) == 0 ? ({u_ty})({a}) : "
+                    f"(({u_ty})({a}) << ({c} & ({bits} - 1))) | "
+                    f"(({u_ty})({b}) >> ({bits} - ({c} & ({bits} - 1)))))"
                 )
             if fn.startswith("llvm.powi.") and nargs == 2:
                 return f"powr({args[0]}, static_cast<float>({args[1]}))"
@@ -1171,6 +1230,7 @@ class MetalBackend(BaseBackend):
                 continue
             line = _RE_DBG_STRIP.sub("", line)
             line = _RE_COMMENT_STRIP.sub("", line).rstrip()
+            line = _RE_ATTR_GROUP_STRIP.sub("", line)
             if not line:
                 continue
             cleaned_lines.append(line)
@@ -1687,10 +1747,21 @@ class MetalBackend(BaseBackend):
                             f"((device char*){args[0]})[__i] = (char){args[1]};"
                         )
                     elif fn.startswith("llvm.memmove") and len(args) >= 3:
+                        # Correct memmove semantics: copy backward when
+                        # dst > src to handle overlapping regions safely.
                         emit(
-                            f"for (int __i = 0; __i < {args[2]}; __i++) "
+                            f"if ((uintptr_t){args[0]} > (uintptr_t){args[1]}) {{"
+                        )
+                        emit(
+                            f"  for (int __i = {args[2]} - 1; __i >= 0; __i--) "
                             f"((device char*){args[0]})[__i] = ((device char*){args[1]})[__i];"
                         )
+                        emit(f"}} else {{")
+                        emit(
+                            f"  for (int __i = 0; __i < {args[2]}; __i++) "
+                            f"((device char*){args[0]})[__i] = ((device char*){args[1]})[__i];"
+                        )
+                        emit(f"}}")
                     else:
                         emit(f"{fn}({', '.join(args)});")
                     continue
@@ -2039,6 +2110,7 @@ class MetalBackend(BaseBackend):
         except (ImportError, AttributeError):
             triton_version = "dev"
 
-        backend_hash = hashlib.sha256(open(__file__, "rb").read()).hexdigest()[:12]
+        with open(__file__, "rb") as _f:
+            backend_hash = hashlib.sha256(_f.read()).hexdigest()[:12]
 
         return f"{version}-{self.target.arch}-{triton_version}-{backend_hash}"

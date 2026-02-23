@@ -620,10 +620,12 @@ class MetalKernelHandle:
     def _get_scratch_buffer(self):
         """Lazily allocate the global scratch buffer if metadata requests one."""
         if self._scratch_buffer is None and self.global_scratch_size > 0:
-            self._scratch_buffer = self.device.newBufferWithLength_options_(
-                self.global_scratch_size,
-                0,  # MTLResourceStorageModeShared
-            )
+            with self._lock:
+                if self._scratch_buffer is None:
+                    self._scratch_buffer = self.device.newBufferWithLength_options_(
+                        self.global_scratch_size,
+                        0,  # MTLResourceStorageModeShared
+                    )
         return self._scratch_buffer
 
     def launch_kernel(

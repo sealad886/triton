@@ -4295,3 +4295,215 @@ class TestMetalCrossBackendNumerics:
         )
         expected = a @ b
         assert expected.shape == (64, 64)
+
+
+# ── Audit ERR regression tests ──────────────────────────────────────
+
+
+class TestMetalAuditERR001HalfHexFloat:
+    """ERR-001: Half / bfloat16 hex float constants must produce valid MSL."""
+
+    def test_half_hex_zero(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @half_zero(ptr %out) {
+  store half 0xH0000, ptr %out
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "0xH" not in msl, "Raw LLVM half hex literal leaked into MSL"
+
+    def test_half_hex_one(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @half_one(ptr %out) {
+  store half 0xH3C00, ptr %out
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "0xH" not in msl
+        assert "(half)" in msl or "1.0" in msl
+
+    def test_half_hex_negative(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @half_neg(ptr %out) {
+  store half 0xHBC00, ptr %out
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "0xH" not in msl
+
+    def test_half_hex_infinity(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @half_inf(ptr %out) {
+  store half 0xH7C00, ptr %out
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "INFINITY" in msl
+
+    def test_half_hex_nan(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @half_nan(ptr %out) {
+  store half 0xH7E00, ptr %out
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "NAN" in msl
+
+    def test_bfloat16_constant_to_msl_regex(self):
+        """Verify _RE_CONST_HEX_BFLOAT regex matches 0xR prefix."""
+        import struct as _struct
+
+        from third_party.metal.backend.compiler import _RE_CONST_HEX_BFLOAT
+
+        m = _RE_CONST_HEX_BFLOAT.match("0xR3F80")
+        assert m is not None
+        raw_bf = int(m.group(1), 16)
+        f32_bits = raw_bf << 16
+        fval = _struct.unpack("f", _struct.pack("I", f32_bits))[0]
+        assert abs(fval - 1.0) < 0.01
+
+
+class TestMetalAuditERR002FunnelShiftZeroGuard:
+    """ERR-002: fshr/fshl must not invoke UB when shift amount is 0."""
+
+    def test_fshr_shift_zero_guard(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fshr_kernel(ptr %out, i32 %a, i32 %b, i32 %c) {
+  %r = call i32 @llvm.fshr.i32(i32 %a, i32 %b, i32 %c)
+  store i32 %r, ptr %out
+  ret void
+}
+declare i32 @llvm.fshr.i32(i32, i32, i32)
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "== 0 ?" in msl, "Missing zero-shift guard in fshr expansion"
+
+    def test_fshl_shift_zero_guard(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fshl_kernel(ptr %out, i32 %a, i32 %b, i32 %c) {
+  %r = call i32 @llvm.fshl.i32(i32 %a, i32 %b, i32 %c)
+  store i32 %r, ptr %out
+  ret void
+}
+declare i32 @llvm.fshl.i32(i32, i32, i32)
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "== 0 ?" in msl, "Missing zero-shift guard in fshl expansion"
+
+    def test_fshr_i64_guard(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fshr64(ptr %out, i64 %a, i64 %b, i64 %c) {
+  %r = call i64 @llvm.fshr.i64(i64 %a, i64 %b, i64 %c)
+  store i64 %r, ptr %out
+  ret void
+}
+declare i64 @llvm.fshr.i64(i64, i64, i64)
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "64 - 1" in msl and "== 0 ?" in msl
+
+
+class TestMetalAuditERR003MemmoveDirection:
+    """ERR-003: memmove must handle overlapping regions correctly."""
+
+    def test_memmove_uses_backward_copy(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @memmove_kernel(ptr %dst, ptr %src) {
+  call void @llvm.memmove.p0.p0.i32(ptr %dst, ptr %src, i32 16, i1 false)
+  ret void
+}
+declare void @llvm.memmove.p0.p0.i32(ptr, ptr, i32, i1)
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "__i >= 0; __i--" in msl, "Missing backward copy path in memmove"
+        assert "uintptr_t" in msl, "Missing pointer comparison for direction"
+
+
+class TestMetalAuditERR004AttrGroupStripping:
+    """ERR-004: LLVM attribute group refs (#N) on calls must not block matching."""
+
+    def test_call_with_attr_group(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @attr_kernel(ptr %out) {
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x() #3
+  store i32 %tid, ptr %out
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "thread_position_in_threadgroup.x" in msl
+
+    def test_void_call_with_attr_group(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @lifetime_kernel(ptr %p) {
+  call void @llvm.lifetime.start.p0(i64 4, ptr %p) #1
+  call void @llvm.lifetime.end.p0(i64 4, ptr %p) #1
+  ret void
+}
+declare void @llvm.lifetime.start.p0(i64, ptr)
+declare void @llvm.lifetime.end.p0(i64, ptr)
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "UNSUPPORTED" not in msl
+
+
+class TestMetalAuditERR005SSANameCollision:
+    """ERR-005: Different LLVM SSA names must not collide after msl_id mapping."""
+
+    def test_dot_vs_underscore_disambiguated(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @collision_kernel(ptr %out, i32 %n) {
+  %x.0 = add i32 %n, 1
+  %x_0 = add i32 %n, 2
+  %sum = add i32 %x.0, %x_0
+  store i32 %sum, ptr %out
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        lines = msl.split("\n")
+        int_decls = [l.strip() for l in lines if l.strip().startswith("int x_0")]
+        assert len(int_decls) >= 2, (
+            f"Expected at least 2 distinct x_0* declarations; got: {int_decls}"
+        )
