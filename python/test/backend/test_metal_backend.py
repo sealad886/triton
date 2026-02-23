@@ -2754,12 +2754,18 @@ pad:
         assert _classify_unsupported_ir("invoke void @foo()") == "instruction"
         assert _classify_unsupported_ir("resume { ptr, i32 } %r") == "instruction"
         assert _classify_unsupported_ir("landingpad token cleanup") == "instruction"
-        assert _classify_unsupported_ir("indirectbr ptr %addr, [label %a]") == "instruction"
+        assert (
+            _classify_unsupported_ir("indirectbr ptr %addr, [label %a]")
+            == "instruction"
+        )
         assert _classify_unsupported_ir("!0 = !{i32 1}") == "metadata"
         assert _classify_unsupported_ir("attributes #0 = { nounwind }") == "metadata"
-        assert _classify_unsupported_ir(
-            "%r = call i32 @llvm.some.unknown.intrinsic(i32 %x)"
-        ) == "intrinsic"
+        assert (
+            _classify_unsupported_ir(
+                "%r = call i32 @llvm.some.unknown.intrinsic(i32 %x)"
+            )
+            == "intrinsic"
+        )
         assert _classify_unsupported_ir("something completely unknown") == "unknown"
 
     def test_unsupported_ir_artifact_file(self):
@@ -2887,7 +2893,9 @@ pad:
                 with pytest.raises(RuntimeError) as ctx:
                     MetalBackend.make_metal_ir(ir, {}, None)
                 msg = str(ctx.value)
-                assert "unsupported LLVM IR" in msg.lower() or "unsupported" in msg.lower()
+                assert (
+                    "unsupported LLVM IR" in msg.lower() or "unsupported" in msg.lower()
+                )
                 assert "invoke" in msg
 
     def test_normal_path_zero_overhead(self):
@@ -2928,11 +2936,21 @@ class TestMetalGEMMDtypes:
 
         @triton.jit
         def _matmul_fp32(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak, stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -2942,12 +2960,18 @@ class TestMetalGEMMDtypes:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -2956,11 +2980,18 @@ class TestMetalGEMMDtypes:
         src = triton.compiler.ASTSource(
             fn=_matmul_fp32,
             signature={
-                "a_ptr": "*fp32", "b_ptr": "*fp32", "c_ptr": "*fp32",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp32",
+                "b_ptr": "*fp32",
+                "c_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
@@ -2982,11 +3013,21 @@ class TestMetalGEMMDtypes:
 
         @triton.jit
         def _matmul_fp16(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak, stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -2996,25 +3037,42 @@ class TestMetalGEMMDtypes:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
-            tl.store(c_ptrs, acc.to(tl.float16), mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+            tl.store(
+                c_ptrs,
+                acc.to(tl.float16),
+                mask=(offs_m[:, None] < m) & (offs_n[None, :] < n),
+            )
 
         src = triton.compiler.ASTSource(
             fn=_matmul_fp16,
             signature={
-                "a_ptr": "*fp16", "b_ptr": "*fp16", "c_ptr": "*fp16",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp16",
+                "b_ptr": "*fp16",
+                "c_ptr": "*fp16",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
@@ -3031,11 +3089,21 @@ class TestMetalGEMMDtypes:
 
         @triton.jit
         def _matmul_odd(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak, stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -3047,12 +3115,18 @@ class TestMetalGEMMDtypes:
                 a_mask = (offs_m[:, None] < m) & (offs_k[None, :] + kk < k)
                 b_mask = (offs_k[:, None] + kk < k) & (offs_n[None, :] < n)
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=a_mask, other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=a_mask,
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=b_mask, other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=b_mask,
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -3061,11 +3135,18 @@ class TestMetalGEMMDtypes:
         src = triton.compiler.ASTSource(
             fn=_matmul_odd,
             signature={
-                "a_ptr": "*fp32", "b_ptr": "*fp32", "c_ptr": "*fp32",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp32",
+                "b_ptr": "*fp32",
+                "c_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
@@ -3082,11 +3163,21 @@ class TestMetalGEMMDtypes:
 
         @triton.jit
         def _matmul_small(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak, stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -3096,12 +3187,18 @@ class TestMetalGEMMDtypes:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -3110,11 +3207,18 @@ class TestMetalGEMMDtypes:
         src = triton.compiler.ASTSource(
             fn=_matmul_small,
             signature={
-                "a_ptr": "*fp32", "b_ptr": "*fp32", "c_ptr": "*fp32",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp32",
+                "b_ptr": "*fp32",
+                "c_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 8, "BLOCK_N": 8, "BLOCK_K": 8},
         )
@@ -3223,11 +3327,21 @@ class TestMetalMatmulRegression:
 
         @triton.jit
         def _matmul_regress(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak, stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -3237,12 +3351,18 @@ class TestMetalMatmulRegression:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -3251,11 +3371,18 @@ class TestMetalMatmulRegression:
         src = triton.compiler.ASTSource(
             fn=_matmul_regress,
             signature={
-                "a_ptr": "*fp32", "b_ptr": "*fp32", "c_ptr": "*fp32",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp32",
+                "b_ptr": "*fp32",
+                "c_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
@@ -3267,12 +3394,12 @@ class TestMetalMatmulRegression:
             msl_text = msl_text.decode("utf-8", errors="replace")
 
         fma_count = msl_text.count("fma(")
-        assert fma_count >= 10, (
-            f"Expected at least 10 fma() calls in matmul MSL, got {fma_count}"
-        )
-        assert fma_count < 50000, (
-            f"fma() count suspiciously high ({fma_count}), possible code bloat"
-        )
+        assert (
+            fma_count >= 10
+        ), f"Expected at least 10 fma() calls in matmul MSL, got {fma_count}"
+        assert (
+            fma_count < 50000
+        ), f"fma() count suspiciously high ({fma_count}), possible code bloat"
 
     @skip_non_darwin
     @skip_no_xcrun
@@ -3284,11 +3411,21 @@ class TestMetalMatmulRegression:
 
         @triton.jit
         def _matmul_lines(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak, stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -3298,12 +3435,18 @@ class TestMetalMatmulRegression:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -3312,11 +3455,18 @@ class TestMetalMatmulRegression:
         src = triton.compiler.ASTSource(
             fn=_matmul_lines,
             signature={
-                "a_ptr": "*fp32", "b_ptr": "*fp32", "c_ptr": "*fp32",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp32",
+                "b_ptr": "*fp32",
+                "c_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
@@ -3328,12 +3478,12 @@ class TestMetalMatmulRegression:
             msl_text = msl_text.decode("utf-8", errors="replace")
 
         line_count = len(msl_text.splitlines())
-        assert line_count < 10000, (
-            f"Matmul MSL has {line_count} lines - possible code bloat (expected < 10000)"
-        )
-        assert line_count > 20, (
-            f"Matmul MSL has only {line_count} lines - suspiciously small"
-        )
+        assert (
+            line_count < 10000
+        ), f"Matmul MSL has {line_count} lines - possible code bloat (expected < 10000)"
+        assert (
+            line_count > 20
+        ), f"Matmul MSL has only {line_count} lines - suspiciously small"
 
 
 # ── Runtime Conformance Tests ──────────────────────────────────────
@@ -3421,7 +3571,15 @@ class TestMetalRuntimeConformance:
     def test_arg_pack_format_sizes(self):
         from third_party.metal.backend.driver import _ARG_PACK_FORMAT
 
-        expected_sizes = {"i32": 4, "i64": 8, "u32": 4, "u64": 8, "f32": 4, "f64": 8, "f16": 2}
+        expected_sizes = {
+            "i32": 4,
+            "i64": 8,
+            "u32": 4,
+            "u64": 8,
+            "f32": 4,
+            "f64": 8,
+            "f16": 2,
+        }
         for key, fmt in _ARG_PACK_FORMAT.items():
             assert struct.calcsize(fmt) == expected_sizes[key], f"{key} size mismatch"
 
@@ -3505,8 +3663,9 @@ class TestMetalRuntimeConformance:
             utils._execution_mode = None
             utils._Metal = None
             utils._torch = None
-            with patch("third_party.metal.backend.driver._get_torch_module", return_value=None), \
-                 patch.dict("sys.modules", {"torch": None}):
+            with patch(
+                "third_party.metal.backend.driver._get_torch_module", return_value=None
+            ), patch.dict("sys.modules", {"torch": None}):
                 mode = utils.resolve_execution_mode()
             assert mode == "unavailable"
         finally:
@@ -3520,7 +3679,10 @@ class TestMetalRuntimeConformance:
     def test_launch_hooks_called(self):
         from unittest.mock import MagicMock
 
-        from third_party.metal.backend.driver import MetalLauncher, TorchMetalKernelHandle
+        from third_party.metal.backend.driver import (
+            MetalLauncher,
+            TorchMetalKernelHandle,
+        )
 
         mock_enter = MagicMock()
         mock_exit = MagicMock()
@@ -3538,11 +3700,13 @@ class TestMetalRuntimeConformance:
         launcher._signature_layout = []
 
         launcher(
-            1, 1, 1,   # grid
-            0,          # stream
+            1,
+            1,
+            1,  # grid
+            0,  # stream
             handle,
             {"name": "test_fn"},  # kernel_metadata
-            {},                   # launch_metadata
+            {},  # launch_metadata
             mock_enter,
             mock_exit,
         )
@@ -3593,7 +3757,6 @@ class MetalTestHarness:
         Returns the compiled kernel with asm artifacts.
         """
         import triton
-
         from triton.backends.compiler import GPUTarget
 
         src = triton.compiler.ASTSource(
@@ -3616,9 +3779,7 @@ class MetalTestHarness:
         """Assert tensors are close within dtype-specific tolerance."""
         import numpy as np
 
-        tol = MetalTestHarness.TOLERANCE.get(
-            str(dtype), {"rtol": 1e-5, "atol": 1e-5}
-        )
+        tol = MetalTestHarness.TOLERANCE.get(str(dtype), {"rtol": 1e-5, "atol": 1e-5})
         np.testing.assert_allclose(actual, expected, **tol)
 
 

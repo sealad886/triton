@@ -28,10 +28,10 @@ from triton.backends.compiler import BaseBackend, GPUTarget, Language
 
 # ── Compile observability ───────────────────────────────────────────
 
-_METAL_DEBUG = os.environ.get('TRITON_METAL_DEBUG', '').lower() in ('1', 'true', 'yes')
+_METAL_DEBUG = os.environ.get("TRITON_METAL_DEBUG", "").lower() in ("1", "true", "yes")
 
 
-def _compile_provenance(options: 'MetalOptions | None', src_hash: str) -> None:
+def _compile_provenance(options: "MetalOptions | None", src_hash: str) -> None:
     """Log compile provenance for debugging."""
     if not _METAL_DEBUG:
         return
@@ -206,7 +206,9 @@ _RE_EXTRACTVALUE = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*extractvalue\s+(\{[^}]+\})\s+(\S+),\s*(\d+)$"
 )
 _RE_INSERTVALUE = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*insertvalue\s+(\{[^}]+\})\s+(\S+),\s+(\S+)\s+(\S+),\s*(\d+)$"
+    r"^("
+    + _SSA_NAME_RE
+    + r")\s*=\s*insertvalue\s+(\{[^}]+\})\s+(\S+),\s+(\S+)\s+(\S+),\s*(\d+)$"
 )
 _RE_ATOMICRMW = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*atomicrmw\s+"
@@ -226,9 +228,7 @@ _RE_CMPXCHG = re.compile(
 _RE_ALLOCA = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*alloca\s+(\S+)(?:,\s*align\s+\d+)?$"
 )
-_RE_SWITCH = re.compile(
-    r"^switch\s+(\S+)\s+(\S+),\s*label\s+%(\S+)\s*\[(.+)\]$"
-)
+_RE_SWITCH = re.compile(r"^switch\s+(\S+)\s+(\S+),\s*label\s+%(\S+)\s*\[(.+)\]$")
 _RE_SWITCH_CASE = re.compile(r"(\S+)\s+(-?\d+),\s*label\s+%(\S+)")
 _RE_FENCE = re.compile(
     r"^fence\s+(?:syncscope\(\"(\w+)\"\)\s+)?(monotonic|acquire|release|acq_rel|seq_cst)$"
@@ -403,6 +403,51 @@ _LIBDEVICE_BINARY = tuple(
 )
 _LIBDEVICE_FMA = re.compile(r"^__(?:nv|ocml)_fma(?:f|_f32)?$")
 
+# ── Table-driven LLVM intrinsic → MSL builtin mapping (DUP-001) ────
+# Simple prefix→builtin tables replace repetitive if/startswith chains
+# in lower_intrinsic().  Grouped by arity for dispatch.
+
+_LLVM_INTRINSIC_UNARY: tuple[tuple[str, str], ...] = (
+    ("llvm.fabs.", "fabs"),
+    ("llvm.sqrt.", "sqrt"),
+    ("llvm.floor.", "floor"),
+    ("llvm.ceil.", "ceil"),
+    ("llvm.trunc.", "trunc"),
+    ("llvm.round.", "rint"),
+    ("llvm.exp2.", "exp2"),
+    ("llvm.exp.", "exp"),
+    ("llvm.log2.", "log2"),
+    ("llvm.log.", "log"),
+    ("llvm.sin.", "sin"),
+    ("llvm.cos.", "cos"),
+    ("llvm.tanh.", "tanh"),
+    ("llvm.ctpop.", "popcount"),
+    ("llvm.bitreverse.", "reverse_bits"),
+)
+
+# These accept >=1 args (extra args like is_zero_undef are ignored).
+_LLVM_INTRINSIC_UNARY_RELAXED: tuple[tuple[str, str], ...] = (
+    ("llvm.ctlz.", "clz"),
+    ("llvm.cttz.", "ctz"),
+)
+
+_LLVM_INTRINSIC_BINARY: tuple[tuple[str, str], ...] = (
+    ("llvm.pow.", "pow"),
+    ("llvm.copysign.", "copysign"),
+)
+
+_LLVM_INTRINSIC_TERNARY: tuple[tuple[str, str], ...] = (
+    ("llvm.fma.", "fma"),
+    ("llvm.fmuladd.", "fma"),
+)
+
+_LLVM_INTRINSIC_MAX_PREFIXES: tuple[str, ...] = (
+    "llvm.maximum.", "llvm.maxnum.", "llvm.smax.", "llvm.umax.",
+)
+_LLVM_INTRINSIC_MIN_PREFIXES: tuple[str, ...] = (
+    "llvm.minimum.", "llvm.minnum.", "llvm.smin.", "llvm.umin.",
+)
+
 
 @dataclass(frozen=True)
 class MetalOptions:
@@ -576,7 +621,11 @@ class MetalBackend(BaseBackend):
                 elapsed = _time.monotonic() - t0
                 print(f"[TRITON_METAL_DEBUG] Pass {name}: {elapsed:.3f}s")
 
-        _run_pass(passes.ttgpuir.add_combine_tensor_select_and_if, "combine_tensor_select_and_if", pm)
+        _run_pass(
+            passes.ttgpuir.add_combine_tensor_select_and_if,
+            "combine_tensor_select_and_if",
+            pm,
+        )
         _run_pass(passes.ttgpuir.add_allocate_warp_groups, "allocate_warp_groups", pm)
 
         # Lower structured control flow (scf.for/if) to cf dialect BEFORE
@@ -591,8 +640,14 @@ class MetalBackend(BaseBackend):
 
         import triton._C.libtriton.metal as metal
 
-        _run_pass(passes.ttgpuir.add_allocate_shared_memory, "allocate_shared_memory", pm)
-        _run_pass(passes.ttgpuir.add_allocate_global_scratch_memory, "allocate_global_scratch_memory", pm)
+        _run_pass(
+            passes.ttgpuir.add_allocate_shared_memory, "allocate_shared_memory", pm
+        )
+        _run_pass(
+            passes.ttgpuir.add_allocate_global_scratch_memory,
+            "allocate_global_scratch_memory",
+            pm,
+        )
 
         _run_pass(metal.passes.ttgpuir.add_to_llvmir, "metal_to_llvmir", pm)
         _run_pass(passes.ttgpuir.add_canonicalize_llvm_ir, "canonicalize_llvm_ir", pm)
@@ -951,9 +1006,7 @@ class MetalBackend(BaseBackend):
             inner = agg_type_str.strip("{ }")
             field_types = [llvm_type_to_msl(t.strip()) for t in inner.split(",")]
             aggregate_type_structs[agg_type_str] = (name, field_types)
-            fields = "".join(
-                f"  {ft} field{i};\n" for i, ft in enumerate(field_types)
-            )
+            fields = "".join(f"  {ft} field{i};\n" for i, ft in enumerate(field_types))
             struct_defs.append(f"struct {name} {{\n{fields}}};")
             return name, field_types
 
@@ -1002,69 +1055,41 @@ class MetalBackend(BaseBackend):
         float_bin_map = _FLOAT_BIN_MAP
 
         def lower_intrinsic(fn: str, args: list[str]) -> str | None:
-            if fn.startswith("llvm.fabs.") and len(args) == 1:
-                return f"fabs({args[0]})"
-            if fn.startswith("llvm.sqrt.") and len(args) == 1:
-                return f"sqrt({args[0]})"
-            if fn.startswith("llvm.floor.") and len(args) == 1:
-                return f"floor({args[0]})"
-            if fn.startswith("llvm.ceil.") and len(args) == 1:
-                return f"ceil({args[0]})"
-            if fn.startswith("llvm.trunc.") and len(args) == 1:
-                return f"trunc({args[0]})"
-            if fn.startswith("llvm.round.") and len(args) == 1:
-                return f"rint({args[0]})"
-            if fn.startswith("llvm.exp2.") and len(args) == 1:
-                return f"exp2({args[0]})"
-            if fn.startswith("llvm.exp.") and len(args) == 1:
-                return f"exp({args[0]})"
-            if fn.startswith("llvm.log2.") and len(args) == 1:
-                return f"log2({args[0]})"
-            if fn.startswith("llvm.log.") and len(args) == 1:
-                return f"log({args[0]})"
-            if fn.startswith("llvm.sin.") and len(args) == 1:
-                return f"sin({args[0]})"
-            if fn.startswith("llvm.cos.") and len(args) == 1:
-                return f"cos({args[0]})"
-            if fn.startswith("llvm.tanh.") and len(args) == 1:
-                return f"tanh({args[0]})"
-            if fn.startswith("llvm.pow.") and len(args) == 2:
-                return f"pow({args[0]}, {args[1]})"
-            if fn.startswith("llvm.copysign.") and len(args) == 2:
-                return f"copysign({args[0]}, {args[1]})"
-            if fn.startswith("llvm.fma.") and len(args) == 3:
-                return f"fma({args[0]}, {args[1]}, {args[2]})"
-            if fn.startswith("llvm.fmuladd.") and len(args) == 3:
-                return f"fma({args[0]}, {args[1]}, {args[2]})"
-            if (
-                fn.startswith("llvm.maximum.")
-                or fn.startswith("llvm.maxnum.")
-                or fn.startswith("llvm.smax.")
-                or fn.startswith("llvm.umax.")
-            ) and len(args) == 2:
-                return f"max({args[0]}, {args[1]})"
-            if (
-                fn.startswith("llvm.minimum.")
-                or fn.startswith("llvm.minnum.")
-                or fn.startswith("llvm.smin.")
-                or fn.startswith("llvm.umin.")
-            ) and len(args) == 2:
-                return f"min({args[0]}, {args[1]})"
-            if fn.startswith("llvm.ctpop.") and len(args) == 1:
-                return f"popcount({args[0]})"
-            if fn.startswith("llvm.ctlz.") and len(args) >= 1:
-                return f"clz({args[0]})"
-            if fn.startswith("llvm.cttz.") and len(args) >= 1:
-                return f"ctz({args[0]})"
-            if fn.startswith("llvm.bitreverse.") and len(args) == 1:
-                return f"reverse_bits({args[0]})"
-            if fn == "llvm.bswap.i32" and len(args) == 1:
+            nargs = len(args)
+
+            # Table-driven simple intrinsics (DUP-001 consolidation)
+            if nargs == 1:
+                for prefix, builtin in _LLVM_INTRINSIC_UNARY:
+                    if fn.startswith(prefix):
+                        return f"{builtin}({args[0]})"
+
+            if nargs >= 1:
+                for prefix, builtin in _LLVM_INTRINSIC_UNARY_RELAXED:
+                    if fn.startswith(prefix):
+                        return f"{builtin}({args[0]})"
+
+            if nargs == 2:
+                for prefix, builtin in _LLVM_INTRINSIC_BINARY:
+                    if fn.startswith(prefix):
+                        return f"{builtin}({args[0]}, {args[1]})"
+                if any(fn.startswith(p) for p in _LLVM_INTRINSIC_MAX_PREFIXES):
+                    return f"max({args[0]}, {args[1]})"
+                if any(fn.startswith(p) for p in _LLVM_INTRINSIC_MIN_PREFIXES):
+                    return f"min({args[0]}, {args[1]})"
+
+            if nargs == 3:
+                for prefix, builtin in _LLVM_INTRINSIC_TERNARY:
+                    if fn.startswith(prefix):
+                        return f"{builtin}({args[0]}, {args[1]}, {args[2]})"
+
+            # Special-case intrinsics that need inline expansion
+            if fn == "llvm.bswap.i32" and nargs == 1:
                 a = args[0]
                 return (
                     f"((({a}) >> 24) | ((({a}) >> 8) & 0xFF00) | "
                     f"((({a}) << 8) & 0xFF0000) | (({a}) << 24))"
                 )
-            if fn == "llvm.bswap.i64" and len(args) == 1:
+            if fn == "llvm.bswap.i64" and nargs == 1:
                 a = args[0]
                 return (
                     f"(((unsigned long)({a}) >> 56) | "
@@ -1076,37 +1101,37 @@ class MetalBackend(BaseBackend):
                     f"(((unsigned long)({a}) << 40) & 0xFF000000000000UL) | "
                     f"((unsigned long)({a}) << 56))"
                 )
-            if fn.startswith("llvm.fshr.") and len(args) == 3:
+            if fn.startswith("llvm.fshr.") and nargs == 3:
                 bits = "32" if "i32" in fn else "64"
                 u_ty = "unsigned int" if "i32" in fn else "unsigned long"
                 return (
                     f"(({u_ty})({args[1]}) >> ({args[2]} & ({bits} - 1))) | "
                     f"(({u_ty})({args[0]}) << ({bits} - ({args[2]} & ({bits} - 1))))"
                 )
-            if fn.startswith("llvm.fshl.") and len(args) == 3:
+            if fn.startswith("llvm.fshl.") and nargs == 3:
                 bits = "32" if "i32" in fn else "64"
                 u_ty = "unsigned int" if "i32" in fn else "unsigned long"
                 return (
                     f"(({u_ty})({args[0]}) << ({args[2]} & ({bits} - 1))) | "
                     f"(({u_ty})({args[1]}) >> ({bits} - ({args[2]} & ({bits} - 1))))"
                 )
-            if fn.startswith("llvm.powi.") and len(args) == 2:
+            if fn.startswith("llvm.powi.") and nargs == 2:
                 return f"powr({args[0]}, static_cast<float>({args[1]}))"
 
             # LLVM IR emitted by shared Triton pipelines can still reference
             # CUDA/OCML-style libdevice symbols. Lower these to equivalent MSL
             # math builtins so Metal compilation remains backend-agnostic.
-            if len(args) == 1:
+            if nargs == 1:
                 for pat, builtin in _LIBDEVICE_UNARY:
                     if pat.match(fn):
                         return f"{builtin}({args[0]})"
 
-            if len(args) == 2:
+            if nargs == 2:
                 for pat, builtin in _LIBDEVICE_BINARY:
                     if pat.match(fn):
                         return f"{builtin}({args[0]}, {args[1]})"
 
-            if len(args) == 3 and _LIBDEVICE_FMA.match(fn):
+            if nargs == 3 and _LIBDEVICE_FMA.match(fn):
                 return f"fma({args[0]}, {args[1]}, {args[2]})"
             return None
 
@@ -1494,7 +1519,9 @@ class MetalBackend(BaseBackend):
                     ssa[out_ssa] = out
                     if fn.startswith("llvm.sadd.with.overflow.") and len(args) == 2:
                         emit(f"{out}.field0 = {args[0]} + {args[1]};")
-                        emit(f"{out}.field1 = (({args[0]} ^ {out}.field0) & ({args[1]} ^ {out}.field0)) < 0;")
+                        emit(
+                            f"{out}.field1 = (({args[0]} ^ {out}.field0) & ({args[1]} ^ {out}.field0)) < 0;"
+                        )
                         continue
                     if fn.startswith("llvm.uadd.with.overflow.") and len(args) == 2:
                         emit(f"{out}.field0 = {args[0]} + {args[1]};")
@@ -1502,7 +1529,9 @@ class MetalBackend(BaseBackend):
                         continue
                     if fn.startswith("llvm.ssub.with.overflow.") and len(args) == 2:
                         emit(f"{out}.field0 = {args[0]} - {args[1]};")
-                        emit(f"{out}.field1 = (({args[0]} ^ {args[1]}) & ({args[0]} ^ {out}.field0)) < 0;")
+                        emit(
+                            f"{out}.field1 = (({args[0]} ^ {args[1]}) & ({args[0]} ^ {out}.field0)) < 0;"
+                        )
                         continue
                     if fn.startswith("llvm.usub.with.overflow.") and len(args) == 2:
                         emit(f"{out}.field0 = {args[0]} - {args[1]};")
@@ -1529,7 +1558,9 @@ class MetalBackend(BaseBackend):
                             f"simdgroup_load({out}, "
                             f"(const device float*){args[0]}, {args[1]});"
                         )
-                    elif fn == "__metal_simdgroup_multiply_accumulate" and len(args) == 3:
+                    elif (
+                        fn == "__metal_simdgroup_multiply_accumulate" and len(args) == 3
+                    ):
                         emit(
                             f"simdgroup_multiply_accumulate("
                             f"{out}, {args[0]}, {args[1]}, {args[2]});"
@@ -1641,9 +1672,8 @@ class MetalBackend(BaseBackend):
                         )
                     elif fn.startswith("llvm.assume"):
                         emit("(void)0;")
-                    elif (
-                        fn.startswith("llvm.lifetime.start")
-                        or fn.startswith("llvm.lifetime.end")
+                    elif fn.startswith("llvm.lifetime.start") or fn.startswith(
+                        "llvm.lifetime.end"
                     ):
                         emit("(void)0;")
                     elif fn.startswith("llvm.memcpy") and len(args) >= 3:
@@ -1750,11 +1780,22 @@ class MetalBackend(BaseBackend):
 
                 m = _RE_CMPXCHG.match(line)
                 if m:
-                    out_ssa, addr_space, ptr, val_type, expected, desired, success_order, fail_order = m.groups()
+                    (
+                        out_ssa,
+                        addr_space,
+                        ptr,
+                        val_type,
+                        expected,
+                        desired,
+                        success_order,
+                        fail_order,
+                    ) = m.groups()
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
                     msl_ty = llvm_scalar_to_msl(val_type.strip())
-                    msl_success = _MEMORY_ORDER_MAP.get(success_order, "memory_order_relaxed")
+                    msl_success = _MEMORY_ORDER_MAP.get(
+                        success_order, "memory_order_relaxed"
+                    )
                     msl_fail = _MEMORY_ORDER_MAP.get(fail_order, "memory_order_relaxed")
                     emit(f"{out}.field0 = {to_expr(expected)};")
                     emit(
@@ -1813,8 +1854,16 @@ class MetalBackend(BaseBackend):
                     if _l is line:
                         line_idx = _i
                         break
-                ctx_before = all_codegen_lines[max(0, line_idx - 2):line_idx] if line_idx > 0 else []
-                ctx_after = all_codegen_lines[line_idx + 1:line_idx + 3] if line_idx >= 0 else []
+                ctx_before = (
+                    all_codegen_lines[max(0, line_idx - 2) : line_idx]
+                    if line_idx > 0
+                    else []
+                )
+                ctx_after = (
+                    all_codegen_lines[line_idx + 1 : line_idx + 3]
+                    if line_idx >= 0
+                    else []
+                )
                 category = _classify_unsupported_ir(line)
                 entry = UnsupportedIREntry(
                     line_number=line_idx + 1,
@@ -1826,11 +1875,12 @@ class MetalBackend(BaseBackend):
                 unsupported_lines.append(entry)
                 if _METAL_DEBUG:
                     opcode = line.strip().split()[0] if line.strip() else "UNKNOWN"
-                    print(f"[TRITON_METAL_DEBUG] Failure signature: UNSUPPORTED_IR_{category}_{opcode}")
+                    print(
+                        f"[TRITON_METAL_DEBUG] Failure signature: UNSUPPORTED_IR_{category}_{opcode}"
+                    )
                 if best_effort:
                     emit(f"// UNSUPPORTED: {line}")
                     continue
-
 
             if not terminated:
                 emit("return;")
@@ -1845,9 +1895,7 @@ class MetalBackend(BaseBackend):
 
             counts = Counter(e.category for e in unsupported_lines)
             total = len(unsupported_lines)
-            cat_summary = ", ".join(
-                f"{n} {cat}" for cat, n in sorted(counts.items())
-            )
+            cat_summary = ", ".join(f"{n} {cat}" for cat, n in sorted(counts.items()))
 
             artifact_dir = os.environ.get(
                 "TRITON_CACHE_DIR", os.path.expanduser("~/.triton")
@@ -1871,9 +1919,7 @@ class MetalBackend(BaseBackend):
                         flog.write(f"    | {ca}\n")
                     flog.write(f"\n")
 
-            preview = "; ".join(
-                e.line for e in unsupported_lines[:3]
-            )
+            preview = "; ".join(e.line for e in unsupported_lines[:3])
             msg = (
                 f"{total} unsupported LLVM IR lines ({cat_summary}). "
                 f"See {artifact_path} for details. "
@@ -1892,11 +1938,13 @@ class MetalBackend(BaseBackend):
         msl_lines.extend(struct_defs)
         if struct_defs:
             msl_lines.append("")
-        msl_lines.extend([
-            f"kernel void {msl_kernel_name}(",
-            ",\n".join(param_lines),
-            ") {",
-        ])
+        msl_lines.extend(
+            [
+                f"kernel void {msl_kernel_name}(",
+                ",\n".join(param_lines),
+                ") {",
+            ]
+        )
         msl_lines.extend(body_lines)
         msl_lines.append("}")
         msl_lines.append("")
@@ -1986,12 +2034,11 @@ class MetalBackend(BaseBackend):
 
         try:
             import triton
+
             triton_version = triton.__version__
         except (ImportError, AttributeError):
             triton_version = "dev"
 
-        backend_hash = hashlib.sha256(
-            open(__file__, 'rb').read()
-        ).hexdigest()[:12]
+        backend_hash = hashlib.sha256(open(__file__, "rb").read()).hexdigest()[:12]
 
         return f"{version}-{self.target.arch}-{triton_version}-{backend_hash}"

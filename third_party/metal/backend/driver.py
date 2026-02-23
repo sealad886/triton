@@ -117,6 +117,22 @@ def _resolve_and_validate_kernel_name(kernel_metadata, launcher_metadata, handle
     return kernel_name
 
 
+def _scale_grid_for_pyobjc(handle, grid, block):
+    """Scale grid to total-thread counts when using the PyObjC dispatch path.
+
+    MetalKernelHandle.launch_kernel computes threadgroups as ceildiv(grid, block),
+    so we pass total-thread counts to preserve Triton's grid semantics where grid
+    values represent the number of program instances.
+    """
+    if isinstance(handle, MetalKernelHandle):
+        return (
+            grid[0] * block[0],
+            grid[1] * block[1],
+            grid[2] * block[2],
+        )
+    return grid
+
+
 def _flatten_signature_value(sig, arg, out):
     if isinstance(sig, tuple):
         if not isinstance(arg, (list, tuple)) or len(sig) != len(arg):
@@ -503,13 +519,7 @@ class MetalUtils:
 
         num_warps = _extract_num_warps(kernel_metadata) or 4
         block = (max(1, int(num_warps) * 32), 1, 1)
-        grid = (grid_x, grid_y, grid_z)
-
-        # MetalKernelHandle.launch_kernel computes threadgroups as
-        # ceildiv(grid, block), so pass total-thread counts to preserve
-        # Triton's grid semantics (grid values = number of program instances).
-        if isinstance(handle, MetalKernelHandle):
-            grid = (grid_x * block[0], grid_y * block[1], grid_z * block[2])
+        grid = _scale_grid_for_pyobjc(handle, (grid_x, grid_y, grid_z), block)
 
         handle.launch_kernel(
             name=kernel_name,
@@ -805,11 +815,7 @@ class MetalLauncher:
             else:
                 runtime_args.append(_normalize_scalar_arg(sig, arg))
 
-        grid = (gridX, gridY, gridZ)
-        if isinstance(handle, MetalKernelHandle):
-            # The PyObjC path dispatches threadgroups as ceil(grid/block), so pass
-            # total thread counts here to preserve Triton's grid semantics.
-            grid = (gridX * block[0], gridY * block[1], gridZ * block[2])
+        grid = _scale_grid_for_pyobjc(handle, (gridX, gridY, gridZ), block)
 
         handle.launch_kernel(
             name=kernel_name,
