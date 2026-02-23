@@ -29,13 +29,19 @@ from triton.backends.compiler import BaseBackend, GPUTarget, Language
 # inside make_metal_ir to keep the two passes in sync.
 
 _SSA_NAME_RE = r"%[-A-Za-z0-9._]+"
-_LLVM_FLAGS = r"(?:\s+(?:nsw|nuw|nsz|nnan|ninf|arcp|contract|reassoc|afn|fast|exact|disjoint))*"
+_LLVM_FLAGS = (
+    r"(?:\s+(?:nsw|nuw|nsz|nnan|ninf|arcp|contract|reassoc|afn|fast|exact|disjoint))*"
+)
 
 _RE_CALL_OUT = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*(?:tail\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
+    r"^("
+    + _SSA_NAME_RE
+    + r")\s*=\s*(?:tail\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
 )
 _RE_BINOP = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)"
+    r"^("
+    + _SSA_NAME_RE
+    + r")\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)"
     + _LLVM_FLAGS
     + r"\s+(.+)$"
 )
@@ -46,7 +52,9 @@ _RE_FCMP = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*fcmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$"
 )
 _RE_CAST = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*(sext|zext|trunc|fptrunc|fpext|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$"
+    r"^("
+    + _SSA_NAME_RE
+    + r")\s*=\s*(sext|zext|trunc|fptrunc|fpext|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$"
 )
 
 # ── Additional pre-compiled regex (PERF-001) ────────────────────────
@@ -60,9 +68,7 @@ _RE_KERNEL_FUNC = re.compile(
     r"define\s+void\s+@([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.MULTILINE
 )
 _RE_PARAM_NAME = re.compile(r"(%[-A-Za-z0-9._]+)\s*$")
-_RE_PARAM_TYPE = re.compile(
-    r"(ptr(?:\s+addrspace\(\d+\))?|i\d+|float|half|double|i1)"
-)
+_RE_PARAM_TYPE = re.compile(r"(ptr(?:\s+addrspace\(\d+\))?|i\d+|float|half|double|i1)")
 
 # Helper-function patterns
 _RE_MSL_ID_CLEAN = re.compile(r"[^A-Za-z0-9_]")
@@ -77,15 +83,11 @@ _RE_CALL_RET_PTR = re.compile(r"ptr(?:\s+addrspace\(\d+\))?")
 _RE_CALL_RET_SCALAR = re.compile(r"\bi\d+\b|\bi1\b|\bhalf\b|\bfloat\b|\bdouble\b")
 
 # SSA declaration pass patterns (types needed but not full codegen)
-_RE_PHI_DECL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+(.+?)\s+\["
-)
+_RE_PHI_DECL = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+(.+?)\s+\[")
 _RE_FNEG_DECL = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*fneg" + _LLVM_FLAGS + r"\s+(.+?)\s+(.+)$"
 )
-_RE_FREEZE_DECL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*freeze\s+(.+?)\s+(.+)$"
-)
+_RE_FREEZE_DECL = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*freeze\s+(.+?)\s+(.+)$")
 _RE_SELECT_DECL = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*select\s+i1\s+[^,]+,\s+(.+?)\s+[^,]+,\s+.+$"
 )
@@ -107,18 +109,14 @@ _RE_LOAD_DECL = re.compile(
 )
 
 # Code-generation pass patterns
-_RE_PHI = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+[^ ]+\s+(.+)$"
-)
+_RE_PHI = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+[^ ]+\s+(.+)$")
 _RE_VOID_CALL = re.compile(
     r"^(?:tail\s+)?call(?:\s+\w+)*\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
 )
 _RE_FNEG = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*fneg" + _LLVM_FLAGS + r"\s+[^ ]+\s+(.+)$"
 )
-_RE_FREEZE = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*freeze\s+[^ ]+\s+(.+)$"
-)
+_RE_FREEZE = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*freeze\s+[^ ]+\s+(.+)$")
 _RE_SELECT = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*select\s+i1\s+([^,]+),"
     r"\s+[^ ]+\s+([^,]+),\s+[^ ]+\s+(.+)$"
@@ -139,25 +137,62 @@ _RE_LOAD = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*load\s+(.+?),"
     r"\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$"
 )
-_RE_STORE = re.compile(
-    r"^store\s+(.+?),\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$"
-)
+_RE_STORE = re.compile(r"^store\s+(.+?),\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$")
 _RE_BR = re.compile(r"^br\s+label\s+%(.+)$")
-_RE_BR_COND = re.compile(
-    r"^br\s+i1\s+([^,]+),\s+label\s+%([^,]+),\s+label\s+%(.+)$"
-)
+_RE_BR_COND = re.compile(r"^br\s+i1\s+([^,]+),\s+label\s+%([^,]+),\s+label\s+%(.+)$")
 _RE_PHI_INCOMING = re.compile(r"^\[\s*(.+)\s*,\s*%(.+)\s*\]$")
 
 # ── Module-level constant data structures (PERF-003) ───────────────
-_MSL_RESERVED_IDENTIFIERS = frozenset({
-    "kernel", "vertex", "fragment", "compute", "thread", "threadgroup",
-    "device", "constant", "bool", "char", "short", "int", "long",
-    "half", "float", "double", "if", "else", "switch", "case",
-    "default", "return", "continue", "break", "while", "for",
-    "fma", "fabs", "sqrt", "floor", "ceil", "trunc", "rint",
-    "exp", "exp2", "log", "log2", "sin", "cos", "tanh", "pow",
-    "copysign", "max", "min", "isnan", "popcount",
-})
+_MSL_RESERVED_IDENTIFIERS = frozenset(
+    {
+        "kernel",
+        "vertex",
+        "fragment",
+        "compute",
+        "thread",
+        "threadgroup",
+        "device",
+        "constant",
+        "bool",
+        "char",
+        "short",
+        "int",
+        "long",
+        "half",
+        "float",
+        "double",
+        "if",
+        "else",
+        "switch",
+        "case",
+        "default",
+        "return",
+        "continue",
+        "break",
+        "while",
+        "for",
+        "fma",
+        "fabs",
+        "sqrt",
+        "floor",
+        "ceil",
+        "trunc",
+        "rint",
+        "exp",
+        "exp2",
+        "log",
+        "log2",
+        "sin",
+        "cos",
+        "tanh",
+        "pow",
+        "copysign",
+        "max",
+        "min",
+        "isnan",
+        "popcount",
+    }
+)
 
 _UNSIGNED_MSL_MAP = {
     "bool": "bool",
@@ -168,18 +203,34 @@ _UNSIGNED_MSL_MAP = {
 }
 
 _CMP_MAP = {
-    "eq": "==", "ne": "!=",
-    "slt": "<", "sle": "<=", "sgt": ">", "sge": ">=",
-    "ult": "<", "ule": "<=", "ugt": ">", "uge": ">=",
+    "eq": "==",
+    "ne": "!=",
+    "slt": "<",
+    "sle": "<=",
+    "sgt": ">",
+    "sge": ">=",
+    "ult": "<",
+    "ule": "<=",
+    "ugt": ">",
+    "uge": ">=",
 }
 
 _FLOAT_BIN_MAP = {"fadd": "+", "fsub": "-", "fmul": "*", "fdiv": "/"}
 
 _BIN_MAP = {
-    "add": "+", "sub": "-", "mul": "*",
-    "udiv": "/", "sdiv": "/", "urem": "%", "srem": "%",
-    "shl": "<<", "lshr": ">>", "ashr": ">>",
-    "and": "&", "or": "|", "xor": "^",
+    "add": "+",
+    "sub": "-",
+    "mul": "*",
+    "udiv": "/",
+    "sdiv": "/",
+    "urem": "%",
+    "srem": "%",
+    "shl": "<<",
+    "lshr": ">>",
+    "ashr": ">>",
+    "and": "&",
+    "or": "|",
+    "xor": "^",
 }
 
 _AXIS_HELPER_MAP = {
@@ -198,13 +249,20 @@ _AXIS_HELPER_MAP = {
 }
 
 _LLVM_SCALAR_TO_MSL = {
-    "i1": "bool", "i8": "char", "i16": "short", "i32": "int", "i64": "long",
-    "half": "half", "float": "float", "double": "double",
+    "i1": "bool",
+    "i8": "char",
+    "i16": "short",
+    "i32": "int",
+    "i64": "long",
+    "half": "half",
+    "float": "float",
+    "double": "double",
 }
 
 # ── Pre-compiled libdevice patterns (PERF-004) ─────────────────────
 _LIBDEVICE_UNARY = tuple(
-    (re.compile(p), b) for p, b in (
+    (re.compile(p), b)
+    for p, b in (
         (r"^__(?:nv|ocml)_fabs(?:f|_f32)?$", "fabs"),
         (r"^__(?:nv|ocml)_sqrt(?:f|_f32)?$", "sqrt"),
         (r"^__(?:nv|ocml)_floor(?:f|_f32)?$", "floor"),
@@ -221,7 +279,8 @@ _LIBDEVICE_UNARY = tuple(
     )
 )
 _LIBDEVICE_BINARY = tuple(
-    (re.compile(p), b) for p, b in (
+    (re.compile(p), b)
+    for p, b in (
         (r"^__(?:nv|ocml)_pow(?:f|_f32)?$", "pow"),
         (r"^__(?:nv|ocml)_copysign(?:f|_f32)?$", "copysign"),
         (r"^__(?:nv|ocml)_fmax(?:f|_f32)?$", "max"),
@@ -417,6 +476,12 @@ class MetalBackend(BaseBackend):
         passes.ttgpuir.add_canonicalize_llvm_ir(pm)
         passes.common.add_cse(pm)
 
+        # Some kernels (for example blocked matmul with tt.dot in a K-loop)
+        # can retain residual scf control-flow after backend conversion. Run a
+        # second scf->cf sweep before cf->llvm to avoid cf.br legalization
+        # failures on leftover structured branches.
+        passes.convert.add_scf_to_cf(pm)
+
         passes.convert.add_cf_to_llvmir(pm)
         passes.convert.add_arith_to_llvmir(pm)
         passes.common.add_canonicalizer(pm)
@@ -602,6 +667,59 @@ class MetalBackend(BaseBackend):
             spec = _RE_ALIGN_STRIP.sub("", spec)
             return spec.strip()
 
+        def parse_ptr_spec(spec: str) -> tuple[str | None, str] | None:
+            m = re.match(r"^ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$", spec.strip())
+            if not m:
+                return None
+            return m.group(1), m.group(2).strip()
+
+        def parse_gep_components(spec: str) -> tuple[str, str | None, str, str] | None:
+            parts = split_top_level(spec)
+            if len(parts) < 3:
+                return None
+            elem_ty = parts[0].strip()
+            ptr_info = parse_ptr_spec(parts[1])
+            if ptr_info is None:
+                return None
+            addr_space, base = ptr_info
+            _, idx_token = split_typed_value(parts[2])
+            return elem_ty, addr_space, base, idx_token
+
+        def parse_gep_instruction(
+            line: str,
+        ) -> tuple[str, str, str | None, str, str] | None:
+            m = re.match(
+                r"^(" + _SSA_NAME_RE + r")\s*=\s*getelementptr(?:\s+\w+)*\s+(.+)$",
+                line,
+            )
+            if not m:
+                return None
+            out_ssa = m.group(1)
+            comps = parse_gep_components(m.group(2))
+            if comps is None:
+                return None
+            elem_ty, addr_space, base, idx_token = comps
+            return out_ssa, elem_ty, addr_space, base, idx_token
+
+        def parse_gep_constexpr(token: str) -> tuple[str, str | None, str, str] | None:
+            if not token.startswith("getelementptr"):
+                return None
+            rest = token[len("getelementptr") :].strip()
+            while True:
+                stripped = re.sub(
+                    r"^(?:inbounds|nuw|nsw|inrange)\s+", "", rest, count=1
+                )
+                if stripped == rest:
+                    break
+                rest = stripped
+            if rest.startswith("(") and rest.endswith(")"):
+                rest = rest[1:-1].strip()
+            comps = parse_gep_components(rest)
+            if comps is None:
+                return None
+            elem_ty, addr_space, base, idx_token = comps
+            return elem_ty, addr_space, base, idx_token
+
         def normalize_label(label: str) -> str:
             label = label.strip()
             if label.startswith('"') and label.endswith('"'):
@@ -709,6 +827,10 @@ class MetalBackend(BaseBackend):
             token = token.strip()
             if token == "@global_smem":
                 return "((threadgroup char*)__triton_shared)"
+            gep_cexpr = parse_gep_constexpr(token)
+            if gep_cexpr is not None:
+                _, _, base, idx_token = gep_cexpr
+                return f"({to_expr(base)} + {to_expr(idx_token)})"
             if token in ssa:
                 return ssa[token]
             if token.startswith("%"):
@@ -752,6 +874,8 @@ class MetalBackend(BaseBackend):
             if fn.startswith("llvm.copysign.") and len(args) == 2:
                 return f"copysign({args[0]}, {args[1]})"
             if fn.startswith("llvm.fma.") and len(args) == 3:
+                return f"fma({args[0]}, {args[1]}, {args[2]})"
+            if fn.startswith("llvm.fmuladd.") and len(args) == 3:
                 return f"fma({args[0]}, {args[1]}, {args[2]})"
             if (
                 fn.startswith("llvm.maximum.")
@@ -893,6 +1017,14 @@ class MetalBackend(BaseBackend):
                 m = _RE_GEP_DECL.match(line)
                 if m:
                     out_ssa, elem_ty, addr_space, _, _ = m.groups()
+                    record_ssa_decl(
+                        out_ssa, msl_ty=ptr_type_to_msl(elem_ty, addr_space=addr_space)
+                    )
+                    continue
+
+                parsed_gep = parse_gep_instruction(line)
+                if parsed_gep is not None:
+                    out_ssa, elem_ty, addr_space, _, _ = parsed_gep
                     record_ssa_decl(
                         out_ssa, msl_ty=ptr_type_to_msl(elem_ty, addr_space=addr_space)
                     )
@@ -1040,6 +1172,14 @@ class MetalBackend(BaseBackend):
                 m = _RE_GEP.match(line)
                 if m:
                     out_ssa, _, base, idx = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    emit(f"{out} = {to_expr(base)} + {to_expr(idx)};")
+                    continue
+
+                parsed_gep = parse_gep_instruction(line)
+                if parsed_gep is not None:
+                    out_ssa, _, _, base, idx = parsed_gep
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
                     emit(f"{out} = {to_expr(base)} + {to_expr(idx)};")

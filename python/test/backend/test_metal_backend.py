@@ -7,12 +7,13 @@ non-macOS platforms.
 """
 
 import os
-import sys
-import struct
-import pytest
-import subprocess
 import shutil
+import struct
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -114,6 +115,7 @@ class TestMetalOptions:
 class TestMetalBackend:
     def test_supports_target(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         from triton.backends.compiler import GPUTarget
 
         assert MetalBackend.supports_target(GPUTarget("metal", "apple8", 32))
@@ -122,6 +124,7 @@ class TestMetalBackend:
 
     def test_init(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         from triton.backends.compiler import GPUTarget
 
         target = GPUTarget("metal", "apple8", 32)
@@ -130,6 +133,7 @@ class TestMetalBackend:
 
     def test_parse_options(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         from triton.backends.compiler import GPUTarget
 
         target = GPUTarget("metal", "apple8", 32)
@@ -141,6 +145,7 @@ class TestMetalBackend:
 
     def test_add_stages(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         from triton.backends.compiler import GPUTarget, Language
 
         target = GPUTarget("metal", "apple8", 32)
@@ -156,8 +161,9 @@ class TestMetalBackend:
 
     def test_add_stages_inspection_hook(self, monkeypatch):
         from third_party.metal.backend.compiler import MetalBackend
-        from triton.backends.compiler import GPUTarget, Language
+
         from triton import knobs
+        from triton.backends.compiler import GPUTarget, Language
 
         calls = {"count": 0}
 
@@ -178,6 +184,7 @@ class TestMetalBackend:
 
     def test_load_dialects_no_error(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         from triton.backends.compiler import GPUTarget
 
         target = GPUTarget("metal", "apple8", 32)
@@ -187,6 +194,7 @@ class TestMetalBackend:
 
     def test_get_module_map_empty(self):
         from third_party.metal.backend.compiler import MetalBackend
+
         from triton.backends.compiler import GPUTarget
 
         target = GPUTarget("metal", "apple8", 32)
@@ -547,6 +555,23 @@ entry:
         assert "min(" in msl
         assert "= -(" in msl
 
+    def test_make_metal_ir_translates_fmuladd_intrinsic(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @fmuladd_kernel(ptr %out, float %a, float %b, float %c) {
+entry:
+  %r = call float @llvm.fmuladd.f32(float %a, float %b, float %c)
+  %p = getelementptr float, ptr %out, i64 0
+  store float %r, ptr %p
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "fma(" in msl
+        assert "llvm.fmuladd" not in msl
+
     def test_make_metal_ir_translates_libdevice_math_calls(self):
         from third_party.metal.backend.compiler import MetalBackend
 
@@ -902,6 +927,163 @@ class TestMetalDynamicReduction:
                 "n": "i32",
             },
             constexprs={"BLOCK": 128},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+
+class TestMetalRealWorldCompileCases:
+    """Compile-only coverage for common ML kernels used in production stacks."""
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_triton_silu_pipeline(self):
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _silu_kernel(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            y = x / (1.0 + tl.exp(-x))
+            tl.store(y_ptr + offs, y, mask=mask)
+
+        src = triton.compiler.ASTSource(
+            fn=_silu_kernel,
+            signature={
+                "x_ptr": "*fp32",
+                "y_ptr": "*fp32",
+                "n": "i32",
+            },
+            constexprs={"BLOCK": 128},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_triton_layernorm_pipeline(self):
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _layernorm_kernel(
+            x_ptr,
+            w_ptr,
+            b_ptr,
+            y_ptr,
+            n,
+            BLOCK: tl.constexpr,
+            EPS: tl.constexpr,
+        ):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            mean = tl.sum(x, axis=0) / BLOCK
+            centered = x - mean
+            var = tl.sum(centered * centered, axis=0) / BLOCK
+            inv = 1.0 / tl.sqrt(var + EPS)
+            w = tl.load(w_ptr + offs, mask=mask, other=1.0)
+            b = tl.load(b_ptr + offs, mask=mask, other=0.0)
+            y = centered * inv * w + b
+            tl.store(y_ptr + offs, y, mask=mask)
+
+        src = triton.compiler.ASTSource(
+            fn=_layernorm_kernel,
+            signature={
+                "x_ptr": "*fp32",
+                "w_ptr": "*fp32",
+                "b_ptr": "*fp32",
+                "y_ptr": "*fp32",
+                "n": "i32",
+            },
+            constexprs={"BLOCK": 128, "EPS": 1e-5},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_triton_blocked_matmul_pipeline(self):
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_kernel(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a_ptrs = (
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak
+                )
+                b_ptrs = (
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn
+                )
+                a = tl.load(
+                    a_ptrs,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptrs,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            c_mask = (offs_m[:, None] < m) & (offs_n[None, :] < n)
+            tl.store(c_ptrs, acc, mask=c_mask)
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_kernel,
+            signature={
+                "a_ptr": "*fp32",
+                "b_ptr": "*fp32",
+                "c_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
         kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
         assert_metal_compilation_artifacts(kernel)
@@ -1485,7 +1667,9 @@ entry:
 """
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
-        assert "-INFINITY" in msl, "hex float 0xFFF... (-inf) must become -INFINITY in MSL"
+        assert (
+            "-INFINITY" in msl
+        ), "hex float 0xFFF... (-inf) must become -INFINITY in MSL"
         assert "0xFFF0000000000000" not in msl, "raw hex must not appear in MSL output"
 
     def test_constant_to_msl_hex_pos_inf(self):

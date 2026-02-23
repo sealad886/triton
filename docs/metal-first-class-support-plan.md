@@ -1,6 +1,6 @@
 # Metal First-Class Support Plan
 
-Last updated: 2026-02-22
+Last updated: 2026-02-23
 
 ## Objective
 
@@ -135,10 +135,41 @@ Acceptance:
 - [x] Resolve remaining dynamic-loop reduction lowering gap where kernels with
       `scf.for`-shaped reductions fail control-flow legalization
       (`failed to legalize operation 'cf.br'`) in `make_llir`.
+- [x] Add blocked `tt.dot` lowering in `ConvertTritonMetalGPUToLLVM` via FMA
+      fallback (`convertFMADot`) so matmul-class kernels compile through the
+      full Metal pipeline.
+- [x] Add compile-only "real-world workload" regression coverage (SiLU,
+      LayerNorm, blocked GEMM/matmul) to prevent future lowering regressions.
+- [x] Fix control-flow legalization for dynamic blocked matmul loops by
+      forcing `cf` conversion inside Metal GPU→LLVM lowering and running a
+      post-conversion `scf->cf` cleanup pass in `make_llir`.
+- [x] Extend LLVM→MSL GEP lowering to support nested constant-expression
+      shared-memory pointers (e.g. `getelementptr ... @global_smem` with
+      offseted base expressions used by matmul-generated IR).
+- [x] Lower `llvm.fmuladd.*` to MSL `fma(...)` to compile FMA-heavy dot loops
+      emitted by blocked matmul lowering.
 
 Acceptance:
 - Kernels that lower through the Metal LLVM pipeline compile through
   `make_metal_ir` -> `make_metallib` without placeholder stubs.
+
+## Validated Use Cases
+
+The following workload classes now compile end-to-end through Triton Metal
+(`ttir -> ttgir -> llir -> metal -> metallib`) in this branch:
+
+| Use case | Kernel pattern | Why it matters |
+| --- | --- | --- |
+| Vector elementwise ops | vector add, SiLU | Baseline MLP/activation blocks |
+| Reductions | sum/max/softmax reductions | Attention and normalization building blocks |
+| Normalization | LayerNorm-style reduction + affine | Transformer block inference/training |
+| Matmul/GEMM (blocked) | `tl.dot` in K-loop with masked loads/stores | Core dense linear algebra path |
+
+Validated by:
+- `python/test/backend/test_metal_backend.py::TestMetalCompilation`
+- `python/test/backend/test_metal_backend.py::TestMetalDynamicReduction`
+- `python/test/backend/test_metal_backend.py::TestMetalRealWorldCompileCases`
+- `scripts/test_metal_smoke.py` (runtime + harness stress in CPU and MPS)
 
 ### Phase 6: MPS Crash Diagnostics Harness (Track B)
 - [x] Add deterministic transfer-stress repro script with CPU/MPS mode split
@@ -268,3 +299,17 @@ Acceptance:
   tests, and uploads `artifacts/metal-harness-runs/` via
   `actions/upload-artifact@v4` with 14-day retention. Added `test-metal`
   Makefile target. All Phase 6 items now complete. **All phases complete.**
+- 2026-02-23: Added `tt.dot` lowering to Metal LLVM conversion by wiring
+  blocked-encoding `triton::DotOp` through shared FMA lowering
+  (`convertFMADot`), fixing the prior legalization failure
+  (`failed to legalize operation 'tt.dot'`) for blocked GEMM kernels.
+- 2026-02-23: Added compile regressions for real workload kernels:
+  SiLU activation, LayerNorm-style normalization, and blocked matmul (`tl.dot`)
+  in `TestMetalRealWorldCompileCases`.
+- 2026-02-23: Fixed blocked matmul control-flow legalization by requiring
+  `cf` ops to lower during `ConvertTritonMetalGPUToLLVM` (removed `cf` from
+  static legal dialect set) and adding a second `scf->cf` sweep after backend
+  conversion in Metal `make_llir`.
+- 2026-02-23: Extended LLVM→MSL lowering for nested GEP constant expressions
+  (notably `@global_smem` offset forms) and added `llvm.fmuladd.* -> fma(...)`
+  intrinsic lowering, unblocking MSL compilation of FMA-heavy blocked GEMM.

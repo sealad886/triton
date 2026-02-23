@@ -17,6 +17,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
 namespace mlir {
@@ -47,7 +48,6 @@ public:
       : ConversionTarget(ctx) {
     addLegalDialect<LLVM::LLVMDialect>();
     addLegalDialect<NVVM::NVVMDialect>();
-    addLegalDialect<cf::ControlFlowDialect>();
     addIllegalDialect<triton::TritonDialect>();
     addDynamicallyLegalDialect<triton::gpu::TritonGPUDialect>(
         [](Operation *op) { return isa<triton::gpu::WarpIdOp>(op); });
@@ -221,6 +221,21 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp> {
 
     rewriter.eraseOp(op);
     return success();
+  }
+};
+
+struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
+  using ConvertOpToLLVMPattern<triton::DotOp>::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Value d = op.getResult();
+    auto dEncoding = cast<RankedTensorType>(d.getType()).getEncoding();
+    if (isa<triton::gpu::BlockedEncodingAttr>(dEncoding))
+      return convertFMADot(op, adaptor, getTypeConverter(), rewriter);
+    return rewriter.notifyMatchFailure(
+        op, "unsupported tt.dot encoding for Metal LLVM lowering");
   }
 };
 
@@ -464,6 +479,7 @@ struct ConvertTritonMetalGPUToLLVM
 
 #undef POPULATE_FLOAT_OP
 
+    patterns.add<DotOpConversion>(typeConverter, benefit);
     patterns.add<LoadOpConversion, StoreOpConversion>(typeConverter, benefit);
     mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo, patterns, benefit);
     mlir::triton::populateAssertOpToLLVMPattern(typeConverter, patterns, targetInfo, benefit);

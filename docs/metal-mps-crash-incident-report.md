@@ -91,6 +91,23 @@ python python/test/backend/metal_mps_transfer_stress.py --mode mps --iters 3000 
 Representative summaries are available in `summary.json` files under each run
 directory.
 
+## 2026-02-23 Follow-Up Validation
+
+Re-ran the harnesses through `scripts/test_metal_smoke.py` on:
+- Python `3.12.12`
+- torch `2.10.0`
+- macOS `26.3`
+- Device `Apple M3 Pro`
+
+Observed outcomes:
+- Transfer harness CPU: success
+- Transfer harness MPS: success
+- Project-flow harness CPU: success
+- Project-flow harness MPS: success
+
+Run directories persisted under `artifacts/metal-harness-runs/` with timestamped
+subdirectories and checkpoint/state artifacts intact.
+
 ## First Identified Failing Boundary
 
 - In this session: **no failure reproduced**.
