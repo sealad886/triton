@@ -7,6 +7,7 @@ kernel dispatch.
 """
 
 import functools
+import logging
 import os
 import struct
 import sys
@@ -14,6 +15,20 @@ import threading
 
 from triton.backends.compiler import GPUTarget
 from triton.backends.driver import DriverBase
+
+logger = logging.getLogger(__name__)
+
+# ── Argument packing format map ─────────────────────────────────────
+
+_ARG_PACK_FORMAT: dict[str, str] = {
+    "i32": "i",
+    "i64": "q",
+    "u32": "I",
+    "u64": "Q",
+    "f32": "f",
+    "f64": "d",
+    "f16": "e",
+}
 
 
 def _get_metal_module():
@@ -197,6 +212,10 @@ class MetalUtils:
         self._Metal = _get_metal_module()
         self._Foundation = _get_foundation_module()
         self._torch = _get_torch_module()
+        self._command_queues: dict[int, object] = {}
+        self._current_stream: int = 0
+        self._pending_buffers: dict[int, list] = {}
+        self._execution_mode: str | None = None
 
     @property
     def device(self):
@@ -206,9 +225,80 @@ class MetalUtils:
 
     @property
     def command_queue(self):
-        if self._command_queue is None and self.device is not None:
-            self._command_queue = self.device.newCommandQueue()
-        return self._command_queue
+        return self.get_command_queue(self._current_stream)
+
+    def get_current_stream(self, device_id: int = 0) -> int:
+        """Return the active stream id."""
+        return self._current_stream
+
+    def set_stream(self, stream_id: int) -> None:
+        """Switch to the given stream, creating its command queue lazily."""
+        self._current_stream = stream_id
+        if stream_id not in self._command_queues and self.device is not None:
+            self._command_queues[stream_id] = self.device.newCommandQueue()
+            self._pending_buffers[stream_id] = []
+
+    def get_command_queue(self, stream_id: int | None = None) -> object:
+        """Return the command queue for *stream_id* (default: current)."""
+        if stream_id is None:
+            stream_id = self._current_stream
+        if stream_id not in self._command_queues:
+            self.set_stream(stream_id)
+        return self._command_queues[stream_id]
+
+    def synchronize_stream(self, stream_id: int | None = None) -> None:
+        """Wait for all pending command buffers on the given stream."""
+        if stream_id is None:
+            stream_id = self._current_stream
+        pending = self._pending_buffers.get(stream_id, [])
+        for buf in pending:
+            buf.waitUntilCompleted()
+        self._pending_buffers[stream_id] = []
+
+    def track_command_buffer(self, stream_id: int, cmd_buf: object) -> None:
+        """Track a committed command buffer for later synchronization."""
+        self._pending_buffers.setdefault(stream_id, []).append(cmd_buf)
+
+    def resolve_execution_mode(self) -> str:
+        """Determine the best available execution path.
+
+        Returns one of 'torch_mps', 'pyobjc', or 'unavailable'.
+        """
+        if self._execution_mode is not None:
+            return self._execution_mode
+
+        prefer_torch = os.environ.get("TRITON_METAL_PREFER_TORCH_MPS", "1") != "0"
+
+        if prefer_torch:
+            try:
+                import torch
+
+                if hasattr(torch, "mps") and hasattr(torch.mps, "compile_shader"):
+                    self._execution_mode = "torch_mps"
+                    logger.info("Metal execution mode: torch.mps")
+                    return self._execution_mode
+            except ImportError:
+                pass
+
+        if self._Metal is not None:
+            self._execution_mode = "pyobjc"
+            logger.info("Metal execution mode: PyObjC")
+            return self._execution_mode
+
+        if not prefer_torch:
+            try:
+                import torch
+
+                if hasattr(torch, "mps") and hasattr(torch.mps, "compile_shader"):
+                    self._execution_mode = "torch_mps"
+                    logger.info("Metal execution mode: torch.mps (fallback)")
+                    return self._execution_mode
+            except ImportError:
+                pass
+
+        self._execution_mode = "unavailable"
+        logger.warning("Metal execution mode: unavailable (no torch.mps or PyObjC)")
+        return self._execution_mode
 
     def get_device_properties(self, device_id=0):
         """Get Metal device properties."""
@@ -306,6 +396,13 @@ class MetalUtils:
 
     def _load_msl_source_handle(self, source, metadata=None):
         metadata = metadata or {}
+        mode = self.resolve_execution_mode()
+        if mode == "unavailable":
+            raise RuntimeError(
+                "No Metal execution backend available. "
+                "Install PyObjC (pip install pyobjc-framework-Metal) "
+                "or use a torch build with torch.mps.compile_shader support."
+            )
         torch = self._torch or _get_torch_module()
         if (
             torch is None
@@ -313,7 +410,8 @@ class MetalUtils:
             or not hasattr(torch.mps, "compile_shader")
         ):
             raise RuntimeError(
-                "torch.mps.compile_shader is required for Metal runtime launches"
+                "torch.mps.compile_shader is required for Metal runtime launches. "
+                f"Current execution mode: {mode}"
             )
 
         if isinstance(source, str):
@@ -476,6 +574,8 @@ class MetalKernelHandle:
         self.binary_bytes = binary_bytes
         self.pipeline_cache = {}
         self._lock = threading.RLock()
+        self.global_scratch_size: int = self.metadata.get("global_scratch_size", 0)
+        self._scratch_buffer = None
 
     def get_pipeline(self, name):
         """Get or create a compute pipeline for the named kernel."""
@@ -507,7 +607,24 @@ class MetalKernelHandle:
             self.pipeline_cache[name] = pipeline
             return pipeline
 
-    def launch_kernel(self, name, args=None, grid=(1, 1, 1), block=(256, 1, 1)):
+    def _get_scratch_buffer(self):
+        """Lazily allocate the global scratch buffer if metadata requests one."""
+        if self._scratch_buffer is None and self.global_scratch_size > 0:
+            self._scratch_buffer = self.device.newBufferWithLength_options_(
+                self.global_scratch_size,
+                0,  # MTLResourceStorageModeShared
+            )
+        return self._scratch_buffer
+
+    def launch_kernel(
+        self,
+        name: str,
+        args=None,
+        grid: tuple[int, int, int] = (1, 1, 1),
+        block: tuple[int, int, int] = (256, 1, 1),
+        arg_types: list[str] | None = None,
+        sync: bool = True,
+    ):
         """
         Dispatch a compute kernel on the Metal device.
 
@@ -516,18 +633,27 @@ class MetalKernelHandle:
             args: List of kernel arguments (numpy arrays, bytes, ints, floats)
             grid: (x, y, z) total threads
             block: (x, y, z) threads per threadgroup
+            arg_types: Optional per-arg type hints (e.g. 'i32', 'i64', 'f16')
+            sync: If True (default), wait for completion before returning
         """
         pipeline = self.get_pipeline(name)
         cmd_buf = self.command_queue.commandBuffer()
         encoder = cmd_buf.computeCommandEncoder()
         encoder.setComputePipelineState_(pipeline)
 
+        num_args = 0
         if args:
             for idx, arg in enumerate(args):
-                _bind_argument(self.device, encoder, idx, arg)
+                atype = arg_types[idx] if arg_types and idx < len(arg_types) else None
+                _bind_argument(self.device, encoder, idx, arg, arg_type=atype)
+            num_args = len(args)
 
-        # Compute threadgroups from grid/block
-        def ceildiv(a, b):
+        if self.global_scratch_size > 0:
+            scratch = self._get_scratch_buffer()
+            if scratch is not None:
+                encoder.setBuffer_offset_atIndex_(scratch, 0, num_args)
+
+        def ceildiv(a: int, b: int) -> int:
             return (a + b - 1) // b
 
         threadgroups = (
@@ -539,11 +665,25 @@ class MetalKernelHandle:
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(threadgroups, block)
         encoder.endEncoding()
         cmd_buf.commit()
-        cmd_buf.waitUntilCompleted()
+
+        if sync:
+            cmd_buf.waitUntilCompleted()
+        else:
+            MetalUtils().track_command_buffer(
+                MetalUtils().get_current_stream(), cmd_buf
+            )
 
 
-def _bind_argument(device, encoder, idx, arg):
-    """Bind a single argument to a Metal compute encoder at the given index."""
+def _bind_argument(device, encoder, idx, arg, arg_type: str | None = None):
+    """Bind a single argument to a Metal compute encoder at the given index.
+
+    Args:
+        device: MTLDevice instance
+        encoder: MTLComputeCommandEncoder
+        idx: Argument buffer index
+        arg: The argument value
+        arg_type: Optional explicit type hint ('i32', 'i64', 'f32', 'f64', 'f16', etc.)
+    """
     try:
         import numpy as np
 
@@ -555,14 +695,29 @@ def _bind_argument(device, encoder, idx, arg):
         nbytes = arg.nbytes
         buf = device.newBufferWithBytes_length_options_(arg.tobytes(), nbytes, 0)
         encoder.setBuffer_offset_atIndex_(buf, 0, idx)
-    elif isinstance(arg, (bytes, bytearray)):
-        encoder.setBytes_length_index_(arg, len(arg), idx)
-    elif isinstance(arg, int):
-        packed = struct.pack("i", arg)
+        return
+
+    if arg_type is not None:
+        fmt = _ARG_PACK_FORMAT.get(arg_type)
+        if fmt is not None:
+            packed = struct.pack(fmt, arg)
+            encoder.setBytes_length_index_(packed, len(packed), idx)
+            return
+
+    if isinstance(arg, int):
+        if arg > 2**31 - 1 or arg < -(2**31):
+            packed = struct.pack("q", arg)  # 64-bit signed
+        else:
+            packed = struct.pack("i", arg)  # 32-bit signed
         encoder.setBytes_length_index_(packed, len(packed), idx)
     elif isinstance(arg, float):
-        packed = struct.pack("f", arg)
+        packed = struct.pack("f", arg)  # 32-bit float default
         encoder.setBytes_length_index_(packed, len(packed), idx)
+    elif hasattr(arg, "tobytes"):
+        data = arg.tobytes()
+        encoder.setBytes_length_index_(data, len(data), idx)
+    elif isinstance(arg, (bytes, bytearray)):
+        encoder.setBytes_length_index_(arg, len(arg), idx)
     else:
         try:
             data = bytes(arg)
@@ -714,7 +869,7 @@ class MetalDriver(DriverBase):
         pass  # Metal doesn't support device selection
 
     def get_current_stream(self, device_id=0):
-        return 0  # Metal uses command queues, not streams
+        return self.utils.get_current_stream(device_id)
 
     def get_device_capability(self, device_id=0):
         props = self.utils.get_device_properties(device_id)

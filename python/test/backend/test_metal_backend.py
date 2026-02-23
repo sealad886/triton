@@ -3334,3 +3334,230 @@ class TestMetalMatmulRegression:
         assert line_count > 20, (
             f"Matmul MSL has only {line_count} lines - suspiciously small"
         )
+
+
+# ── Runtime Conformance Tests ──────────────────────────────────────
+
+
+class TestMetalRuntimeConformance:
+    """Test Metal runtime behaviour matches the shared contract."""
+
+    # ── Stream semantics ──────────────────────────────────────────
+
+    @skip_non_darwin
+    def test_stream_default(self):
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        assert utils.get_current_stream() == 0
+
+    @skip_non_darwin
+    def test_stream_switch_and_return(self):
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        utils.set_stream(1)
+        assert utils.get_current_stream() == 1
+        utils.set_stream(0)
+        assert utils.get_current_stream() == 0
+
+    @skip_non_darwin
+    def test_stream_queue_created(self):
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        utils.set_stream(42)
+        q = utils.get_command_queue(42)
+        assert q is not None
+        # Cleanup: switch back to default
+        utils.set_stream(0)
+
+    @skip_non_darwin
+    def test_synchronize_empty_stream(self):
+        """synchronize_stream on a stream with no pending work should not raise."""
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        utils.synchronize_stream(0)
+
+    # ── Argument binding ──────────────────────────────────────────
+
+    def test_argument_binding_i64_no_truncation(self):
+        large_val = 2**40
+        packed = struct.pack("q", large_val)
+        assert len(packed) == 8
+        assert struct.unpack("q", packed)[0] == large_val
+
+    def test_argument_binding_negative_i64(self):
+        val = -(2**33)
+        packed = struct.pack("q", val)
+        assert len(packed) == 8
+        assert struct.unpack("q", packed)[0] == val
+
+    def test_argument_binding_i32_range(self):
+        val = 2**30
+        packed = struct.pack("i", val)
+        assert len(packed) == 4
+        assert struct.unpack("i", packed)[0] == val
+
+    def test_argument_binding_f16_format(self):
+        packed = struct.pack("e", 1.5)
+        assert len(packed) == 2
+        assert abs(struct.unpack("e", packed)[0] - 1.5) < 1e-3
+
+    def test_argument_binding_f64_format(self):
+        import math
+
+        packed = struct.pack("d", math.pi)
+        assert len(packed) == 8
+        assert abs(struct.unpack("d", packed)[0] - math.pi) < 1e-15
+
+    def test_arg_pack_format_map(self):
+        from third_party.metal.backend.driver import _ARG_PACK_FORMAT
+
+        expected_keys = {"i32", "i64", "u32", "u64", "f32", "f64", "f16"}
+        assert expected_keys == set(_ARG_PACK_FORMAT.keys())
+
+    def test_arg_pack_format_sizes(self):
+        from third_party.metal.backend.driver import _ARG_PACK_FORMAT
+
+        expected_sizes = {"i32": 4, "i64": 8, "u32": 4, "u64": 8, "f32": 4, "f64": 8, "f16": 2}
+        for key, fmt in _ARG_PACK_FORMAT.items():
+            assert struct.calcsize(fmt) == expected_sizes[key], f"{key} size mismatch"
+
+    # ── Scratch buffer ────────────────────────────────────────────
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_scratch_buffer_allocated_when_requested(self):
+        from third_party.metal.backend.driver import MetalKernelHandle, MetalUtils
+
+        utils = MetalUtils()
+        dev = utils.device
+        cq = utils.command_queue
+        # Need a dummy library; use a trivial metallib
+        from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+        source = (
+            "#include <metal_stdlib>\nusing namespace metal;\n"
+            "kernel void noop(uint id [[thread_position_in_grid]]) {}\n"
+        )
+        opts = MetalOptions(arch="apple8")
+        binary = MetalBackend.make_metallib(source, {}, opts)
+
+        import tempfile
+
+        import Foundation
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".metallib", delete=False) as f:
+                f.write(binary)
+                tmp_path = f.name
+            url = Foundation.NSURL.fileURLWithPath_(tmp_path)
+            result = dev.newLibraryWithURL_error_(url, None)
+            library = result[0] if isinstance(result, tuple) else result
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+        handle = MetalKernelHandle(
+            device=dev,
+            command_queue=cq,
+            library=library,
+            metadata={"global_scratch_size": 4096},
+        )
+        assert handle.global_scratch_size == 4096
+        scratch = handle._get_scratch_buffer()
+        assert scratch is not None
+
+    def test_scratch_buffer_zero_means_none(self):
+        """When global_scratch_size is 0 or absent, no buffer is created."""
+        from third_party.metal.backend.driver import MetalKernelHandle
+
+        handle = MetalKernelHandle.__new__(MetalKernelHandle)
+        handle.metadata = {}
+        handle.global_scratch_size = 0
+        handle._scratch_buffer = None
+        handle.device = None
+        assert handle._get_scratch_buffer() is None
+
+    # ── Execution mode detection ──────────────────────────────────
+
+    @skip_non_darwin
+    def test_execution_mode_detection(self):
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        # Reset cached mode for a fresh probe
+        utils._execution_mode = None
+        mode = utils.resolve_execution_mode()
+        assert mode in ("torch_mps", "pyobjc", "unavailable")
+
+    def test_execution_mode_unavailable_when_nothing(self):
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        old_mode = utils._execution_mode
+        old_metal = utils._Metal
+        old_torch = utils._torch
+        try:
+            utils._execution_mode = None
+            utils._Metal = None
+            utils._torch = None
+            with patch("third_party.metal.backend.driver._get_torch_module", return_value=None), \
+                 patch.dict("sys.modules", {"torch": None}):
+                mode = utils.resolve_execution_mode()
+            assert mode == "unavailable"
+        finally:
+            utils._execution_mode = old_mode
+            utils._Metal = old_metal
+            utils._torch = old_torch
+
+    # ── Launch hooks ──────────────────────────────────────────────
+
+    @skip_non_darwin
+    def test_launch_hooks_called(self):
+        from unittest.mock import MagicMock
+
+        from third_party.metal.backend.driver import MetalLauncher, TorchMetalKernelHandle
+
+        mock_enter = MagicMock()
+        mock_exit = MagicMock()
+
+        mock_lib = MagicMock()
+        mock_fn = MagicMock()
+        mock_lib.test_fn = mock_fn
+        handle = TorchMetalKernelHandle(
+            shader_library=mock_lib,
+            metadata={"name": "test_fn"},
+        )
+
+        launcher = MetalLauncher.__new__(MetalLauncher)
+        launcher.metadata = {"name": "test_fn"}
+        launcher._signature_layout = []
+
+        launcher(
+            1, 1, 1,   # grid
+            0,          # stream
+            handle,
+            {"name": "test_fn"},  # kernel_metadata
+            {},                   # launch_metadata
+            mock_enter,
+            mock_exit,
+        )
+
+        mock_enter.assert_called_once()
+        mock_exit.assert_called_once()
+
+    # ── MetalDriver stream proxy ──────────────────────────────────
+
+    @skip_non_darwin
+    def test_driver_get_current_stream(self):
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver()
+        assert driver.get_current_stream() == 0
+        driver.utils.set_stream(5)
+        assert driver.get_current_stream() == 5
+        driver.utils.set_stream(0)
