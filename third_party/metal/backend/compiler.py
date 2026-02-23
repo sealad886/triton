@@ -121,6 +121,14 @@ _RE_CAST = re.compile(
 _RE_DBG_STRIP = re.compile(r",\s*!dbg\s*![0-9]+.*$")
 _RE_COMMENT_STRIP = re.compile(r"\s*;.*$")
 
+# Combined line-cleaning regex: strips debug metadata, trailing
+# comments, and attribute-group references in a single pass.
+_RE_LINE_CLEAN = re.compile(
+    r",\s*!dbg\s*![0-9]+.*$"  # Debug metadata
+    r"|\s*;.*$"                # Trailing comments
+    r"|\s+#\d+\s*$"           # Attribute-group references
+)
+
 # Structural / parsing patterns
 _RE_LABEL = re.compile(r'^([A-Za-z0-9_."]+):$')
 _RE_KERNEL_FUNC = re.compile(
@@ -238,6 +246,44 @@ _RE_SWITCH_CASE = re.compile(r"(\S+)\s+(-?\d+),\s*label\s+%(\S+)")
 _RE_FENCE = re.compile(
     r"^fence\s+(?:syncscope\(\"(\w+)\"\)\s+)?(monotonic|acquire|release|acq_rel|seq_cst)$"
 )
+
+# ── Fallback GEP / ptr patterns (pre-compiled for hot helpers) ──────
+_RE_GEP_INSTRUCTION_FALLBACK = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*getelementptr(?:\s+\w+)*\s+(.+)$"
+)
+_RE_PTR_SPEC = re.compile(r"^ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$")
+_RE_GEP_FLAG_STRIP = re.compile(r"^(?:inbounds|nuw|nsw|inrange)\s+")
+
+# ── Opcode dispatch sets for codegen fast-path (PERF-005) ───────────
+_BINOP_OPCODES = frozenset({
+    "add", "sub", "mul", "udiv", "sdiv", "urem", "srem",
+    "shl", "lshr", "ashr", "and", "or", "xor",
+    "fadd", "fsub", "fmul", "fdiv", "frem",
+})
+_CAST_OPCODES = frozenset({
+    "sext", "zext", "trunc", "fptrunc", "fpext",
+    "sitofp", "uitofp", "fptosi", "fptoui",
+    "bitcast", "addrspacecast", "ptrtoint", "inttoptr",
+})
+
+
+def _extract_ir_opcode(line: str) -> str:
+    """Extract LLVM IR opcode from an instruction line for dispatch.
+
+    Handles both SSA assignments (``%v = add ...``) and non-assignment
+    instructions (``store ...``, ``br ...``).  Skips optional ``tail`` /
+    ``musttail`` / ``notail`` call prefixes so that ``tail call`` returns
+    ``'call'``.
+    """
+    eq_pos = line.find(" = ")
+    rest = line[eq_pos + 3:] if eq_pos >= 0 else line
+    for prefix in ("tail ", "musttail ", "notail "):
+        if rest.startswith(prefix):
+            rest = rest[len(prefix):]
+            break
+    sp = rest.find(" ")
+    return rest[:sp] if sp >= 0 else rest
+
 
 # ── Module-level constant data structures (PERF-003) ───────────────
 _MSL_RESERVED_IDENTIFIERS = frozenset(
@@ -747,7 +793,10 @@ class MetalBackend(BaseBackend):
 
         def msl_id(llvm_name: str) -> str:
             raw = llvm_name.lstrip("%")
-            raw = _RE_MSL_ID_CLEAN.sub("_", raw)
+            # Only invoke regex sub when there are chars that need cleaning;
+            # most SSA names (e.g. "0", "v1", "arg0") are already clean.
+            if _RE_MSL_ID_CLEAN.search(raw):
+                raw = _RE_MSL_ID_CLEAN.sub("_", raw)
             if not raw:
                 raw = "tmp"
             if raw[0].isdigit():
@@ -915,7 +964,7 @@ class MetalBackend(BaseBackend):
             return spec.strip()
 
         def parse_ptr_spec(spec: str) -> tuple[str | None, str] | None:
-            m = re.match(r"^ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$", spec.strip())
+            m = _RE_PTR_SPEC.match(spec.strip())
             if not m:
                 return None
             return m.group(1), m.group(2).strip()
@@ -935,10 +984,7 @@ class MetalBackend(BaseBackend):
         def parse_gep_instruction(
             line: str,
         ) -> tuple[str, str, str | None, str, str] | None:
-            m = re.match(
-                r"^(" + _SSA_NAME_RE + r")\s*=\s*getelementptr(?:\s+\w+)*\s+(.+)$",
-                line,
-            )
+            m = _RE_GEP_INSTRUCTION_FALLBACK.match(line)
             if not m:
                 return None
             out_ssa = m.group(1)
@@ -953,9 +999,7 @@ class MetalBackend(BaseBackend):
                 return None
             rest = token[len("getelementptr") :].strip()
             while True:
-                stripped = re.sub(
-                    r"^(?:inbounds|nuw|nsw|inrange)\s+", "", rest, count=1
-                )
+                stripped = _RE_GEP_FLAG_STRIP.sub("", rest, count=1)
                 if stripped == rest:
                     break
                 rest = stripped
@@ -1088,18 +1132,20 @@ class MetalBackend(BaseBackend):
 
         def to_expr(token: str) -> str:
             token = token.strip()
+            # Fast path: SSA name lookup (most common case, ~60% of calls)
+            cached = ssa.get(token)
+            if cached is not None:
+                return cached
+            if token.startswith("%"):
+                out = msl_id(token)
+                ssa[token] = out
+                return out
             if token == "@global_smem":
                 return "((threadgroup char*)__triton_shared)"
             gep_cexpr = parse_gep_constexpr(token)
             if gep_cexpr is not None:
                 _, _, base, idx_token = gep_cexpr
                 return f"({to_expr(base)} + {to_expr(idx_token)})"
-            if token in ssa:
-                return ssa[token]
-            if token.startswith("%"):
-                out = msl_id(token)
-                ssa[token] = out
-                return out
             return constant_to_msl(token)
 
         cmp_map = _CMP_MAP
@@ -1228,9 +1274,9 @@ class MetalBackend(BaseBackend):
             line = raw_line.strip()
             if not line:
                 continue
-            line = _RE_DBG_STRIP.sub("", line)
-            line = _RE_COMMENT_STRIP.sub("", line).rstrip()
-            line = _RE_ATTR_GROUP_STRIP.sub("", line)
+            # Combined line-cleaning: strip debug metadata, trailing
+            # comments, and attribute-group references in one pass.
+            line = _RE_LINE_CLEAN.sub("", line).rstrip()
             if not line:
                 continue
             cleaned_lines.append(line)
@@ -1285,9 +1331,16 @@ class MetalBackend(BaseBackend):
 
         for block in block_order:
             for line in blocks.get(block, []):
+                # Lines that don't start with '%' cannot produce SSA
+                # declarations — skip all regex testing for them.
+                if not line.startswith("%"):
+                    continue
+
+                _opc = _extract_ir_opcode(line)
+
                 # Reordered by frequency: binop > load > cast > call > GEP >
                 # icmp/fcmp > phi > select > fneg > freeze > extract/insert
-                m = _RE_BINOP.match(line)
+                m = _RE_BINOP.match(line) if _opc in _BINOP_OPCODES else None
                 if m:
                     out_ssa, _, operands_spec = m.groups()
                     parts = split_top_level(operands_spec)
@@ -1297,19 +1350,19 @@ class MetalBackend(BaseBackend):
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_LOAD_DECL.match(line)
+                m = _RE_LOAD_DECL.match(line) if _opc == 'load' else None
                 if m:
                     out_ssa, llvm_ty, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_CAST.match(line)
+                m = _RE_CAST.match(line) if _opc in _CAST_OPCODES else None
                 if m:
                     out_ssa, _, _, dst_ty = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=dst_ty.strip())
                     continue
 
-                m = _RE_CALL_OUT.match(line)
+                m = _RE_CALL_OUT.match(line) if _opc == 'call' else None
                 if m:
                     out_ssa, ret_spec, fn_name, _ = m.groups()
                     ret_type = extract_call_ret_type(ret_spec)
@@ -1332,7 +1385,7 @@ class MetalBackend(BaseBackend):
                         record_ssa_decl(out_ssa, llvm_ty=ret_type)
                     continue
 
-                m = _RE_GEP_DECL.match(line)
+                m = _RE_GEP_DECL.match(line) if _opc == 'getelementptr' else None
                 if m:
                     out_ssa, elem_ty, addr_space, _, _ = m.groups()
                     record_ssa_decl(
@@ -1348,55 +1401,55 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_ICMP.match(line)
+                m = _RE_ICMP.match(line) if _opc == 'icmp' else None
                 if m:
                     out_ssa, _, _, _, _ = m.groups()
                     record_ssa_decl(out_ssa, msl_ty="bool")
                     continue
 
-                m = _RE_FCMP.match(line)
+                m = _RE_FCMP.match(line) if _opc == 'fcmp' else None
                 if m:
                     out_ssa, _, _, _ = m.groups()
                     record_ssa_decl(out_ssa, msl_ty="bool")
                     continue
 
-                m = _RE_PHI_DECL.match(line)
+                m = _RE_PHI_DECL.match(line) if _opc == 'phi' else None
                 if m:
                     out_ssa, llvm_ty = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_SELECT_DECL.match(line)
+                m = _RE_SELECT_DECL.match(line) if _opc == 'select' else None
                 if m:
                     out_ssa, llvm_ty = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_FNEG_DECL.match(line)
+                m = _RE_FNEG_DECL.match(line) if _opc == 'fneg' else None
                 if m:
                     out_ssa, llvm_ty, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_FREEZE_DECL.match(line)
+                m = _RE_FREEZE_DECL.match(line) if _opc == 'freeze' else None
                 if m:
                     out_ssa, llvm_ty, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_EXTRACTELEM_DECL.match(line)
+                m = _RE_EXTRACTELEM_DECL.match(line) if _opc == 'extractelement' else None
                 if m:
                     out_ssa, elem_ty, _, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=elem_ty)
                     continue
 
-                m = _RE_INSERTELEM_DECL.match(line)
+                m = _RE_INSERTELEM_DECL.match(line) if _opc == 'insertelement' else None
                 if m:
                     out_ssa, vec_ty, _, _, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=vec_ty)
                     continue
 
-                m = _RE_EXTRACTVALUE.match(line)
+                m = _RE_EXTRACTVALUE.match(line) if _opc == 'extractvalue' else None
                 if m:
                     out_ssa, agg_type, _, idx_str = m.groups()
                     _, field_types = get_aggregate_struct_name(agg_type)
@@ -1405,21 +1458,21 @@ class MetalBackend(BaseBackend):
                     record_ssa_decl(out_ssa, msl_ty=ft)
                     continue
 
-                m = _RE_INSERTVALUE.match(line)
+                m = _RE_INSERTVALUE.match(line) if _opc == 'insertvalue' else None
                 if m:
                     out_ssa, agg_type, _, _, _, _ = m.groups()
                     struct_name, _ = get_aggregate_struct_name(agg_type)
                     record_ssa_decl(out_ssa, msl_ty=struct_name)
                     continue
 
-                m = _RE_ATOMICRMW.match(line)
+                m = _RE_ATOMICRMW.match(line) if _opc == 'atomicrmw' else None
                 if m:
                     out_ssa = m.group(1)
                     val_type = m.group(5)
                     record_ssa_decl(out_ssa, llvm_ty=val_type.strip())
                     continue
 
-                m = _RE_CMPXCHG.match(line)
+                m = _RE_CMPXCHG.match(line) if _opc == 'cmpxchg' else None
                 if m:
                     out_ssa = m.group(1)
                     val_type = m.group(4)
@@ -1428,7 +1481,7 @@ class MetalBackend(BaseBackend):
                     record_ssa_decl(out_ssa, msl_ty=struct_name)
                     continue
 
-                m = _RE_ALLOCA.match(line)
+                m = _RE_ALLOCA.match(line) if _opc == 'alloca' else None
                 if m:
                     out_ssa, elem_type = m.groups()
                     msl_ty = llvm_scalar_to_msl(elem_type.strip())
@@ -1475,11 +1528,13 @@ class MetalBackend(BaseBackend):
                     terminated = True
                     break
 
+                _opc = _extract_ir_opcode(line)
+
                 # Reordered by frequency: binop > load > store > GEP > cast >
                 # call > icmp > fcmp > br > phi > void_call > select > fneg >
                 # freeze > extract/insert > unreachable
 
-                m = _RE_BINOP.match(line)
+                m = _RE_BINOP.match(line) if _opc in _BINOP_OPCODES else None
                 if m:
                     out_ssa, op, operands_spec = m.groups()
                     parts = split_top_level(operands_spec)
@@ -1511,7 +1566,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{out} = {lhs_expr} {bin_map[op]} {rhs_expr};")
                     continue
 
-                m = _RE_LOAD.match(line)
+                m = _RE_LOAD.match(line) if _opc == 'load' else None
                 if m:
                     out_ssa, llvm_ty, addr_space, ptr = m.groups()
                     out = msl_id(out_ssa)
@@ -1524,7 +1579,7 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_STORE.match(line)
+                m = _RE_STORE.match(line) if _opc == 'store' else None
                 if m:
                     val_spec, addr_space, ptr = m.groups()
                     llvm_ty, val_token = split_typed_value(val_spec)
@@ -1535,7 +1590,7 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_GEP.match(line)
+                m = _RE_GEP.match(line) if _opc == 'getelementptr' else None
                 if m:
                     out_ssa, _, base, idx = m.groups()
                     out = msl_id(out_ssa)
@@ -1543,7 +1598,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {to_expr(base)} + {to_expr(idx)};")
                     continue
 
-                parsed_gep = parse_gep_instruction(line)
+                parsed_gep = parse_gep_instruction(line) if _opc == 'getelementptr' else None
                 if parsed_gep is not None:
                     out_ssa, _, _, base, idx = parsed_gep
                     out = msl_id(out_ssa)
@@ -1551,7 +1606,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {to_expr(base)} + {to_expr(idx)};")
                     continue
 
-                m = _RE_CAST.match(line)
+                m = _RE_CAST.match(line) if _opc in _CAST_OPCODES else None
                 if m:
                     out_ssa, op, src_spec, dst_ty = m.groups()
                     out = msl_id(out_ssa)
@@ -1571,7 +1626,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{out} = ({llvm_type_to_msl(dst_ty)})({to_expr(val)});")
                     continue
 
-                m = _RE_CALL_OUT.match(line)
+                m = _RE_CALL_OUT.match(line) if _opc == 'call' else None
                 if m:
                     out_ssa, _, fn, args_raw = m.groups()
                     args = [to_expr(v) for v in parse_call_args(args_raw)]
@@ -1629,7 +1684,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{out} = {fn}({', '.join(args)});")
                     continue
 
-                m = _RE_ICMP.match(line)
+                m = _RE_ICMP.match(line) if _opc == 'icmp' else None
                 if m:
                     out_ssa, pred, llvm_ty_icmp, lhs, rhs = m.groups()
                     out = msl_id(out_ssa)
@@ -1646,7 +1701,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = ({lhs_expr} {cmp_op} {rhs_expr});")
                     continue
 
-                m = _RE_FCMP.match(line)
+                m = _RE_FCMP.match(line) if _opc == 'fcmp' else None
                 if m:
                     out_ssa, pred, lhs, rhs = m.groups()
                     out = msl_id(out_ssa)
@@ -1656,7 +1711,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {fcmp_expr(pred, lhs_expr, rhs_expr)};")
                     continue
 
-                m = _RE_BR.match(line)
+                m = _RE_BR.match(line) if _opc == 'br' else None
                 if m:
                     target = normalize_label(m.group(1))
                     target_id = block_ids.get(target)
@@ -1670,7 +1725,7 @@ class MetalBackend(BaseBackend):
                     terminated = True
                     break
 
-                m = _RE_BR_COND.match(line)
+                m = _RE_BR_COND.match(line) if _opc == 'br' else None
                 if m:
                     cond, t_lbl, f_lbl = m.groups()
                     t_lbl = normalize_label(t_lbl)
@@ -1689,7 +1744,7 @@ class MetalBackend(BaseBackend):
                     terminated = True
                     break
 
-                m = _RE_PHI.match(line)
+                m = _RE_PHI.match(line) if _opc == 'phi' else None
                 if m:
                     out_ssa, incoming_raw = m.groups()
                     out = msl_id(out_ssa)
@@ -1714,7 +1769,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {phi_expr};")
                     continue
 
-                m = _RE_VOID_CALL.match(line)
+                m = _RE_VOID_CALL.match(line) if _opc == 'call' else None
                 if m:
                     fn, args_raw = m.groups()
                     args = [to_expr(v) for v in parse_call_args(args_raw)]
@@ -1766,7 +1821,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{fn}({', '.join(args)});")
                     continue
 
-                m = _RE_SELECT.match(line)
+                m = _RE_SELECT.match(line) if _opc == 'select' else None
                 if m:
                     out_ssa, cond, lhs, rhs = m.groups()
                     out = msl_id(out_ssa)
@@ -1776,7 +1831,7 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_FNEG.match(line)
+                m = _RE_FNEG.match(line) if _opc == 'fneg' else None
                 if m:
                     out_ssa, val = m.groups()
                     out = msl_id(out_ssa)
@@ -1784,7 +1839,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = -({to_expr(val)});")
                     continue
 
-                m = _RE_FREEZE.match(line)
+                m = _RE_FREEZE.match(line) if _opc == 'freeze' else None
                 if m:
                     out_ssa, val = m.groups()
                     out = msl_id(out_ssa)
@@ -1792,7 +1847,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {to_expr(val)};")
                     continue
 
-                m = _RE_EXTRACTELEM.match(line)
+                m = _RE_EXTRACTELEM.match(line) if _opc == 'extractelement' else None
                 if m:
                     out_ssa, width_s, vec, idx = m.groups()
                     out = msl_id(out_ssa)
@@ -1804,7 +1859,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{out} = {to_expr(vec)}[{to_expr(idx)}];")
                     continue
 
-                m = _RE_INSERTELEM.match(line)
+                m = _RE_INSERTELEM.match(line) if _opc == 'insertelement' else None
                 if m:
                     out_ssa, width_s, vec, val, idx = m.groups()
                     out = msl_id(out_ssa)
@@ -1817,7 +1872,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{out}[{to_expr(idx)}] = {to_expr(val)};")
                     continue
 
-                m = _RE_EXTRACTVALUE.match(line)
+                m = _RE_EXTRACTVALUE.match(line) if _opc == 'extractvalue' else None
                 if m:
                     out_ssa, _, src_val, idx_str = m.groups()
                     out = msl_id(out_ssa)
@@ -1825,7 +1880,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {to_expr(src_val)}.field{idx_str};")
                     continue
 
-                m = _RE_INSERTVALUE.match(line)
+                m = _RE_INSERTVALUE.match(line) if _opc == 'insertvalue' else None
                 if m:
                     out_ssa, _, agg_val, _, elem_val, idx_str = m.groups()
                     out = msl_id(out_ssa)
@@ -1834,7 +1889,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out}.field{idx_str} = {to_expr(elem_val)};")
                     continue
 
-                m = _RE_ATOMICRMW.match(line)
+                m = _RE_ATOMICRMW.match(line) if _opc == 'atomicrmw' else None
                 if m:
                     out_ssa, op, addr_space, ptr, val_type, val, ordering = m.groups()
                     out = msl_id(out_ssa)
@@ -1849,7 +1904,7 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_CMPXCHG.match(line)
+                m = _RE_CMPXCHG.match(line) if _opc == 'cmpxchg' else None
                 if m:
                     (
                         out_ssa,
@@ -1876,7 +1931,7 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_ALLOCA.match(line)
+                m = _RE_ALLOCA.match(line) if _opc == 'alloca' else None
                 if m:
                     out_ssa, elem_type = m.groups()
                     out = msl_id(out_ssa)
@@ -1884,7 +1939,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = &{out}_storage;")
                     continue
 
-                m = _RE_SWITCH.match(line)
+                m = _RE_SWITCH.match(line) if _opc == 'switch' else None
                 if m:
                     val_type, val, default_label, cases_str = m.groups()
                     default_label = normalize_label(default_label)
@@ -1904,7 +1959,7 @@ class MetalBackend(BaseBackend):
                     terminated = True
                     break
 
-                m = _RE_FENCE.match(line)
+                m = _RE_FENCE.match(line) if _opc == 'fence' else None
                 if m:
                     syncscope, ordering = m.groups()
                     if syncscope in ("workgroup", "threadgroup"):
