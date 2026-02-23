@@ -190,6 +190,105 @@ Acceptance:
 - Native crashes can be localized to compute, transfer/sync, or cleanup
   boundary using persisted run artifacts, even without Python exceptions.
 
+### Phase 7: LLVM Surface Generalization (Beyond Curated Lowering)
+- [ ] Replace remaining regex-only LLVM text handling with a typed IR-driven
+      lowering path where feasible, keeping textual fallback only for debugging.
+- [ ] Expand instruction coverage to include the remaining common LLVM ops
+      observed in ML kernels (additional cast forms, aggregate ops, atomics,
+      overflow intrinsics, pointer arithmetic edge cases, fast-math variants).
+- [ ] Expand call-lowering coverage for additional LLVM/libdevice symbols
+      frequently emitted by Triton optimization pipelines.
+- [ ] Add corpus-driven translation tests that compile a broad LLVM IR sample
+      set harvested from real Triton kernels and assert zero unsupported-line
+      failures.
+- [ ] Add deterministic unsupported-IR diagnostics that persist the failing
+      IR line, surrounding context, and suggested category in artifacts.
+
+Acceptance:
+- LLVM->MSL lowering succeeds for the representative ML corpus without
+  unsupported-instruction failures.
+- Unsupported IR failures, when they do occur, are classified and reproducible
+  from saved artifacts.
+
+### Phase 8: Dot/Matmul Encoding Completeness and Throughput Parity
+- [ ] Extend `tt.dot` lowering coverage beyond blocked encoding to additional
+      operand/result encodings used by advanced matmul pipelines.
+- [ ] Re-enable and validate Metal-safe matmul optimization passes currently
+      disabled in TTGIR (`accelerate_matmul`, dot-operand optimization).
+- [ ] Add Metal-specific strategy for simdgroup-optimized matmul execution with
+      correctness-preserving fallbacks.
+- [ ] Build shape/dtype coverage for GEMM kernels used in transformers:
+      fp32/fp16/bf16 paths, odd K tails, batched and grouped variants.
+- [ ] Add perf regression tests and guardrails against severe throughput
+      regressions on Apple7/Apple8/Apple9 classes.
+
+Acceptance:
+- Matmul-heavy kernels compile and run across supported encodings and dtypes.
+- Throughput for key GEMM shapes is competitive with the backend baseline
+  targets established for Apple Silicon generations.
+
+### Phase 9: Runtime Semantics Parity (Streams, Async, Launch Features)
+- [ ] Implement meaningful stream/queue semantics rather than placeholder
+      stream identifiers, including async launch ordering guarantees.
+- [ ] Support or explicitly emulate launch contract fields currently ignored
+      (`launch_cooperative_grid`, scratch buffers, profile hooks).
+- [ ] Add robust runtime fallback path when `torch.mps.compile_shader` is not
+      available, including direct metallib execution path equivalence tests.
+- [ ] Expand argument binding support for richer scalar/tensor forms and
+      dynamic shape metadata used by real training/inference pipelines.
+- [ ] Add runtime conformance tests comparing Metal launch behavior to shared
+      backend contract expectations.
+
+Acceptance:
+- Metal runtime launch behavior matches Triton runtime contracts for stream
+  ordering, argument binding, and launch metadata semantics.
+- Launches remain functional across both torch-shader and metallib-backed
+  execution modes.
+
+### Phase 10: ML Workload Breadth and Numerical Robustness
+- [ ] Add end-to-end runtime correctness suites (not compile-only) for a broad
+      ML kernel set: attention blocks, MLP blocks, normalization, embedding and
+      scatter/gather-heavy patterns, and convolution-like kernels.
+- [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
+      where supported), including tolerance envelopes per dtype.
+- [ ] Add long-running stress tests covering training-like iteration loops,
+      optimizer-style update kernels, and checkpointed host-device sync phases.
+- [ ] Add cross-backend numerical comparison harnesses (CPU/CUDA/HIP reference
+      where available) with deterministic seeds and artifact logging.
+- [ ] Add coverage for dynamic-shape kernels and irregular tensor sizes common
+      in production inference workloads.
+
+Acceptance:
+- Metal backend passes comprehensive runtime correctness checks for core ML
+  workload classes with documented tolerances.
+- Numerical drift is bounded and tracked across backend/compiler changes.
+
+### Phase 11: Production Hardening, Tooling, and Developer UX
+- [ ] Add backend observability tooling: compile-time provenance, pass-timing
+      breakdowns, kernel cache diagnostics, and structured failure signatures.
+- [ ] Harden cache/versioning invalidation rules for Metal SDK updates, Triton
+      backend changes, and architecture-family differences.
+- [ ] Expand user-facing docs and examples for common ML deployment flows,
+      including troubleshooting for MPS runtime instability signatures.
+- [ ] Add sustained soak tests and release gates for regression detection across
+      compiler, runtime, and harness dimensions.
+- [ ] Define and publish a compatibility matrix (macOS, Xcode, torch, Apple
+      GPU families) with automated validation in CI.
+
+Acceptance:
+- Metal backend can be operated and debugged in production-like environments
+  with clear diagnostics, stable upgrade behavior, and documented guardrails.
+
+## ML Coverage Targets (Post-Phase-6)
+
+| Workload family | Required completeness target |
+| --- | --- |
+| Transformer inference | attention + MLP + norm kernels compile and run with validated numerics |
+| Transformer training kernels | reduction-heavy, update-heavy, mixed-precision loops pass stress suites |
+| CNN/vision style kernels | convolution-like and reduction/post-op patterns compile/run correctly |
+| Recsys/embedding patterns | gather/scatter and irregular-shape kernels are covered |
+| Quantized inference | int8/fp8 paths compile/run where hardware/runtime supports them |
+
 ## Risks and Mitigations
 
 - Risk: MSL generation remains a stub for many kernels.
@@ -317,3 +416,6 @@ Acceptance:
   `python/test/backend/test_metal_backend.py` => **95 passed**,
   `scripts/test_metal_smoke.py` => all smoke/harness checks passed in both
   CPU and MPS modes with persisted run artifacts.
+- 2026-02-23: Added post-first-class roadmap phases (7-11) covering LLVM
+  surface generalization, dot/matmul encoding completeness, runtime semantics
+  parity, broad ML workload runtime validation, and production hardening.
