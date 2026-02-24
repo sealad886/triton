@@ -996,6 +996,13 @@ public:
     MLIRContext *context = &getContext();
     ModuleOp m = getOperation();
 
+    // This pass currently applies NVIDIA-specific MMA rewrites. Keep it
+    // harmless on non-CUDA targets so backend pipelines can include it
+    // without target-specific guard rails.
+    auto targetAttr = m->getAttrOfType<StringAttr>(triton::gpu::AttrTargetName);
+    if (!targetAttr || !targetAttr.getValue().starts_with("cuda:"))
+      return;
+
     auto computeCapability = getNVIDIAComputeCapability(m);
     // We could do this generically if we manage to improve the heuristics
     // reverted in these two PRs https://github.com/triton-lang/triton/pull/5834

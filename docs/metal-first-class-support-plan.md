@@ -251,10 +251,11 @@ Status: Partially complete.
       result encodings; FMA dot lowering now accepts generic distributed
       layouts instead of blocked-only. Matrix-core/simdgroup-specific encodings
       still require dedicated optimization-path integration.
-- [ ] Re-enable and validate Metal-safe matmul optimization passes currently
+- [x] Re-enable and validate Metal-safe matmul optimization passes currently
       disabled in TTGIR (`accelerate_matmul`, dot-operand optimization).
-      Current state: `optimize_dot_operands` is enabled; `accelerate_matmul`
-      remains disabled.
+      Current state: both passes are enabled. `accelerate_matmul` now guards
+      on non-CUDA targets at source (`TritonGPUAccelerateMatmul`) and is a
+      safe no-op for Metal until a Metal-native acceleration strategy lands.
 - [ ] Add Metal-specific strategy for simdgroup-optimized matmul execution with
       correctness-preserving fallbacks.
       Current state: translator-level simdgroup stubs exist, but pass-level
@@ -380,9 +381,11 @@ Status: Not complete.
 - Non-blocked distributed `tt.dot` encodings now lower through the generic FMA
   path, but matrix-core/simdgroup-optimized encoding families still lack full
   pass-level integration and throughput tuning.
-- Matmul optimization parity is incomplete:
-  `accelerate_matmul` remains disabled in
-  `third_party/metal/backend/compiler.py`.
+- Matmul optimization parity is still incomplete even though
+  `accelerate_matmul` is now enabled in
+  `third_party/metal/backend/compiler.py`: the pass is currently
+  target-aware and no-ops for non-CUDA targets, so Metal-specific matmul
+  acceleration is not yet implemented.
 - Simdgroup matmul support is translator-level stub coverage, not full backend
   pass integration.
 - Shared-memory synchronization for blocked matmul is currently enforced by a
@@ -435,6 +438,12 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Fixed `tritongpu-accelerate-matmul` target handling at source by
+  making `TritonGPUAccelerateMatmul` explicitly skip non-CUDA targets instead
+  of asserting on `target` prefixes. Re-enabled
+  `passes.ttgpuir.add_accelerate_matmul(pm)` in the Metal TTGIR pipeline and
+  revalidated `python/test/backend/test_metal_backend.py` (234 passed) plus
+  `scripts/test_metal_smoke.py` (all checks pass).
 - 2026-02-24: Expanded runtime workload breadth with grouped-batched blocked
   GEMM correctness and depthwise-convolution-like correctness on MPS to cover
   previously-missing grouped and convolution-like paths in Phase 10. Revalidated
