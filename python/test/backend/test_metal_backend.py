@@ -520,7 +520,7 @@ define void @my_kernel(ptr addrspace(1) %0, ptr addrspace(1) %1, i32 %2) {
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
         assert "threadgroup_position_in_grid.x" in msl
         assert "thread_position_in_threadgroup.x" in msl
-        assert "? *" in msl
+        assert "? (" in msl
         assert "if (" in msl and "*v11 = v10" in msl
 
     def test_make_metal_ir_translates_simdgroup_barrier_flags(self):
@@ -4946,6 +4946,96 @@ class TestMetalRuntimeMLCorrectness:
         expected = table_cpu[idx_cpu.to(torch.long)]
         assert torch.allclose(out_cpu, expected, atol=1e-5, rtol=1e-5)
 
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_bf16_blocked_matmul_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        try:
+            torch.empty((1,), device="mps", dtype=torch.bfloat16)
+        except Exception:
+            pytest.skip("MPS bfloat16 runtime is unavailable on this host")
+
+        @triton.jit
+        def _matmul_bf16(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(43)
+        m, n, k = 32, 32, 48
+        a_cpu = torch.randn((m, k), dtype=torch.bfloat16)
+        b_cpu = torch.randn((k, n), dtype=torch.bfloat16)
+
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((m, n), device="mps", dtype=torch.float32)
+
+        _matmul_bf16[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=16,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = a_cpu.float() @ b_cpu.float()
+        assert torch.allclose(c_cpu, expected, atol=5e-2, rtol=5e-2)
+
 
 # ── LLVM vector-constant lowering regressions ───────────────────────
 
@@ -4994,6 +5084,31 @@ entry:
         msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
         assert "UNSUPPORTED" not in msl
         assert "half2(" in msl
+
+
+# ── LLVM bfloat lowering regressions ────────────────────────────────
+
+
+class TestMetalBFloatLowering:
+    def test_make_metal_ir_bfloat_param_and_pointer_types(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """\
+define void @bfloat_kernel(ptr addrspace(1) %in, ptr addrspace(1) %out, bfloat %x) {
+entry:
+  %pin = getelementptr bfloat, ptr addrspace(1) %in, i64 0
+  %v = load bfloat, ptr addrspace(1) %pin
+  %sum = fadd bfloat %v, %x
+  %vf = fpext bfloat %sum to float
+  %pout = getelementptr float, ptr addrspace(1) %out, i64 0
+  store float %vf, ptr addrspace(1) %pout
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "device bfloat*" in msl
+        assert "constant bfloat&" in msl
+        assert "device int*" not in msl
 
 
 # ── Unsupported LLVM intrinsic guards ───────────────────────────────

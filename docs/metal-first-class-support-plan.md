@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `228 passed`
+  -> `230 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 
@@ -261,8 +261,8 @@ Status: Partially complete.
       integration is incomplete.
 - [ ] Build shape/dtype coverage for GEMM kernels used in transformers:
       fp32/fp16/bf16 paths, odd K tails, batched and grouped variants.
-      Current state: fp32/fp16 plus odd-K and batched runtime coverage now
-      exists; bf16/grouped runtime coverage is still missing.
+      Current state: fp32/fp16/bf16 plus odd-K and batched runtime coverage now
+      exists; grouped runtime coverage is still missing.
 - [ ] Add perf regression tests and guardrails against severe throughput
       regressions on Apple7/Apple8/Apple9 classes.
       Current state: MSL-shape regression guards exist (FMA count/line count),
@@ -318,12 +318,13 @@ Status: Complete for current runtime contract scope.
       ML kernel set: attention blocks, MLP blocks, normalization, embedding and
       scatter/gather-heavy patterns, and convolution-like kernels.
       Current state: runtime correctness now covers vector add, blocked matmul,
-      row-softmax, row-layernorm, batched matmul, and embedding-gather on MPS;
-      attention/MLP/convolution-style runtime suites are still incomplete.
+      row-softmax, row-layernorm, fp16/bf16 blocked matmul, batched matmul,
+      and embedding-gather on MPS; attention/MLP/convolution-style runtime
+      suites are still incomplete.
 - [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
       where supported), including tolerance envelopes per dtype.
-      Current state: fp16 runtime matmul validation is in place; bf16/int8/fp8
-      runtime validation is still incomplete.
+      Current state: fp16 and bf16 runtime matmul validation are in place;
+      int8/fp8 runtime validation is still incomplete.
 - [ ] Add long-running stress tests covering training-like iteration loops,
       optimizer-style update kernels, and checkpointed host-device sync phases.
       Current state: harness infrastructure exists, but sustained training-like
@@ -431,6 +432,13 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Fixed bf16 lowering at source in LLVM→MSL translation by adding
+  explicit `bfloat` type parsing/mapping for params, return types, and pointer
+  element inference, plus predicated-load typed-cast emission for bf16 fallback
+  values. Added bf16 runtime blocked-matmul correctness coverage and bfloat
+  type-regression tests. Revalidated
+  `python/test/backend/test_metal_backend.py` (230 passed) and
+  `scripts/test_metal_smoke.py` (all checks pass).
 - 2026-02-24: Landed additional first-class LLVM→MSL/runtime coverage:
   (1) generalized FMA-dot lowering to accept distributed result encodings and
   removed Metal blocked-only dot rejection,

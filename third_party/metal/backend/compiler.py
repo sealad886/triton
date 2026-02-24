@@ -138,7 +138,9 @@ _RE_KERNEL_FUNC = re.compile(
     r"define\s+void\s+@([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.MULTILINE
 )
 _RE_PARAM_NAME = re.compile(r"(%[-A-Za-z0-9._]+)\s*$")
-_RE_PARAM_TYPE = re.compile(r"(ptr(?:\s+addrspace\(\d+\))?|i\d+|float|half|double|i1)")
+_RE_PARAM_TYPE = re.compile(
+    r"(ptr(?:\s+addrspace\(\d+\))?|i\d+|float|half|bfloat|double|i1)"
+)
 
 # Helper-function patterns
 _RE_MSL_ID_CLEAN = re.compile(r"[^A-Za-z0-9_]")
@@ -152,7 +154,9 @@ _RE_CONST_HEX_BFLOAT = re.compile(r"^0xR([0-9A-Fa-f]{4})$")
 _RE_CONST_FLOAT = re.compile(r"^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$")
 _RE_CALL_RET_VEC = re.compile(r"<\s*\d+\s+x\s+[^>]+\s*>")
 _RE_CALL_RET_PTR = re.compile(r"ptr(?:\s+addrspace\(\d+\))?")
-_RE_CALL_RET_SCALAR = re.compile(r"\bi\d+\b|\bi1\b|\bhalf\b|\bfloat\b|\bdouble\b")
+_RE_CALL_RET_SCALAR = re.compile(
+    r"\bi\d+\b|\bi1\b|\bhalf\b|\bbfloat\b|\bfloat\b|\bdouble\b"
+)
 
 # LLVM IR attribute-group reference stripping (applied during line cleaning)
 _RE_ATTR_GROUP_STRIP = re.compile(r"\s+#\d+\s*$")
@@ -442,6 +446,7 @@ _LLVM_SCALAR_TO_MSL = {
     "i32": "int",
     "i64": "long",
     "half": "half",
+    "bfloat": "bfloat",
     "float": "float",
     "double": "double",
 }
@@ -2002,7 +2007,13 @@ class MetalBackend(BaseBackend):
                         fn.startswith("__metal_predicated_ld_global_")
                         and len(args) == 3
                     ):
-                        emit(f"{out} = ({args[2]} ? *{args[1]} : {args[0]});")
+                        out_ty = ssa_decl_types.get(out)
+                        if out_ty is None:
+                            emit(f"{out} = ({args[2]} ? *{args[1]} : {args[0]});")
+                        else:
+                            emit(
+                                f"{out} = ({args[2]} ? ({out_ty})(*{args[1]}) : ({out_ty})({args[0]}));"
+                            )
                     elif fn == "__metal_simd_shuffle_xor" and len(args) == 2:
                         emit(f"{out} = simd_shuffle_xor({args[0]}, {args[1]});")
                     elif fn == "__metal_simd_shuffle_up" and len(args) == 2:
