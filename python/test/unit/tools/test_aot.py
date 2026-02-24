@@ -107,6 +107,7 @@ def kernel(
 """
 
 
+test_utils_src = ""
 if is_cuda():
     test_utils_src = """
 #include <cuda.h>
