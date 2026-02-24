@@ -31,6 +31,10 @@ Validated in workspace `.venv` with:
   -> `235 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
+- `PYTHONPATH=python python -m pytest -q python/test/unit/tools/test_aot_metal.py`
+  -> `1 passed`
+- `PYTHONPATH=python python scripts/metal_release_checks.py --soak`
+  -> release + soak gate checks pass with artifacts
 
 Important: this does not imply full first-class parity yet. The checklist below
 is corrected to reflect current implementation reality, including partial work.
@@ -260,7 +264,7 @@ Status: Partially complete.
       correctness-preserving fallbacks.
       Current state: translator-level simdgroup stubs exist, but pass-level
       integration is incomplete.
-- [ ] Build shape/dtype coverage for GEMM kernels used in transformers:
+- [x] Build shape/dtype coverage for GEMM kernels used in transformers:
       fp32/fp16/bf16 paths, odd K tails, batched and grouped variants.
       Current state: fp32/fp16/bf16 plus odd-K, batched, and grouped runtime
       coverage now exists.
@@ -362,14 +366,15 @@ Status: Not complete.
       and shared dot-lowering conversion sources (`TritonGPUToLLVM` FMA paths),
       plus Metal conversion sources (`TargetInfo`/`Utility`) that affect
       LLVM->MSL semantics.
-- [ ] Expand user-facing docs and examples for common ML deployment flows,
+- [x] Expand user-facing docs and examples for common ML deployment flows,
       including troubleshooting for MPS runtime instability signatures.
-      Current state: docs were expanded, but some sections are stale/inconsistent
-      with code and workflow behavior.
+      Current state: `metal-backend.md`, `metal-compatibility-matrix.md`, and
+      crash incident docs are synchronized with current pipeline/runtime behavior.
 - [ ] Add sustained soak tests and release gates for regression detection across
       compiler, runtime, and harness dimensions.
-      Current state: smoke/harness runs execute short iterations; sustained soak
-      gates are not yet defined.
+      Current state: local release-gate runner
+      (`scripts/metal_release_checks.py`) now includes optional sustained MPS
+      soak checks with artifact capture; CI integration remains pending.
 - [ ] Define and publish a compatibility matrix (macOS, Xcode, torch, Apple
       GPU families) with automated validation in CI.
       Current state: matrix document exists; automated compatibility-matrix
@@ -420,7 +425,8 @@ Status: Not complete.
 
 ## Risks and Mitigations
 
-- Risk: Matmul path remains incomplete (disabled `accelerate_matmul`, missing
+- Risk: Matmul path remains incomplete (`accelerate_matmul` is currently a
+  non-CUDA no-op, missing
   simdgroup matmul integration, limited runtime dtype/shape breadth).
   - Mitigation: prioritize Phase 8 items (encoding support, mixed-precision
     lowering fixes, pass enablement with regression/perf validation).
@@ -442,6 +448,17 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Added consolidated release-readiness runner
+  `scripts/metal_release_checks.py` with structured artifacts, deterministic
+  cache isolation, default gates (backend tests, smoke, AOT checks), and
+  optional sustained MPS soak runs. Fixed `python/test/unit/tools/test_aot.py`
+  collection stability on non-CUDA/HIP by initializing `test_utils_src` before
+  backend-gated branches. Updated compatibility/docs to reflect current runtime
+  and matmul-pass behavior. Revalidated:
+  `python/test/backend/test_metal_backend.py` (235 passed),
+  `python/test/unit/tools/test_aot_metal.py` (1 passed),
+  `python/test/unit/tools/test_aot.py` (7 skipped), and
+  `scripts/metal_release_checks.py --soak` (all checks pass).
 - 2026-02-24: Added runtime int8 quantized-path correctness coverage with
   `TestMetalRuntimeMLCorrectness::test_runtime_int8_vector_add_matches_cpu`,
   validated against CPU reference on MPS. Revalidated

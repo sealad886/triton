@@ -222,6 +222,12 @@ python python/test/backend/metal_mps_training_loop_stress.py --mode mps --iters 
 
 # Optional: isolate cache state while validating to avoid stale-artifact reuse
 TRITON_CACHE_DIR="$(mktemp -d /tmp/triton-metal-cache.XXXXXX)" python -m pytest -q python/test/backend/test_metal_backend.py
+
+# Consolidated release checks (default suite)
+python scripts/metal_release_checks.py
+
+# Extended local soak checks (larger transfer/training stress)
+python scripts/metal_release_checks.py --soak
 ```
 
 ### Building the native extension
