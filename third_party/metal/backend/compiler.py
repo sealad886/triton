@@ -623,6 +623,38 @@ def _metal_backend_hash_inputs() -> tuple[str, ...]:
         ),
         os.path.join(
             repo_root,
+            "third_party",
+            "metal",
+            "lib",
+            "TritonMetalGPUToLLVM",
+            "TargetInfo.cpp",
+        ),
+        os.path.join(
+            repo_root,
+            "third_party",
+            "metal",
+            "lib",
+            "TritonMetalGPUToLLVM",
+            "TargetInfo.h",
+        ),
+        os.path.join(
+            repo_root,
+            "third_party",
+            "metal",
+            "lib",
+            "TritonMetalGPUToLLVM",
+            "Utility.cpp",
+        ),
+        os.path.join(
+            repo_root,
+            "third_party",
+            "metal",
+            "lib",
+            "TritonMetalGPUToLLVM",
+            "Utility.h",
+        ),
+        os.path.join(
+            repo_root,
             "lib",
             "Conversion",
             "TritonGPUToLLVM",
@@ -2033,7 +2065,27 @@ class MetalBackend(BaseBackend):
                     ):
                         emit(f"if ({args[2]}) {{ *{args[1]} = {args[0]}; }}")
                     elif fn == "__metal_simdgroup_barrier":
-                        emit("threadgroup_barrier(mem_flags::mem_none);")
+                        barrier_flags = "mem_flags::mem_none"
+                        if len(args) >= 1:
+                            raw_flag = args[0].strip()
+                            if _RE_CONST_INT.match(raw_flag):
+                                flag_val = int(raw_flag)
+                                parts: list[str] = []
+                                if flag_val & 1:
+                                    parts.append("mem_flags::mem_threadgroup")
+                                if flag_val & 2:
+                                    parts.append("mem_flags::mem_device")
+                                if not parts:
+                                    barrier_flags = "mem_flags::mem_none"
+                                elif len(parts) == 1:
+                                    barrier_flags = parts[0]
+                                else:
+                                    barrier_flags = f"({parts[0]} | {parts[1]})"
+                            else:
+                                # Conservative fallback when flag folding is
+                                # not possible.
+                                barrier_flags = "mem_flags::mem_threadgroup"
+                        emit(f"threadgroup_barrier({barrier_flags});")
                     elif fn == "__metal_simdgroup_store" and len(args) == 3:
                         emit(
                             f"simdgroup_store({args[0]}, "

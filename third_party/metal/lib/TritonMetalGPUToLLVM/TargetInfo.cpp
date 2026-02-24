@@ -69,6 +69,26 @@ LLVM::LLVMFuncOp getBarrierDeclaration(RewriterBase &rewriter,
   return func;
 }
 
+int encodeMetalBarrierFlags(triton::gpu::AddrSpace targets) {
+  using triton::gpu::AddrSpace;
+  if (targets == AddrSpace::None)
+    return 0;
+
+  int flags = 0;
+  if (static_cast<uint32_t>(targets) & static_cast<uint32_t>(AddrSpace::Local))
+    flags |= 1; // mem_threadgroup
+  if (static_cast<uint32_t>(targets) &
+      (static_cast<uint32_t>(AddrSpace::GlobalRead) |
+       static_cast<uint32_t>(AddrSpace::GlobalWrite) |
+       static_cast<uint32_t>(AddrSpace::TensorRead) |
+       static_cast<uint32_t>(AddrSpace::TensorWrite)))
+    flags |= 2; // mem_device
+
+  // Preserve synchronization correctness when new address-space combinations
+  // appear by defaulting to threadgroup visibility.
+  return flags == 0 ? 1 : flags;
+}
+
 } // namespace
 
 namespace mlir {
@@ -91,11 +111,10 @@ Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
 
 void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
                          triton::gpu::AddrSpace targets) const {
-  (void)targets;
   auto func = getBarrierDeclaration(rewriter, "__metal_simdgroup_barrier");
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  // mem_flags::mem_none = 0
-  LLVM::CallOp::create(rewriter, loc, func, ValueRange{b.i32_val(0)});
+  int flags = encodeMetalBarrierFlags(targets);
+  LLVM::CallOp::create(rewriter, loc, func, ValueRange{b.i32_val(flags)});
 }
 
 void TargetInfo::clusterBarrier(Location loc, RewriterBase &rewriter) const {
@@ -107,8 +126,9 @@ void TargetInfo::warpSync(Location loc, RewriterBase &rewriter) const {
   // Metal uses simdgroup_barrier for warp-level sync
   auto func = getBarrierDeclaration(rewriter, "__metal_simdgroup_barrier");
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  // mem_flags::mem_none = 0
-  LLVM::CallOp::create(rewriter, loc, func, ValueRange{b.i32_val(0)});
+  LLVM::CallOp::create(
+      rewriter, loc, func,
+      ValueRange{b.i32_val(encodeMetalBarrierFlags(triton::gpu::AddrSpace::Local))});
 }
 
 void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,

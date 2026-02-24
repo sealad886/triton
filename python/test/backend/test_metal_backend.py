@@ -523,6 +523,24 @@ define void @my_kernel(ptr addrspace(1) %0, ptr addrspace(1) %1, i32 %2) {
         assert "? *" in msl
         assert "if (" in msl and "*v11 = v10" in msl
 
+    def test_make_metal_ir_translates_simdgroup_barrier_flags(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @barrier_kernel() {
+entry:
+  call void @__metal_simdgroup_barrier(i32 1)
+  call void @__metal_simdgroup_barrier(i32 2)
+  call void @__metal_simdgroup_barrier(i32 3)
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "threadgroup_barrier(mem_flags::mem_threadgroup);" in msl
+        assert "threadgroup_barrier(mem_flags::mem_device);" in msl
+        assert "threadgroup_barrier((mem_flags::mem_threadgroup | mem_flags::mem_device));" in msl
+
     def test_make_metal_ir_translates_phi_nodes(self):
         from third_party.metal.backend.compiler import MetalBackend
 
@@ -4615,6 +4633,40 @@ class TestMetalRuntimeMLCorrectness:
 
         expected = a_cpu @ b_cpu
         assert torch.allclose(c_cpu, expected, atol=1e-4, rtol=1e-4)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_row_softmax_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _row_softmax(x_ptr, y_ptr, n_cols, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = tl.arange(0, BLOCK)
+            mask = offs < n_cols
+            row_ptr = x_ptr + pid * n_cols
+            x = tl.load(row_ptr + offs, mask=mask, other=float("-inf"))
+            x = x - tl.max(x, axis=0)
+            ex = tl.exp(x)
+            denom = tl.sum(ex, axis=0)
+            out = ex / denom
+            tl.store(y_ptr + pid * n_cols + offs, out, mask=mask)
+
+        torch.manual_seed(23)
+        rows, cols = 8, 64
+        x_cpu = torch.randn((rows, cols), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        y_mps = torch.empty_like(x_mps)
+
+        _row_softmax[(rows,)](x_mps, y_mps, cols, BLOCK=64)
+        torch.mps.synchronize()
+        y_cpu = y_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.softmax(x_cpu, dim=1)
+        assert torch.allclose(y_cpu, expected, atol=1e-4, rtol=1e-4)
 
 
 # ── LLVM vector-constant lowering regressions ───────────────────────

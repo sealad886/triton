@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `221 passed`
+  -> `223 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 
@@ -168,6 +168,9 @@ Acceptance:
       when LLIR lacks explicit barriers (store+load+backedge pattern).
 - [x] Fail fast on unsupported `llvm.*` call lowering instead of emitting raw
       passthrough calls into MSL, with regression coverage for value/void forms.
+- [x] Preserve barrier memory-scope intent in Metal lowering by carrying
+      source barrier flags (`local`, `global_read|global_write|tensor*`) into
+      `threadgroup_barrier(...)` mem-flag selection.
 
 Acceptance:
 - Kernels that lower through the Metal LLVM pipeline compile through
@@ -312,7 +315,8 @@ Status: Complete for current runtime contract scope.
       ML kernel set: attention blocks, MLP blocks, normalization, embedding and
       scatter/gather-heavy patterns, and convolution-like kernels.
       Current state: initial runtime correctness tests exist for vector add and
-      blocked matmul on MPS; broader ML-runtime coverage is still incomplete.
+      blocked matmul on MPS, plus row-softmax runtime validation; broader
+      ML-runtime coverage is still incomplete.
 - [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
       where supported), including tolerance envelopes per dtype.
       Current state: cast/compile coverage exists; quantized runtime validation
@@ -345,7 +349,9 @@ Status: Not complete.
       backend changes, and architecture-family differences.
       Implemented: backend hash now includes SDK version, arch, Triton version,
       and a multi-file source fingerprint across Metal backend/compiler/runtime
-      and shared dot-lowering conversion sources (`TritonGPUToLLVM` FMA paths).
+      and shared dot-lowering conversion sources (`TritonGPUToLLVM` FMA paths),
+      plus Metal conversion sources (`TargetInfo`/`Utility`) that affect
+      LLVM->MSL semantics.
 - [ ] Expand user-facing docs and examples for common ML deployment flows,
       including troubleshooting for MPS runtime instability signatures.
       Current state: docs were expanded, but some sections are stale/inconsistent
@@ -421,6 +427,20 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Extended Metal backend hash invalidation inputs to include
+  `third_party/metal/lib/TritonMetalGPUToLLVM/{TargetInfo,Utility}.{h,cpp}`
+  so C++ conversion/runtime semantic changes invalidate stale kernel-cache
+  artifacts deterministically.
+- 2026-02-24: Added barrier-flag propagation hardening across the Metal
+  conversion and translator layers:
+  TargetInfo now encodes Triton barrier address-space intent into
+  `__metal_simdgroup_barrier(flag)` and LLVM->MSL lowering now maps these flags
+  to `threadgroup_barrier(mem_flags::...)` forms. Added regression coverage for
+  threadgroup/device/combined barrier flags.
+- 2026-02-24: Expanded runtime correctness coverage with MPS row-softmax
+  validation against CPU reference in `TestMetalRuntimeMLCorrectness`.
+  Revalidated `python/test/backend/test_metal_backend.py` (223 passed) and
+  `scripts/test_metal_smoke.py` (all checks pass).
 - 2026-02-24: Closed the blocked-matmul runtime correctness regression by
   fixing two LLVM->MSL lowering gaps:
   (1) added vector-constant parsing and `llvm.vector.reduce.*` intrinsic
@@ -428,7 +448,7 @@ Status: Not complete.
   (2) added threadgroup synchronization insertion for shared-memory loop bodies
   with store+load+backedge patterns when LLIR lacks explicit barriers.
   Added MPS runtime correctness tests for vector add and blocked matmul and
-  validated `python/test/backend/test_metal_backend.py` (221 passed) plus
+  validated `python/test/backend/test_metal_backend.py` (223 passed) plus
   `scripts/test_metal_smoke.py` (all checks pass).
 - 2026-02-24: Hardened LLVM→MSL production behavior by removing unknown
   `llvm.*` passthrough in call lowering. Unsupported intrinsics now fail at
