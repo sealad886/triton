@@ -125,8 +125,8 @@ _RE_COMMENT_STRIP = re.compile(r"\s*;.*$")
 # comments, and attribute-group references in a single pass.
 _RE_LINE_CLEAN = re.compile(
     r",\s*!dbg\s*![0-9]+.*$"  # Debug metadata
-    r"|\s*;.*$"                # Trailing comments
-    r"|\s+#\d+\s*$"           # Attribute-group references
+    r"|\s*;.*$"  # Trailing comments
+    r"|\s+#\d+\s*$"  # Attribute-group references
 )
 
 # Structural / parsing patterns
@@ -255,16 +255,45 @@ _RE_PTR_SPEC = re.compile(r"^ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$")
 _RE_GEP_FLAG_STRIP = re.compile(r"^(?:inbounds|nuw|nsw|inrange)\s+")
 
 # ── Opcode dispatch sets for codegen fast-path (PERF-005) ───────────
-_BINOP_OPCODES = frozenset({
-    "add", "sub", "mul", "udiv", "sdiv", "urem", "srem",
-    "shl", "lshr", "ashr", "and", "or", "xor",
-    "fadd", "fsub", "fmul", "fdiv", "frem",
-})
-_CAST_OPCODES = frozenset({
-    "sext", "zext", "trunc", "fptrunc", "fpext",
-    "sitofp", "uitofp", "fptosi", "fptoui",
-    "bitcast", "addrspacecast", "ptrtoint", "inttoptr",
-})
+_BINOP_OPCODES = frozenset(
+    {
+        "add",
+        "sub",
+        "mul",
+        "udiv",
+        "sdiv",
+        "urem",
+        "srem",
+        "shl",
+        "lshr",
+        "ashr",
+        "and",
+        "or",
+        "xor",
+        "fadd",
+        "fsub",
+        "fmul",
+        "fdiv",
+        "frem",
+    }
+)
+_CAST_OPCODES = frozenset(
+    {
+        "sext",
+        "zext",
+        "trunc",
+        "fptrunc",
+        "fpext",
+        "sitofp",
+        "uitofp",
+        "fptosi",
+        "fptoui",
+        "bitcast",
+        "addrspacecast",
+        "ptrtoint",
+        "inttoptr",
+    }
+)
 
 
 def _extract_ir_opcode(line: str) -> str:
@@ -276,10 +305,10 @@ def _extract_ir_opcode(line: str) -> str:
     ``'call'``.
     """
     eq_pos = line.find(" = ")
-    rest = line[eq_pos + 3:] if eq_pos >= 0 else line
+    rest = line[eq_pos + 3 :] if eq_pos >= 0 else line
     for prefix in ("tail ", "musttail ", "notail "):
         if rest.startswith(prefix):
-            rest = rest[len(prefix):]
+            rest = rest[len(prefix) :]
             break
     sp = rest.find(" ")
     return rest[:sp] if sp >= 0 else rest
@@ -493,10 +522,16 @@ _LLVM_INTRINSIC_TERNARY: tuple[tuple[str, str], ...] = (
 )
 
 _LLVM_INTRINSIC_MAX_PREFIXES: tuple[str, ...] = (
-    "llvm.maximum.", "llvm.maxnum.", "llvm.smax.", "llvm.umax.",
+    "llvm.maximum.",
+    "llvm.maxnum.",
+    "llvm.smax.",
+    "llvm.umax.",
 )
 _LLVM_INTRINSIC_MIN_PREFIXES: tuple[str, ...] = (
-    "llvm.minimum.", "llvm.minnum.", "llvm.smin.", "llvm.umin.",
+    "llvm.minimum.",
+    "llvm.minnum.",
+    "llvm.smin.",
+    "llvm.umin.",
 )
 
 
@@ -566,6 +601,53 @@ def _get_metal_sdk_version():
         return result.stderr.strip() or result.stdout.strip()
     except Exception:
         return "unknown"
+
+
+def _metal_backend_hash_inputs() -> tuple[str, ...]:
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir)
+    )
+    return (
+        __file__,
+        os.path.join(repo_root, "third_party", "metal", "backend", "driver.py"),
+        os.path.join(
+            repo_root,
+            "third_party",
+            "metal",
+            "lib",
+            "TritonMetalGPUToLLVM",
+            "TritonGPUToLLVM.cpp",
+        ),
+        os.path.join(
+            repo_root,
+            "lib",
+            "Conversion",
+            "TritonGPUToLLVM",
+            "DotOpToLLVM",
+            "FMA.cpp",
+        ),
+        os.path.join(
+            repo_root,
+            "lib",
+            "Conversion",
+            "TritonGPUToLLVM",
+            "DotOpToLLVM",
+            "FMADotUtility.cpp",
+        ),
+    )
+
+
+@functools.lru_cache()
+def _get_metal_backend_source_hash() -> str:
+    h = hashlib.sha256()
+    for path in _metal_backend_hash_inputs():
+        h.update(path.encode("utf-8"))
+        try:
+            with open(path, "rb") as f:
+                h.update(f.read())
+        except OSError:
+            h.update(b"<missing>")
+    return h.hexdigest()[:16]
 
 
 class MetalBackend(BaseBackend):
@@ -905,7 +987,7 @@ class MetalBackend(BaseBackend):
                 exp = (raw16 >> 10) & 0x1F
                 frac = raw16 & 0x3FF
                 if exp == 0:
-                    hval = (-1) ** sign * (2 ** -14) * (frac / 1024.0)
+                    hval = (-1) ** sign * (2**-14) * (frac / 1024.0)
                 elif exp == 0x1F:
                     if frac:
                         return "NAN"
@@ -1354,7 +1436,7 @@ class MetalBackend(BaseBackend):
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_LOAD_DECL.match(line) if _opc == 'load' else None
+                m = _RE_LOAD_DECL.match(line) if _opc == "load" else None
                 if m:
                     out_ssa, llvm_ty, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
@@ -1366,7 +1448,7 @@ class MetalBackend(BaseBackend):
                     record_ssa_decl(out_ssa, llvm_ty=dst_ty.strip())
                     continue
 
-                m = _RE_CALL_OUT.match(line) if _opc == 'call' else None
+                m = _RE_CALL_OUT.match(line) if _opc == "call" else None
                 if m:
                     out_ssa, ret_spec, fn_name, _ = m.groups()
                     ret_type = extract_call_ret_type(ret_spec)
@@ -1389,7 +1471,7 @@ class MetalBackend(BaseBackend):
                         record_ssa_decl(out_ssa, llvm_ty=ret_type)
                     continue
 
-                m = _RE_GEP_DECL.match(line) if _opc == 'getelementptr' else None
+                m = _RE_GEP_DECL.match(line) if _opc == "getelementptr" else None
                 if m:
                     out_ssa, elem_ty, addr_space, _, _ = m.groups()
                     record_ssa_decl(
@@ -1405,55 +1487,59 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_ICMP.match(line) if _opc == 'icmp' else None
+                m = _RE_ICMP.match(line) if _opc == "icmp" else None
                 if m:
                     out_ssa, _, _, _, _ = m.groups()
                     record_ssa_decl(out_ssa, msl_ty="bool")
                     continue
 
-                m = _RE_FCMP.match(line) if _opc == 'fcmp' else None
+                m = _RE_FCMP.match(line) if _opc == "fcmp" else None
                 if m:
                     out_ssa, _, _, _ = m.groups()
                     record_ssa_decl(out_ssa, msl_ty="bool")
                     continue
 
-                m = _RE_PHI_DECL.match(line) if _opc == 'phi' else None
+                m = _RE_PHI_DECL.match(line) if _opc == "phi" else None
                 if m:
                     out_ssa, llvm_ty = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_SELECT_DECL.match(line) if _opc == 'select' else None
+                m = _RE_SELECT_DECL.match(line) if _opc == "select" else None
                 if m:
                     out_ssa, llvm_ty = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_FNEG_DECL.match(line) if _opc == 'fneg' else None
+                m = _RE_FNEG_DECL.match(line) if _opc == "fneg" else None
                 if m:
                     out_ssa, llvm_ty, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_FREEZE_DECL.match(line) if _opc == 'freeze' else None
+                m = _RE_FREEZE_DECL.match(line) if _opc == "freeze" else None
                 if m:
                     out_ssa, llvm_ty, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
-                m = _RE_EXTRACTELEM_DECL.match(line) if _opc == 'extractelement' else None
+                m = (
+                    _RE_EXTRACTELEM_DECL.match(line)
+                    if _opc == "extractelement"
+                    else None
+                )
                 if m:
                     out_ssa, elem_ty, _, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=elem_ty)
                     continue
 
-                m = _RE_INSERTELEM_DECL.match(line) if _opc == 'insertelement' else None
+                m = _RE_INSERTELEM_DECL.match(line) if _opc == "insertelement" else None
                 if m:
                     out_ssa, vec_ty, _, _, _ = m.groups()
                     record_ssa_decl(out_ssa, llvm_ty=vec_ty)
                     continue
 
-                m = _RE_EXTRACTVALUE.match(line) if _opc == 'extractvalue' else None
+                m = _RE_EXTRACTVALUE.match(line) if _opc == "extractvalue" else None
                 if m:
                     out_ssa, agg_type, _, idx_str = m.groups()
                     _, field_types = get_aggregate_struct_name(agg_type)
@@ -1462,21 +1548,21 @@ class MetalBackend(BaseBackend):
                     record_ssa_decl(out_ssa, msl_ty=ft)
                     continue
 
-                m = _RE_INSERTVALUE.match(line) if _opc == 'insertvalue' else None
+                m = _RE_INSERTVALUE.match(line) if _opc == "insertvalue" else None
                 if m:
                     out_ssa, agg_type, _, _, _, _ = m.groups()
                     struct_name, _ = get_aggregate_struct_name(agg_type)
                     record_ssa_decl(out_ssa, msl_ty=struct_name)
                     continue
 
-                m = _RE_ATOMICRMW.match(line) if _opc == 'atomicrmw' else None
+                m = _RE_ATOMICRMW.match(line) if _opc == "atomicrmw" else None
                 if m:
                     out_ssa = m.group(1)
                     val_type = m.group(5)
                     record_ssa_decl(out_ssa, llvm_ty=val_type.strip())
                     continue
 
-                m = _RE_CMPXCHG.match(line) if _opc == 'cmpxchg' else None
+                m = _RE_CMPXCHG.match(line) if _opc == "cmpxchg" else None
                 if m:
                     out_ssa = m.group(1)
                     val_type = m.group(4)
@@ -1485,7 +1571,7 @@ class MetalBackend(BaseBackend):
                     record_ssa_decl(out_ssa, msl_ty=struct_name)
                     continue
 
-                m = _RE_ALLOCA.match(line) if _opc == 'alloca' else None
+                m = _RE_ALLOCA.match(line) if _opc == "alloca" else None
                 if m:
                     out_ssa, elem_type = m.groups()
                     msl_ty = llvm_scalar_to_msl(elem_type.strip())
@@ -1570,7 +1656,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{out} = {lhs_expr} {bin_map[op]} {rhs_expr};")
                     continue
 
-                m = _RE_LOAD.match(line) if _opc == 'load' else None
+                m = _RE_LOAD.match(line) if _opc == "load" else None
                 if m:
                     out_ssa, llvm_ty, addr_space, ptr = m.groups()
                     out = msl_id(out_ssa)
@@ -1583,7 +1669,7 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_STORE.match(line) if _opc == 'store' else None
+                m = _RE_STORE.match(line) if _opc == "store" else None
                 if m:
                     val_spec, addr_space, ptr = m.groups()
                     llvm_ty, val_token = split_typed_value(val_spec)
@@ -1594,7 +1680,7 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_GEP.match(line) if _opc == 'getelementptr' else None
+                m = _RE_GEP.match(line) if _opc == "getelementptr" else None
                 if m:
                     out_ssa, _, base, idx = m.groups()
                     out = msl_id(out_ssa)
@@ -1602,7 +1688,9 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {to_expr(base)} + {to_expr(idx)};")
                     continue
 
-                parsed_gep = parse_gep_instruction(line) if _opc == 'getelementptr' else None
+                parsed_gep = (
+                    parse_gep_instruction(line) if _opc == "getelementptr" else None
+                )
                 if parsed_gep is not None:
                     out_ssa, _, _, base, idx = parsed_gep
                     out = msl_id(out_ssa)
@@ -1630,7 +1718,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{out} = ({llvm_type_to_msl(dst_ty)})({to_expr(val)});")
                     continue
 
-                m = _RE_CALL_OUT.match(line) if _opc == 'call' else None
+                m = _RE_CALL_OUT.match(line) if _opc == "call" else None
                 if m:
                     out_ssa, _, fn, args_raw = m.groups()
                     args = [to_expr(v) for v in parse_call_args(args_raw)]
@@ -1688,7 +1776,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{out} = {fn}({', '.join(args)});")
                     continue
 
-                m = _RE_ICMP.match(line) if _opc == 'icmp' else None
+                m = _RE_ICMP.match(line) if _opc == "icmp" else None
                 if m:
                     out_ssa, pred, llvm_ty_icmp, lhs, rhs = m.groups()
                     out = msl_id(out_ssa)
@@ -1705,7 +1793,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = ({lhs_expr} {cmp_op} {rhs_expr});")
                     continue
 
-                m = _RE_FCMP.match(line) if _opc == 'fcmp' else None
+                m = _RE_FCMP.match(line) if _opc == "fcmp" else None
                 if m:
                     out_ssa, pred, lhs, rhs = m.groups()
                     out = msl_id(out_ssa)
@@ -1715,7 +1803,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {fcmp_expr(pred, lhs_expr, rhs_expr)};")
                     continue
 
-                m = _RE_BR.match(line) if _opc == 'br' else None
+                m = _RE_BR.match(line) if _opc == "br" else None
                 if m:
                     target = normalize_label(m.group(1))
                     target_id = block_ids.get(target)
@@ -1729,7 +1817,7 @@ class MetalBackend(BaseBackend):
                     terminated = True
                     break
 
-                m = _RE_BR_COND.match(line) if _opc == 'br' else None
+                m = _RE_BR_COND.match(line) if _opc == "br" else None
                 if m:
                     cond, t_lbl, f_lbl = m.groups()
                     t_lbl = normalize_label(t_lbl)
@@ -1748,7 +1836,7 @@ class MetalBackend(BaseBackend):
                     terminated = True
                     break
 
-                m = _RE_PHI.match(line) if _opc == 'phi' else None
+                m = _RE_PHI.match(line) if _opc == "phi" else None
                 if m:
                     out_ssa, incoming_raw = m.groups()
                     out = msl_id(out_ssa)
@@ -1773,7 +1861,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {phi_expr};")
                     continue
 
-                m = _RE_VOID_CALL.match(line) if _opc == 'call' else None
+                m = _RE_VOID_CALL.match(line) if _opc == "call" else None
                 if m:
                     fn, args_raw = m.groups()
                     args = [to_expr(v) for v in parse_call_args(args_raw)]
@@ -1808,9 +1896,7 @@ class MetalBackend(BaseBackend):
                     elif fn.startswith("llvm.memmove") and len(args) >= 3:
                         # Correct memmove semantics: copy backward when
                         # dst > src to handle overlapping regions safely.
-                        emit(
-                            f"if ((uintptr_t){args[0]} > (uintptr_t){args[1]}) {{"
-                        )
+                        emit(f"if ((uintptr_t){args[0]} > (uintptr_t){args[1]}) {{")
                         emit(
                             f"  for (int __i = {args[2]} - 1; __i >= 0; __i--) "
                             f"((device char*){args[0]})[__i] = ((device char*){args[1]})[__i];"
@@ -1825,7 +1911,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{fn}({', '.join(args)});")
                     continue
 
-                m = _RE_SELECT.match(line) if _opc == 'select' else None
+                m = _RE_SELECT.match(line) if _opc == "select" else None
                 if m:
                     out_ssa, cond, lhs, rhs = m.groups()
                     out = msl_id(out_ssa)
@@ -1835,7 +1921,7 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_FNEG.match(line) if _opc == 'fneg' else None
+                m = _RE_FNEG.match(line) if _opc == "fneg" else None
                 if m:
                     out_ssa, val = m.groups()
                     out = msl_id(out_ssa)
@@ -1843,7 +1929,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = -({to_expr(val)});")
                     continue
 
-                m = _RE_FREEZE.match(line) if _opc == 'freeze' else None
+                m = _RE_FREEZE.match(line) if _opc == "freeze" else None
                 if m:
                     out_ssa, val = m.groups()
                     out = msl_id(out_ssa)
@@ -1851,7 +1937,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {to_expr(val)};")
                     continue
 
-                m = _RE_EXTRACTELEM.match(line) if _opc == 'extractelement' else None
+                m = _RE_EXTRACTELEM.match(line) if _opc == "extractelement" else None
                 if m:
                     out_ssa, width_s, vec, idx = m.groups()
                     out = msl_id(out_ssa)
@@ -1863,7 +1949,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{out} = {to_expr(vec)}[{to_expr(idx)}];")
                     continue
 
-                m = _RE_INSERTELEM.match(line) if _opc == 'insertelement' else None
+                m = _RE_INSERTELEM.match(line) if _opc == "insertelement" else None
                 if m:
                     out_ssa, width_s, vec, val, idx = m.groups()
                     out = msl_id(out_ssa)
@@ -1876,7 +1962,7 @@ class MetalBackend(BaseBackend):
                         emit(f"{out}[{to_expr(idx)}] = {to_expr(val)};")
                     continue
 
-                m = _RE_EXTRACTVALUE.match(line) if _opc == 'extractvalue' else None
+                m = _RE_EXTRACTVALUE.match(line) if _opc == "extractvalue" else None
                 if m:
                     out_ssa, _, src_val, idx_str = m.groups()
                     out = msl_id(out_ssa)
@@ -1884,7 +1970,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = {to_expr(src_val)}.field{idx_str};")
                     continue
 
-                m = _RE_INSERTVALUE.match(line) if _opc == 'insertvalue' else None
+                m = _RE_INSERTVALUE.match(line) if _opc == "insertvalue" else None
                 if m:
                     out_ssa, _, agg_val, _, elem_val, idx_str = m.groups()
                     out = msl_id(out_ssa)
@@ -1893,7 +1979,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out}.field{idx_str} = {to_expr(elem_val)};")
                     continue
 
-                m = _RE_ATOMICRMW.match(line) if _opc == 'atomicrmw' else None
+                m = _RE_ATOMICRMW.match(line) if _opc == "atomicrmw" else None
                 if m:
                     out_ssa, op, addr_space, ptr, val_type, val, ordering = m.groups()
                     out = msl_id(out_ssa)
@@ -1908,7 +1994,7 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_CMPXCHG.match(line) if _opc == 'cmpxchg' else None
+                m = _RE_CMPXCHG.match(line) if _opc == "cmpxchg" else None
                 if m:
                     (
                         out_ssa,
@@ -1935,7 +2021,7 @@ class MetalBackend(BaseBackend):
                     )
                     continue
 
-                m = _RE_ALLOCA.match(line) if _opc == 'alloca' else None
+                m = _RE_ALLOCA.match(line) if _opc == "alloca" else None
                 if m:
                     out_ssa, elem_type = m.groups()
                     out = msl_id(out_ssa)
@@ -1943,7 +2029,7 @@ class MetalBackend(BaseBackend):
                     emit(f"{out} = &{out}_storage;")
                     continue
 
-                m = _RE_SWITCH.match(line) if _opc == 'switch' else None
+                m = _RE_SWITCH.match(line) if _opc == "switch" else None
                 if m:
                     val_type, val, default_label, cases_str = m.groups()
                     default_label = normalize_label(default_label)
@@ -1963,7 +2049,7 @@ class MetalBackend(BaseBackend):
                     terminated = True
                     break
 
-                m = _RE_FENCE.match(line) if _opc == 'fence' else None
+                m = _RE_FENCE.match(line) if _opc == "fence" else None
                 if m:
                     syncscope, ordering = m.groups()
                     if syncscope in ("workgroup", "threadgroup"):
@@ -2168,8 +2254,5 @@ class MetalBackend(BaseBackend):
             triton_version = triton.__version__
         except (ImportError, AttributeError):
             triton_version = "dev"
-
-        with open(__file__, "rb") as _f:
-            backend_hash = hashlib.sha256(_f.read()).hexdigest()[:12]
-
+        backend_hash = _get_metal_backend_source_hash()
         return f"{version}-{self.target.arch}-{triton_version}-{backend_hash}"

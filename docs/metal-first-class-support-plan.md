@@ -332,10 +332,11 @@ Status: Not complete.
       breakdowns, kernel cache diagnostics, and structured failure signatures.
       Added TRITON_METAL_DEBUG env var with pass timing, compile provenance
       logging, and structured failure signatures.
-- [ ] Harden cache/versioning invalidation rules for Metal SDK updates, Triton
+- [x] Harden cache/versioning invalidation rules for Metal SDK updates, Triton
       backend changes, and architecture-family differences.
-      Current state: backend hash includes SDK + arch + Triton version +
-      compiler source hash, but not a full options hash as previously claimed.
+      Implemented: backend hash now includes SDK version, arch, Triton version,
+      and a multi-file source fingerprint across Metal backend/compiler/runtime
+      and shared dot-lowering conversion sources (`TritonGPUToLLVM` FMA paths).
 - [ ] Expand user-facing docs and examples for common ML deployment flows,
       including troubleshooting for MPS runtime instability signatures.
       Current state: docs were expanded, but some sections are stale/inconsistent
@@ -423,6 +424,9 @@ Status: Not complete.
   to accumulator type before emitting `llvm.fmuladd`/FMA. Removed the fp16 GEMM
   `xfail` in `python/test/backend/test_metal_backend.py`; fp16-input blocked
   matmul compile test now passes.
+- 2026-02-24: Hardened Metal backend cache invalidation by extending backend
+  hash inputs beyond `compiler.py` to include `driver.py`, Metal GPU→LLVM
+  conversion sources, and shared Triton FMA dot-lowering sources.
 - 2026-02-21: Branch renamed from `feat/mlx-support` to
   `feat/metal-support`. Stale local `feat/mlx-support` ref removed by rename.
 - 2026-02-21: Completed backend parity audit across

@@ -131,6 +131,25 @@ class TestMetalBackend:
         backend = MetalBackend(target)
         assert backend.binary_ext == "metal"
 
+    def test_backend_hash_includes_source_fingerprint(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        from triton.backends.compiler import GPUTarget
+
+        target = GPUTarget("metal", "apple8", 32)
+        backend = MetalBackend(target)
+        with patch(
+            "third_party.metal.backend.compiler._get_metal_sdk_version",
+            return_value="sdk-version",
+        ), patch(
+            "third_party.metal.backend.compiler._get_metal_backend_source_hash",
+            return_value="backend-src-hash",
+        ), patch("triton.__version__", "triton-version", create=True):
+            assert (
+                backend.hash()
+                == "sdk-version-apple8-triton-version-backend-src-hash"
+            )
+
     def test_parse_options(self):
         from third_party.metal.backend.compiler import MetalBackend
 
