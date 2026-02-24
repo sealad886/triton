@@ -120,7 +120,9 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
 ## Current Limitations
 
 - **Data type coverage is mostly complete**: common scalar/integer/float types
-  are handled; fp8 and some quantized matmul-class paths remain incomplete.
+  are handled, including fp8e5m2 compile-path lowering for casts and dot/matmul
+  kernels. fp8 runtime numerics and broader quantized-path validation still
+  require additional coverage.
 - **Tensor cores**: Apple's matrix multiply accelerator is not yet
   integrated into the pass pipeline.
 - **Cross-backend numerics**: deterministic CPU-reference comparisons are

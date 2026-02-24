@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `239 passed`
+  -> `240 passed`
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
@@ -338,9 +338,9 @@ Status: Complete for current runtime contract scope.
       where supported), including tolerance envelopes per dtype.
       Current state: fp16 and bf16 runtime matmul validation are in place;
       int8 runtime vector correctness and int8 blocked matmul validation are in
-      place; fp8 compile coverage exists with deterministic expected-failure
-      assertions for unsupported lowering. Full fp8 runtime matmul validation is
-      still incomplete.
+      place; fp8 compile-path lowering now succeeds for cast and blocked
+      matmul-class kernels (`tt.fp_to_fp`, fp8 dot promotion). Full fp8 runtime
+      matmul validation is still incomplete.
 - [x] Add long-running stress tests covering training-like iteration loops,
       optimizer-style update kernels, and checkpointed host-device sync phases.
       Current state: added deterministic CPU/MPS
@@ -461,14 +461,24 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Implemented source-level fp8 compile-path support for Metal.
+  Added `tt.fp_to_fp` lowering in
+  `third_party/metal/lib/TritonMetalGPUToLLVM/TritonGPUToLLVM.cpp` using
+  explicit fp8e5m2 helper-call conversion, added fp8 conversion helpers to
+  LLVM->MSL emission in `third_party/metal/backend/compiler.py`, and updated
+  `tritongpu-accelerate-matmul` non-CUDA behavior to decompose mixed-mode dots
+  for fp8 while preserving bf16 runtime numerics. Updated fp8 compile tests to
+  assert successful compilation (`test_compile_triton_fp8_blocked_matmul_pipeline`,
+  `test_compile_triton_fp8_roundtrip_convert_pipeline`). Revalidated:
+  `python/test/backend/test_metal_backend.py` (240 passed) and
+  `scripts/metal_release_checks.py` (all default checks pass with artifacts).
 - 2026-02-24: Closed additional Phase 8/10 execution gaps and validation
   guardrails. Added configurable simdgroup matmul strategy
   (`simdgroup_matmul_strategy=auto|native|fallback`) in
   `third_party/metal/backend/compiler.py`, including typed native pointer
   lowering for half/float simdgroup load/store and deterministic software
   fallback helper generation. Added runtime int8 blocked matmul correctness
-  coverage and deterministic fp8 matmul compile expected-failure coverage in
-  `python/test/backend/test_metal_backend.py`. Added
+  coverage in `python/test/backend/test_metal_backend.py`. Added
   `scripts/metal_matmul_throughput_guard.py` with
   `docs/metal-matmul-throughput-baselines.json`, added
   `python/test/backend/metal_cross_backend_compare.py` for CPU-reference MPS/CUDA
