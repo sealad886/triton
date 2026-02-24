@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `234 passed`
+  -> `235 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 
@@ -326,7 +326,8 @@ Status: Complete for current runtime contract scope.
 - [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
       where supported), including tolerance envelopes per dtype.
       Current state: fp16 and bf16 runtime matmul validation are in place;
-      int8/fp8 runtime validation is still incomplete.
+      int8 runtime vector correctness validation is in place; fp8 and int8
+      matmul-class runtime validation are still incomplete.
 - [x] Add long-running stress tests covering training-like iteration loops,
       optimizer-style update kernels, and checkpointed host-device sync phases.
       Current state: added deterministic CPU/MPS
@@ -441,6 +442,11 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Added runtime int8 quantized-path correctness coverage with
+  `TestMetalRuntimeMLCorrectness::test_runtime_int8_vector_add_matches_cpu`,
+  validated against CPU reference on MPS. Revalidated
+  `python/test/backend/test_metal_backend.py` (235 passed) and
+  `scripts/test_metal_smoke.py` (all checks pass).
 - 2026-02-24: Hardened Metal validation determinism against stale-kernel false
   attribution by isolating Triton cache directories in
   `python/test/backend/test_metal_backend.py` and per-harness subprocess runs

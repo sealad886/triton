@@ -4568,6 +4568,39 @@ class TestMetalRuntimeMLCorrectness:
 
     @skip_non_darwin
     @skip_no_mps
+    def test_runtime_int8_vector_add_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _vadd_i8(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0)
+            y = tl.load(y_ptr + offs, mask=mask, other=0)
+            tl.store(out_ptr + offs, x + y, mask=mask)
+
+        torch.manual_seed(17)
+        n = 4096
+        # Keep values in range to avoid overflow-semantics ambiguity.
+        x_cpu = torch.randint(-32, 32, (n,), dtype=torch.int8)
+        y_cpu = torch.randint(-32, 32, (n,), dtype=torch.int8)
+        x_mps = x_cpu.to("mps")
+        y_mps = y_cpu.to("mps")
+        out_mps = torch.empty_like(x_mps)
+
+        _vadd_i8[(triton.cdiv(n, 256),)](x_mps, y_mps, out_mps, n, BLOCK=256)
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = (x_cpu.to(torch.int16) + y_cpu.to(torch.int16)).to(torch.int8)
+        assert torch.equal(out_cpu, expected)
+
+    @skip_non_darwin
+    @skip_no_mps
     def test_runtime_small_blocked_matmul_matches_cpu(self):
         import torch
         import triton
