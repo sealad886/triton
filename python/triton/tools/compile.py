@@ -143,7 +143,7 @@ def compile_kernel(args: CompileArgs):
 
     if getattr(ccinfo.metadata, "global_scratch_size", 0) > 0:
         raise RuntimeError("AOT compiling kernels with global scratch requirements is not yet implemented")
-    if ccinfo.metadata.profile_scratch_size > 0:
+    if getattr(ccinfo.metadata, "profile_scratch_size", 0) > 0:
         raise RuntimeError("AOT compiling kernels with profile scratch requirements is not yet implemented")
 
     arg_names = []

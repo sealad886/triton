@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `215 passed`
+  -> `216 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 
@@ -49,7 +49,7 @@ is corrected to reflect current implementation reality, including partial work.
 | LLVM IR -> MSL backend stage | mature backend-specific lowering | mature backend-specific lowering | no longer stub; broad lowering coverage with known matmul/encoding gaps | Medium |
 | Backend stage inspection hook | implemented | implemented | implemented | Low |
 | Test utility backend helpers | cuda/hip helpers | hip helpers | `is_metal` helper present | Low |
-| AOT unit test behavior | supported | supported | AOT unit tests still CUDA/HIP-only | High |
+| AOT unit test behavior | supported | supported | Metal compile-template AOT tests present; runtime C harness still CUDA/HIP | Medium |
 | Crash diagnostics harness | mature sanitizer/profiler ecosystem | mature sanitizer/profiler ecosystem | deterministic MPS crash triage harness implemented | Low |
 
 ## First-Class Definition
@@ -297,7 +297,7 @@ Acceptance:
   ordering, argument binding, and launch metadata semantics.
 - Launches remain functional across both torch-shader and metallib-backed
   execution modes.
-Status: Not complete.
+Status: Complete for current runtime contract scope.
 
 ### Phase 10: ML Workload Breadth and Numerical Robustness
 - [ ] Add end-to-end runtime correctness suites (not compile-only) for a broad
@@ -369,8 +369,9 @@ Status: Not complete.
   `profile_scratch`/`launch_pdl` are contract no-ops pending native support.
 - Phase 10 workload breadth/numerics work is still mostly compile-coverage; true
   end-to-end runtime numerics across backends remains incomplete.
-- AOT unit tests remain CUDA/HIP-only in
-  `python/test/unit/tools/test_aot.py`.
+- AOT runtime C harness execution remains CUDA/HIP-centric in
+  `python/test/unit/tools/test_aot.py`; Metal currently has compile-template
+  coverage only (`python/test/unit/tools/test_aot_metal.py`).
 - Some documentation/claim text was ahead of implementation and has been
   corrected in this update.
 
@@ -427,6 +428,10 @@ Status: Not complete.
 - 2026-02-24: Hardened Metal backend cache invalidation by extending backend
   hash inputs beyond `compiler.py` to include `driver.py`, Metal GPU→LLVM
   conversion sources, and shared Triton FMA dot-lowering sources.
+- 2026-02-24: Fixed a Metal AOT compile-tool source crash in
+  `python/triton/tools/compile.py` (`profile_scratch_size` attribute access now
+  guarded with `getattr`), and added dedicated Metal compile-template coverage
+  in `python/test/unit/tools/test_aot_metal.py`.
 - 2026-02-21: Branch renamed from `feat/mlx-support` to
   `feat/metal-support`. Stale local `feat/mlx-support` ref removed by rename.
 - 2026-02-21: Completed backend parity audit across
