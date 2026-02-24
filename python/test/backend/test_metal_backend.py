@@ -4948,6 +4948,227 @@ class TestMetalRuntimeMLCorrectness:
 
     @skip_non_darwin
     @skip_no_mps
+    def test_runtime_attention_score_softmax_matches_cpu(self):
+        import math
+
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _matmul(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        @triton.jit
+        def _row_softmax(x_ptr, y_ptr, n_cols, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = tl.arange(0, BLOCK)
+            mask = offs < n_cols
+            row_ptr = x_ptr + pid * n_cols
+            x = tl.load(row_ptr + offs, mask=mask, other=float("-inf"))
+            x = x - tl.max(x, axis=0)
+            ex = tl.exp(x)
+            denom = tl.sum(ex, axis=0)
+            out = ex / denom
+            tl.store(y_ptr + pid * n_cols + offs, out, mask=mask)
+
+        torch.manual_seed(47)
+        seq, dim = 16, 32
+        q_cpu = torch.randn((seq, dim), dtype=torch.float32)
+        k_cpu = torch.randn((seq, dim), dtype=torch.float32)
+        k_t_cpu = k_cpu.t().contiguous()
+        scale = 1.0 / math.sqrt(dim)
+
+        q_mps = q_cpu.to("mps")
+        k_t_mps = k_t_cpu.to("mps")
+        scores_mps = torch.empty((seq, seq), device="mps", dtype=torch.float32)
+        probs_mps = torch.empty_like(scores_mps)
+
+        _matmul[(triton.cdiv(seq, 16), triton.cdiv(seq, 16), 1)](
+            q_mps,
+            k_t_mps,
+            scores_mps,
+            seq,
+            seq,
+            dim,
+            q_mps.stride(0),
+            q_mps.stride(1),
+            k_t_mps.stride(0),
+            k_t_mps.stride(1),
+            scores_mps.stride(0),
+            scores_mps.stride(1),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=16,
+        )
+        scores_mps = scores_mps * scale
+        _row_softmax[(seq,)](scores_mps, probs_mps, seq, BLOCK=16)
+        torch.mps.synchronize()
+        probs_cpu = probs_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.softmax((q_cpu @ k_cpu.t()) * scale, dim=1)
+        assert torch.allclose(probs_cpu, expected, atol=3e-4, rtol=3e-4)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_mlp_block_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _matmul(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        @triton.jit
+        def _silu(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            y = x * tl.sigmoid(x)
+            tl.store(y_ptr + offs, y, mask=mask)
+
+        torch.manual_seed(53)
+        m, k, h, n = 16, 32, 48, 24
+        x_cpu = torch.randn((m, k), dtype=torch.float32)
+        w1_cpu = torch.randn((k, h), dtype=torch.float32)
+        w2_cpu = torch.randn((h, n), dtype=torch.float32)
+
+        x_mps = x_cpu.to("mps")
+        w1_mps = w1_cpu.to("mps")
+        w2_mps = w2_cpu.to("mps")
+        hidden_mps = torch.empty((m, h), device="mps", dtype=torch.float32)
+        act_mps = torch.empty_like(hidden_mps)
+        out_mps = torch.empty((m, n), device="mps", dtype=torch.float32)
+
+        _matmul[(triton.cdiv(m, 16), triton.cdiv(h, 16), 1)](
+            x_mps,
+            w1_mps,
+            hidden_mps,
+            m,
+            h,
+            k,
+            x_mps.stride(0),
+            x_mps.stride(1),
+            w1_mps.stride(0),
+            w1_mps.stride(1),
+            hidden_mps.stride(0),
+            hidden_mps.stride(1),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=16,
+        )
+        _silu[(triton.cdiv(m * h, 256),)](hidden_mps, act_mps, m * h, BLOCK=256)
+        _matmul[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
+            act_mps,
+            w2_mps,
+            out_mps,
+            m,
+            n,
+            h,
+            act_mps.stride(0),
+            act_mps.stride(1),
+            w2_mps.stride(0),
+            w2_mps.stride(1),
+            out_mps.stride(0),
+            out_mps.stride(1),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=16,
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.nn.functional.silu(x_cpu @ w1_cpu) @ w2_cpu
+        assert torch.allclose(out_cpu, expected, atol=3e-4, rtol=3e-4)
+
+    @skip_non_darwin
+    @skip_no_mps
     def test_runtime_bf16_blocked_matmul_matches_cpu(self):
         import torch
         import triton

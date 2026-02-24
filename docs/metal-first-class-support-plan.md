@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `230 passed`
+  -> `232 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 
@@ -319,8 +319,8 @@ Status: Complete for current runtime contract scope.
       scatter/gather-heavy patterns, and convolution-like kernels.
       Current state: runtime correctness now covers vector add, blocked matmul,
       row-softmax, row-layernorm, fp16/bf16 blocked matmul, batched matmul,
-      and embedding-gather on MPS; attention/MLP/convolution-style runtime
-      suites are still incomplete.
+      embedding-gather, attention-score softmax path, and an MLP block path on
+      MPS; convolution-style runtime suites are still incomplete.
 - [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
       where supported), including tolerance envelopes per dtype.
       Current state: fp16 and bf16 runtime matmul validation are in place;
@@ -432,6 +432,13 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Fixed typed GEP pointer arithmetic in LLVM→MSL lowering by
+  preserving the element/address-space pointer type during pointer-offset
+  emission, preventing invalid mixed pointer-type arithmetic in generated MSL.
+  Added runtime attention-score softmax and MLP-block correctness suites on MPS
+  to widen Phase 10 workload coverage. Revalidated
+  `python/test/backend/test_metal_backend.py` (232 passed) and
+  `scripts/test_metal_smoke.py` (all checks pass).
 - 2026-02-24: Fixed bf16 lowering at source in LLVM→MSL translation by adding
   explicit `bfloat` type parsing/mapping for params, return types, and pointer
   element inference, plus predicated-load typed-cast emission for bf16 fallback

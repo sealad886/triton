@@ -207,7 +207,7 @@ _RE_SELECT = re.compile(
     r"\s+[^ ]+\s+([^,]+),\s+[^ ]+\s+(.+)$"
 )
 _RE_GEP = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*getelementptr(?:\s+\w+)*\s+[A-Za-z0-9_]+,"
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*getelementptr(?:\s+\w+)*\s+([A-Za-z0-9_]+),"
     r"\s+ptr(?:\s+addrspace\((\d+)\))?\s+([^,]+),\s+i\d+\s+(.+)$"
 )
 _RE_EXTRACTELEM = re.compile(
@@ -1936,20 +1936,26 @@ class MetalBackend(BaseBackend):
 
                 m = _RE_GEP.match(line) if _opc == "getelementptr" else None
                 if m:
-                    out_ssa, _, base, idx = m.groups()
+                    out_ssa, elem_ty, addr_space, base, idx = m.groups()
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
-                    emit(f"{out} = {to_expr(base)} + {to_expr(idx)};")
+                    ptr_msl_ty = ptr_type_to_msl(elem_ty, addr_space=addr_space)
+                    emit(
+                        f"{out} = ({ptr_msl_ty})({to_expr(base)}) + {to_expr(idx)};"
+                    )
                     continue
 
                 parsed_gep = (
                     parse_gep_instruction(line) if _opc == "getelementptr" else None
                 )
                 if parsed_gep is not None:
-                    out_ssa, _, _, base, idx = parsed_gep
+                    out_ssa, elem_ty, addr_space, base, idx = parsed_gep
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
-                    emit(f"{out} = {to_expr(base)} + {to_expr(idx)};")
+                    ptr_msl_ty = ptr_type_to_msl(elem_ty, addr_space=addr_space)
+                    emit(
+                        f"{out} = ({ptr_msl_ty})({to_expr(base)}) + {to_expr(idx)};"
+                    )
                     continue
 
                 m = _RE_CAST.match(line) if _opc in _CAST_OPCODES else None
