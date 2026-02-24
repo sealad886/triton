@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `219 passed`
+  -> `221 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 
@@ -166,6 +166,8 @@ Acceptance:
 - [x] Restore runtime correctness for shared-memory blocked matmul loops by
       inserting threadgroup synchronization in LLVM->MSL loop-body lowering
       when LLIR lacks explicit barriers (store+load+backedge pattern).
+- [x] Fail fast on unsupported `llvm.*` call lowering instead of emitting raw
+      passthrough calls into MSL, with regression coverage for value/void forms.
 
 Acceptance:
 - Kernels that lower through the Metal LLVM pipeline compile through
@@ -426,8 +428,12 @@ Status: Not complete.
   (2) added threadgroup synchronization insertion for shared-memory loop bodies
   with store+load+backedge patterns when LLIR lacks explicit barriers.
   Added MPS runtime correctness tests for vector add and blocked matmul and
-  validated `python/test/backend/test_metal_backend.py` (219 passed) plus
+  validated `python/test/backend/test_metal_backend.py` (221 passed) plus
   `scripts/test_metal_smoke.py` (all checks pass).
+- 2026-02-24: Hardened LLVM→MSL production behavior by removing unknown
+  `llvm.*` passthrough in call lowering. Unsupported intrinsics now fail at
+  translation time with explicit errors; added regression tests for both
+  value-returning and void intrinsic call forms.
 - 2026-02-24: Performed full implementation audit and corrected this plan to
   match current code/tests/docs. Marked Phase 7-11 status as partial/incomplete
   where prior entries overstated completion. Added a concrete gap list under

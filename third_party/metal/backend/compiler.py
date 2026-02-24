@@ -1927,6 +1927,10 @@ class MetalBackend(BaseBackend):
                             f"{out}, {args[0]}, {args[1]}, {args[2]});"
                         )
                     else:
+                        if fn.startswith("llvm."):
+                            raise RuntimeError(
+                                f"Unsupported LLVM intrinsic in Metal lowering: '{fn}'"
+                            )
                         emit(f"{out} = {fn}({', '.join(args)});")
                     continue
 
@@ -2066,6 +2070,10 @@ class MetalBackend(BaseBackend):
                         )
                         emit(f"}}")
                     else:
+                        if fn.startswith("llvm."):
+                            raise RuntimeError(
+                                f"Unsupported LLVM intrinsic in Metal lowering: '{fn}'"
+                            )
                         emit(f"{fn}({', '.join(args)});")
                     continue
 

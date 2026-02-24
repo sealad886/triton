@@ -4641,6 +4641,39 @@ entry:
         assert "&" in msl
 
 
+# ── Unsupported LLVM intrinsic guards ───────────────────────────────
+
+
+class TestMetalUnsupportedIntrinsicGuard:
+    def test_unknown_llvm_value_intrinsic_raises(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """\
+define void @unknown_value_intrinsic(ptr %out, i32 %x) {
+entry:
+  %v = call i32 @llvm.unknown.value.i32(i32 %x)
+  %p = getelementptr i32, ptr %out, i64 0
+  store i32 %v, ptr %p
+  ret void
+}
+"""
+        with pytest.raises(RuntimeError, match="Unsupported LLVM intrinsic"):
+            MetalBackend.make_metal_ir(llvm_ir, {}, None)
+
+    def test_unknown_llvm_void_intrinsic_raises(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """\
+define void @unknown_void_intrinsic(i32 %x) {
+entry:
+  call void @llvm.unknown.void.i32(i32 %x)
+  ret void
+}
+"""
+        with pytest.raises(RuntimeError, match="Unsupported LLVM intrinsic"):
+            MetalBackend.make_metal_ir(llvm_ir, {}, None)
+
+
 # ── Audit ERR regression tests ──────────────────────────────────────
 
 
