@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `232 passed`
+  -> `234 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 
@@ -261,8 +261,8 @@ Status: Partially complete.
       integration is incomplete.
 - [ ] Build shape/dtype coverage for GEMM kernels used in transformers:
       fp32/fp16/bf16 paths, odd K tails, batched and grouped variants.
-      Current state: fp32/fp16/bf16 plus odd-K and batched runtime coverage now
-      exists; grouped runtime coverage is still missing.
+      Current state: fp32/fp16/bf16 plus odd-K, batched, and grouped runtime
+      coverage now exists.
 - [ ] Add perf regression tests and guardrails against severe throughput
       regressions on Apple7/Apple8/Apple9 classes.
       Current state: MSL-shape regression guards exist (FMA count/line count),
@@ -319,8 +319,9 @@ Status: Complete for current runtime contract scope.
       scatter/gather-heavy patterns, and convolution-like kernels.
       Current state: runtime correctness now covers vector add, blocked matmul,
       row-softmax, row-layernorm, fp16/bf16 blocked matmul, batched matmul,
-      embedding-gather, attention-score softmax path, and an MLP block path on
-      MPS; convolution-style runtime suites are still incomplete.
+      grouped matmul, embedding-gather, attention-score softmax path, MLP block
+      path, and a depthwise-convolution-like path on MPS; broader
+      convolution/training-loop suites are still incomplete.
 - [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
       where supported), including tolerance envelopes per dtype.
       Current state: fp16 and bf16 runtime matmul validation are in place;
@@ -390,8 +391,10 @@ Status: Not complete.
 - Runtime launch contract support is still intentionally constrained for some
   advanced features: cooperative-grid launch is explicit hard-fail and
   `profile_scratch`/`launch_pdl` are contract no-ops pending native support.
-- Phase 10 workload breadth/numerics work is still mostly compile-coverage; true
-  end-to-end runtime numerics across backends remains incomplete.
+- Phase 10 runtime coverage has expanded substantially (matmul variants,
+  normalization, attention/MLP, embedding, convolution-like), but
+  cross-backend numerics and long-running training-style coverage remain
+  incomplete.
 - AOT runtime C harness execution remains CUDA/HIP-centric in
   `python/test/unit/tools/test_aot.py`; Metal currently has compile-template
   coverage only (`python/test/unit/tools/test_aot_metal.py`).
@@ -432,6 +435,11 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Expanded runtime workload breadth with grouped-batched blocked
+  GEMM correctness and depthwise-convolution-like correctness on MPS to cover
+  previously-missing grouped and convolution-like paths in Phase 10. Revalidated
+  `python/test/backend/test_metal_backend.py` (234 passed) and
+  `scripts/test_metal_smoke.py` (all checks pass).
 - 2026-02-24: Fixed typed GEP pointer arithmetic in LLVM→MSL lowering by
   preserving the element/address-space pointer type during pointer-offset
   emission, preventing invalid mixed pointer-type arithmetic in generated MSL.

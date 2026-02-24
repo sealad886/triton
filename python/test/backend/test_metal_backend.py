@@ -5257,6 +5257,195 @@ class TestMetalRuntimeMLCorrectness:
         expected = a_cpu.float() @ b_cpu.float()
         assert torch.allclose(c_cpu, expected, atol=5e-2, rtol=5e-2)
 
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_grouped_batched_matmul_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _grouped_batched_matmul(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            groups,
+            batch,
+            stride_ag,
+            stride_ab,
+            stride_am,
+            stride_ak,
+            stride_bg,
+            stride_bb,
+            stride_bk,
+            stride_bn,
+            stride_cg,
+            stride_cb,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            pid_gb = tl.program_id(axis=2)
+
+            gid = pid_gb // batch
+            bid = pid_gb % batch
+
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            a_base = a_ptr + gid * stride_ag + bid * stride_ab
+            b_base = b_ptr + gid * stride_bg + bid * stride_bb
+            c_base = c_ptr + gid * stride_cg + bid * stride_cb
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_base
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_base
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c_ptrs = c_base + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(59)
+        groups, batch, m, n, k = 2, 3, 16, 24, 20
+        a_cpu = torch.randn((groups, batch, m, k), dtype=torch.float32)
+        b_cpu = torch.randn((groups, batch, k, n), dtype=torch.float32)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((groups, batch, m, n), device="mps", dtype=torch.float32)
+
+        _grouped_batched_matmul[
+            (triton.cdiv(m, 16), triton.cdiv(n, 16), groups * batch)
+        ](
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            groups,
+            batch,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            a_mps.stride(2),
+            a_mps.stride(3),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            b_mps.stride(2),
+            b_mps.stride(3),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            c_mps.stride(2),
+            c_mps.stride(3),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=8,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.matmul(a_cpu, b_cpu)
+        assert torch.allclose(c_cpu, expected, atol=2e-4, rtol=2e-4)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_depthwise_conv1d_like_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _depthwise_conv1d(
+            x_ptr,
+            w_ptr,
+            y_ptr,
+            out_len,
+            channels,
+            stride_xl,
+            stride_xc,
+            stride_wk,
+            stride_wc,
+            stride_yl,
+            stride_yc,
+            KERNEL: tl.constexpr,
+            BLOCK_C: tl.constexpr,
+        ):
+            pid = tl.program_id(axis=0)
+            offs_c = tl.arange(0, BLOCK_C)
+            mask = offs_c < channels
+
+            acc = tl.zeros((BLOCK_C,), dtype=tl.float32)
+            for kk in range(KERNEL):
+                x = tl.load(
+                    x_ptr + (pid + kk) * stride_xl + offs_c * stride_xc,
+                    mask=mask,
+                    other=0.0,
+                )
+                w = tl.load(
+                    w_ptr + kk * stride_wk + offs_c * stride_wc,
+                    mask=mask,
+                    other=0.0,
+                )
+                acc += x * w
+
+            tl.store(y_ptr + pid * stride_yl + offs_c * stride_yc, acc, mask=mask)
+
+        torch.manual_seed(61)
+        length, channels, kernel = 32, 32, 3
+        out_len = length - kernel + 1
+        x_cpu = torch.randn((length, channels), dtype=torch.float32)
+        w_cpu = torch.randn((kernel, channels), dtype=torch.float32)
+
+        x_mps = x_cpu.to("mps")
+        w_mps = w_cpu.to("mps")
+        y_mps = torch.empty((out_len, channels), device="mps", dtype=torch.float32)
+
+        _depthwise_conv1d[(out_len,)](
+            x_mps,
+            w_mps,
+            y_mps,
+            out_len,
+            channels,
+            x_mps.stride(0),
+            x_mps.stride(1),
+            w_mps.stride(0),
+            w_mps.stride(1),
+            y_mps.stride(0),
+            y_mps.stride(1),
+            KERNEL=3,
+            BLOCK_C=32,
+        )
+        torch.mps.synchronize()
+        y_cpu = y_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.stack(
+            [torch.sum(x_cpu[i : i + kernel] * w_cpu, dim=0) for i in range(out_len)],
+            dim=0,
+        )
+        assert torch.allclose(y_cpu, expected, atol=2e-4, rtol=2e-4)
+
 
 # ── LLVM vector-constant lowering regressions ───────────────────────
 
