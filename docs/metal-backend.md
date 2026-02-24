@@ -123,8 +123,9 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
   are handled; fp8 and some quantized matmul-class paths remain incomplete.
 - **Tensor cores**: Apple's matrix multiply accelerator is not yet
   integrated into the pass pipeline.
-- **Cross-backend numerics**: deterministic CPU comparisons are implemented,
-  but CUDA/HIP comparative runtime validation is still pending.
+- **Cross-backend numerics**: deterministic CPU-reference comparisons are
+  implemented for MPS and optional CUDA via a dedicated harness; HIP parity and
+  CI-backed multi-backend coverage remain pending.
 
 ## Troubleshooting
 
@@ -181,8 +182,10 @@ this silently degrades performance via memory spilling.
 ### Matrix multiplication
 
 The current implementation uses FMA (fused multiply-add) fallback for
-`tt.dot` operations. `simdgroup_matrix` integration is planned but not yet
-wired into the accelerate_matmul pass. For now:
+`tt.dot` operations by default. LLVM->MSL now supports a selectable simdgroup
+matmul strategy (`auto`/`native`/`fallback`) in the Metal backend translator,
+but pass-level `accelerate_matmul` integration is still not Metal-native. For
+now:
 - Use smaller tile sizes (e.g. 16×16 instead of 32×32).
 - `accelerate_matmul` is enabled in the pipeline but currently no-ops for
   non-CUDA targets; `optimize_dot_operands` remains enabled.
@@ -228,6 +231,12 @@ python scripts/metal_release_checks.py
 
 # Extended local soak checks (larger transfer/training stress)
 python scripts/metal_release_checks.py --soak
+
+# Throughput guardrails for representative GEMM shapes
+python scripts/metal_matmul_throughput_guard.py
+
+# Deterministic cross-backend numerics (CPU reference + MPS/CUDA where present)
+python python/test/backend/metal_cross_backend_compare.py --backends mps,cuda
 ```
 
 ### Building the native extension

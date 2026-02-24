@@ -27,14 +27,17 @@ Out (for this phase):
 
 Validated in workspace `.venv` with:
 
-- `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `235 passed`
-- `PYTHONPATH=python python scripts/test_metal_smoke.py`
+- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
+  -> `239 passed`
+- `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
-- `PYTHONPATH=python python -m pytest -q python/test/unit/tools/test_aot_metal.py`
+- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
   -> `1 passed`
-- `PYTHONPATH=python python scripts/metal_release_checks.py --soak`
-  -> release + soak gate checks pass with artifacts
+- `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py`
+  -> default release gate checks pass with artifacts (backend tests, smoke,
+     throughput guard, cross-backend numerics, AOT checks)
+- `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --soak`
+  -> extended local soak checks pass with artifacts
 
 Important: this does not imply full first-class parity yet. The checklist below
 is corrected to reflect current implementation reality, including partial work.
@@ -260,24 +263,28 @@ Status: Partially complete.
       Current state: both passes are enabled. `accelerate_matmul` now guards
       on non-CUDA targets at source (`TritonGPUAccelerateMatmul`) and is a
       safe no-op for Metal until a Metal-native acceleration strategy lands.
-- [ ] Add Metal-specific strategy for simdgroup-optimized matmul execution with
+- [x] Add Metal-specific strategy for simdgroup-optimized matmul execution with
       correctness-preserving fallbacks.
-      Current state: translator-level simdgroup stubs exist, but pass-level
-      integration is incomplete.
+      Current state: `MetalOptions.simdgroup_matmul_strategy` now supports
+      `auto|native|fallback`; LLVM->MSL lowering can emit typed native
+      `simdgroup_*` calls or deterministic software fallback helpers
+      (`__metal_sg_*`) for float/half. Pass-level `accelerate_matmul`
+      integration is still incomplete.
 - [x] Build shape/dtype coverage for GEMM kernels used in transformers:
       fp32/fp16/bf16 paths, odd K tails, batched and grouped variants.
       Current state: fp32/fp16/bf16 plus odd-K, batched, and grouped runtime
       coverage now exists.
-- [ ] Add perf regression tests and guardrails against severe throughput
+- [x] Add perf regression tests and guardrails against severe throughput
       regressions on Apple7/Apple8/Apple9 classes.
-      Current state: MSL-shape regression guards exist (FMA count/line count),
-      but throughput baselines across Apple GPU families are not implemented.
+      Current state: `scripts/metal_matmul_throughput_guard.py` with
+      per-arch baseline file (`docs/metal-matmul-throughput-baselines.json`) is
+      implemented and wired into `scripts/metal_release_checks.py`.
 
 Acceptance:
 - Matmul-heavy kernels compile and run across supported encodings and dtypes.
 - Throughput for key GEMM shapes is competitive with the backend baseline
   targets established for Apple Silicon generations.
-Status: Not complete.
+Status: Partially complete.
 
 ### Phase 9: Runtime Semantics Parity (Streams, Async, Launch Features)
 - [x] Implement meaningful stream/queue semantics rather than placeholder
@@ -330,8 +337,10 @@ Status: Complete for current runtime contract scope.
 - [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
       where supported), including tolerance envelopes per dtype.
       Current state: fp16 and bf16 runtime matmul validation are in place;
-      int8 runtime vector correctness validation is in place; fp8 and int8
-      matmul-class runtime validation are still incomplete.
+      int8 runtime vector correctness and int8 blocked matmul validation are in
+      place; fp8 compile coverage exists with deterministic expected-failure
+      assertions for unsupported lowering. Full fp8 runtime matmul validation is
+      still incomplete.
 - [x] Add long-running stress tests covering training-like iteration loops,
       optimizer-style update kernels, and checkpointed host-device sync phases.
       Current state: added deterministic CPU/MPS
@@ -339,10 +348,11 @@ Status: Complete for current runtime contract scope.
       transfer checkpoints, and crash-safe artifacts; smoke harness now runs it
       in both modes. Sustained multi-hour soak gating remains tracked in
       Phase 11.
-- [ ] Add cross-backend numerical comparison harnesses (CPU/CUDA/HIP reference
+- [x] Add cross-backend numerical comparison harnesses (CPU/CUDA/HIP reference
       where available) with deterministic seeds and artifact logging.
-      Current state: deterministic CPU references exist; CUDA/HIP comparative
-      runtime validation is not in place.
+      Current state: `python/test/backend/metal_cross_backend_compare.py`
+      validates MPS and CUDA (when available) against deterministic CPU
+      references with persisted artifacts; HIP integration remains pending.
 - [x] Add coverage for dynamic-shape kernels and irregular tensor sizes common
       in production inference workloads.
       Added TestMetalDynamicShapes with non-power-of-2, very small, large,
@@ -352,7 +362,7 @@ Acceptance:
 - Metal backend passes comprehensive runtime correctness checks for core ML
   workload classes with documented tolerances.
 - Numerical drift is bounded and tracked across backend/compiler changes.
-Status: Not complete.
+Status: Partially complete.
 
 ### Phase 11: Production Hardening, Tooling, and Developer UX
 - [x] Add backend observability tooling: compile-time provenance, pass-timing
@@ -373,8 +383,10 @@ Status: Not complete.
 - [ ] Add sustained soak tests and release gates for regression detection across
       compiler, runtime, and harness dimensions.
       Current state: local release-gate runner
-      (`scripts/metal_release_checks.py`) now includes optional sustained MPS
-      soak checks with artifact capture; CI integration remains pending.
+      (`scripts/metal_release_checks.py`) includes backend tests, smoke tests,
+      throughput guardrails, cross-backend numerics, AOT checks, and optional
+      sustained soak checks with artifact capture; CI integration remains
+      pending.
 - [ ] Define and publish a compatibility matrix (macOS, Xcode, torch, Apple
       GPU families) with automated validation in CI.
       Current state: matrix document exists; automated compatibility-matrix
@@ -395,8 +407,9 @@ Status: Not complete.
   `third_party/metal/backend/compiler.py`: the pass is currently
   target-aware and no-ops for non-CUDA targets, so Metal-specific matmul
   acceleration is not yet implemented.
-- Simdgroup matmul support is translator-level stub coverage, not full backend
-  pass integration.
+- Simdgroup matmul support now includes typed native/fallback LLVM->MSL
+  lowering strategies, but full pass-level Metal matmul acceleration
+  (`accelerate_matmul` equivalent) is still missing.
 - Shared-memory synchronization for blocked matmul is currently enforced by a
   translator-level loop heuristic in `make_metal_ir`; a dedicated upstream
   Metal fence/barrier insertion pass is still missing.
@@ -404,9 +417,9 @@ Status: Not complete.
   advanced features: cooperative-grid launch is explicit hard-fail and
   `profile_scratch`/`launch_pdl` are contract no-ops pending native support.
 - Phase 10 runtime coverage has expanded substantially (matmul variants,
-  normalization, attention/MLP, embedding, convolution-like), but
-  cross-backend numerics and long-running training-style coverage remain
-  incomplete.
+  normalization, attention/MLP, embedding, convolution-like, training-style
+  stress loops), but fp8 runtime validation and HIP-backed cross-backend
+  numerics remain incomplete.
 - AOT runtime C harness execution remains CUDA/HIP-centric in
   `python/test/unit/tools/test_aot.py`; Metal currently has compile-template
   coverage only (`python/test/unit/tools/test_aot_metal.py`).
@@ -434,10 +447,10 @@ Status: Not complete.
   launch features (`launch_cooperative_grid`, `profile_scratch` behavior).
   - Mitigation: keep explicit hard-fail/no-op semantics, document behavior, and
     add native Metal implementations only where correctness can be guaranteed.
-- Risk: ML workload and numerics coverage is still compile-heavy rather than
-  end-to-end runtime validation.
-  - Mitigation: complete Phase 10 runtime correctness suites and cross-backend
-    numerical comparisons.
+- Risk: Runtime validation breadth is improved but still incomplete for fp8 and
+  full multi-backend parity (especially HIP and CI-enforced coverage).
+  - Mitigation: complete Phase 10 fp8 runtime suites and extend backend matrix
+    validation in release automation.
 - Risk: Type mapping changes affect AOT code generation compatibility.
   - Mitigation: add focused tests for mapping/parser compatibility and keep
     mapping backend-specific.
@@ -448,6 +461,21 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Closed additional Phase 8/10 execution gaps and validation
+  guardrails. Added configurable simdgroup matmul strategy
+  (`simdgroup_matmul_strategy=auto|native|fallback`) in
+  `third_party/metal/backend/compiler.py`, including typed native pointer
+  lowering for half/float simdgroup load/store and deterministic software
+  fallback helper generation. Added runtime int8 blocked matmul correctness
+  coverage and deterministic fp8 matmul compile expected-failure coverage in
+  `python/test/backend/test_metal_backend.py`. Added
+  `scripts/metal_matmul_throughput_guard.py` with
+  `docs/metal-matmul-throughput-baselines.json`, added
+  `python/test/backend/metal_cross_backend_compare.py` for CPU-reference MPS/CUDA
+  comparisons with artifacts, and wired both into
+  `scripts/metal_release_checks.py`. Revalidated:
+  `python/test/backend/test_metal_backend.py` (239 passed) and
+  `scripts/metal_release_checks.py` (all default checks pass with artifacts).
 - 2026-02-24: Added consolidated release-readiness runner
   `scripts/metal_release_checks.py` with structured artifacts, deterministic
   cache isolation, default gates (backend tests, smoke, AOT checks), and
