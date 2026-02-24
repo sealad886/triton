@@ -392,14 +392,7 @@ merge:
             },
             constexprs={"BLOCK": 128},
         )
-        try:
-            kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
-        except RuntimeError as exc:
-            # Current backend status: fp8 matmul-class lowering is not complete.
-            # This assertion ensures a deterministic, explicit failure mode
-            # instead of a silent miscompile or backend crash.
-            assert "PassManager::run failed" in str(exc)
-            return
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
         assert_metal_compilation_artifacts(kernel)
 
     @skip_non_darwin
@@ -430,14 +423,7 @@ merge:
             },
             constexprs={"BM": 16, "BN": 32},
         )
-        try:
-            kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
-        except RuntimeError as exc:
-            # Current backend status: fp8 matmul-class lowering is incomplete.
-            # Keep this coverage deterministic by requiring explicit pass failure
-            # until fp8 dot lowering support is implemented end-to-end.
-            assert "PassManager::run failed" in str(exc)
-            return
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
         assert_metal_compilation_artifacts(kernel)
 
     @skip_non_darwin
@@ -1288,11 +1274,35 @@ class TestMetalRealWorldCompileCases:
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
-        try:
-            kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
-        except RuntimeError as exc:
-            assert "PassManager::run failed" in str(exc)
-            return
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_compile_triton_fp8_roundtrip_convert_pipeline(self):
+        import torch
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        if not hasattr(torch, "float8_e5m2"):
+            pytest.skip("Torch float8 types unavailable on this host")
+
+        @triton.jit
+        def _fp8_roundtrip(src_ptr, dst_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(src_ptr + offs, mask=mask, other=0.0)
+            y = x.to(tl.float8e5).to(tl.float16)
+            tl.store(dst_ptr + offs, y, mask=mask)
+
+        src = triton.compiler.ASTSource(
+            fn=_fp8_roundtrip,
+            signature={"src_ptr": "*fp16", "dst_ptr": "*fp16", "n": "i32"},
+            constexprs={"BLOCK": 64},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
         assert_metal_compilation_artifacts(kernel)
 
 

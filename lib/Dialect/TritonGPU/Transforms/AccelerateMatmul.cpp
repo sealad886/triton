@@ -917,7 +917,8 @@ static bool mmav2SupportsFp8Operands(int computeCapability) {
 
 // promote operands of dot op if the existing combination is not natively
 // supported.
-static void decomposeMixedModeDotOp(ModuleOp mod, int computeCapability) {
+static void decomposeMixedModeDotOp(ModuleOp mod, int computeCapability,
+                                    bool fp8OnlyFMA = false) {
   mod.walk([=](DotOp dotOp) -> void {
     auto D = dotOp.getD();
     OpBuilder builder(dotOp);
@@ -938,6 +939,8 @@ static void decomposeMixedModeDotOp(ModuleOp mod, int computeCapability) {
       Type AElType = dotOp.getA().getType().getElementType();
       Type DElType = D.getType().getElementType();
       if (AElType == DElType)
+        return;
+      if (fp8OnlyFMA && !type::isFloat8(AElType))
         return;
       promoteType = DElType;
     }
@@ -996,12 +999,15 @@ public:
     MLIRContext *context = &getContext();
     ModuleOp m = getOperation();
 
-    // This pass currently applies NVIDIA-specific MMA rewrites. Keep it
-    // harmless on non-CUDA targets so backend pipelines can include it
-    // without target-specific guard rails.
+    // This pass primarily applies NVIDIA-specific MMA rewrites. For non-CUDA
+    // targets, still run mixed-mode dot decomposition so unsupported fp8 dot
+    // operands are promoted before backend LLVM lowering.
     auto targetAttr = m->getAttrOfType<StringAttr>(triton::gpu::AttrTargetName);
-    if (!targetAttr || !targetAttr.getValue().starts_with("cuda:"))
+    if (!targetAttr || !targetAttr.getValue().starts_with("cuda:")) {
+      decomposeMixedModeDotOp(m, /*computeCapability=*/0,
+                              /*fp8OnlyFMA=*/true);
       return;
+    }
 
     auto computeCapability = getNVIDIAComputeCapability(m);
     // We could do this generically if we manage to improve the heuristics

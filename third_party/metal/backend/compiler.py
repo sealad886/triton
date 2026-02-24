@@ -2579,11 +2579,75 @@ class MetalBackend(BaseBackend):
             else:
                 raise RuntimeError(msg)
 
+        uses_fp8e5_helpers = (
+            "__metal_fp8e5m2_to_fp32" in src or "__metal_fp32_to_fp8e5m2_rn" in src
+        )
+
         msl_lines = [
             "#include <metal_stdlib>",
             "using namespace metal;",
             "",
         ]
+        if uses_fp8e5_helpers:
+            msl_lines.extend(
+                [
+                    "inline float __metal_fp8e5m2_to_fp32(char bits) {",
+                    "  uchar ub = as_type<uchar>(bits);",
+                    "  uint sign = (uint)(ub >> 7);",
+                    "  uint exp = (uint)((ub >> 2) & 0x1Fu);",
+                    "  uint mant = (uint)(ub & 0x3u);",
+                    "  float mag = 0.0f;",
+                    "  if (exp == 0u) {",
+                    "    if (mant != 0u) {",
+                    "      mag = ldexp((float)mant, -16);",
+                    "    }",
+                    "  } else if (exp == 0x1Fu) {",
+                    "    mag = (mant == 0u) ? INFINITY : NAN;",
+                    "  } else {",
+                    "    mag = ldexp(1.0f + ((float)mant * 0.25f), (int)exp - 15);",
+                    "  }",
+                    "  return sign ? -mag : mag;",
+                    "}",
+                    "",
+                    "inline char __metal_fp32_to_fp8e5m2_rn(float x) {",
+                    "  if (isnan(x)) return as_type<char>((uchar)0x7Fu);",
+                    "  uint sign = signbit(x) ? 0x80u : 0u;",
+                    "  float ax = fabs(x);",
+                    "  if (isinf(ax)) return as_type<char>((uchar)(sign | 0x7Cu));",
+                    "  if (ax == 0.0f) return as_type<char>((uchar)sign);",
+                    "  int exp2 = 0;",
+                    "  float m = frexp(ax, exp2);",
+                    "  int e = exp2 - 1 + 15;",
+                    "  uint mant = 0u;",
+                    "  if (e <= 0) {",
+                    "    int sm = (int)rint(ax * 65536.0f);",
+                    "    if (sm <= 0) return as_type<char>((uchar)sign);",
+                    "    if (sm >= 4) {",
+                    "      e = 1;",
+                    "      mant = 0u;",
+                    "    } else {",
+                    "      mant = (uint)sm;",
+                    "      e = 0;",
+                    "    }",
+                    "  } else if (e >= 0x1F) {",
+                    "    return as_type<char>((uchar)(sign | 0x7Cu));",
+                    "  } else {",
+                    "    float frac = (m * 2.0f) - 1.0f;",
+                    "    int m2 = (int)rint(frac * 4.0f);",
+                    "    if (m2 == 4) {",
+                    "      m2 = 0;",
+                    "      e += 1;",
+                    "      if (e >= 0x1F) return as_type<char>((uchar)(sign | 0x7Cu));",
+                    "    }",
+                    "    if (m2 < 0) m2 = 0;",
+                    "    mant = (uint)m2 & 0x3u;",
+                    "  }",
+                    "  uchar out = (uchar)(sign | (((uint)e & 0x1Fu) << 2) | mant);",
+                    "  return as_type<char>(out);",
+                    "}",
+                    "",
+                ]
+            )
         msl_lines.extend(struct_defs)
         if not use_native_simdgroup and fallback_simdgroup_elem_types:
             if struct_defs:
