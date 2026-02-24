@@ -120,12 +120,11 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
 ## Current Limitations
 
 - **Data type coverage is mostly complete**: common scalar/integer/float types
-  are fully handled; fp8 variants and aggregate types remain under
-  consideration for future work.
+  are handled; fp8 and some quantized matmul-class paths remain incomplete.
 - **Tensor cores**: Apple's matrix multiply accelerator is not yet
   integrated into the pass pipeline.
-- **CI automation**: automated CI artifact upload/reporting for crash harness
-  runs is not yet wired.
+- **Cross-backend numerics**: deterministic CPU comparisons are implemented,
+  but CUDA/HIP comparative runtime validation is still pending.
 
 ## Troubleshooting
 
@@ -185,8 +184,8 @@ The current implementation uses FMA (fused multiply-add) fallback for
 `tt.dot` operations. `simdgroup_matrix` integration is planned but not yet
 wired into the accelerate_matmul pass. For now:
 - Use smaller tile sizes (e.g. 16×16 instead of 32×32).
-- The `optimize_dot_operands` pass is enabled; `accelerate_matmul` is
-  disabled.
+- `accelerate_matmul` is enabled in the pipeline but currently no-ops for
+  non-CUDA targets; `optimize_dot_operands` remains enabled.
 
 ## Compatibility Notes
 
@@ -216,6 +215,13 @@ python python/test/backend/metal_mps_transfer_stress.py --mode mps --iters 4096 
 # Deterministic crash-classification harness (runtime-flow mirror)
 python python/test/backend/metal_mps_project_flow_stress.py --mode cpu --iters 256 --transfer-every 16
 python python/test/backend/metal_mps_project_flow_stress.py --mode mps --iters 2048 --transfer-every 1
+
+# Deterministic crash-classification harness (training-style optimizer loop)
+python python/test/backend/metal_mps_training_loop_stress.py --mode cpu --iters 256 --transfer-every 16
+python python/test/backend/metal_mps_training_loop_stress.py --mode mps --iters 2048 --transfer-every 1
+
+# Optional: isolate cache state while validating to avoid stale-artifact reuse
+TRITON_CACHE_DIR="$(mktemp -d /tmp/triton-metal-cache.XXXXXX)" python -m pytest -q python/test/backend/test_metal_backend.py
 ```
 
 ### Building the native extension
