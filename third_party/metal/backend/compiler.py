@@ -575,6 +575,7 @@ class MetalOptions:
     launch_cooperative_grid: bool = False
     instrumentation_mode: str = ""
     best_effort: bool = False
+    simdgroup_matmul_strategy: str = "auto"
 
     def __post_init__(self):
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
@@ -582,6 +583,11 @@ class MetalOptions:
         assert (
             self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0
         ), "num_warps must be a power of 2"
+        assert self.simdgroup_matmul_strategy in (
+            "auto",
+            "native",
+            "fallback",
+        ), "simdgroup_matmul_strategy must be one of: auto, native, fallback"
 
     def hash(self):
         key = "_".join([f"{name}-{val}" for name, val in sorted(self.__dict__.items())])
@@ -903,6 +909,20 @@ class MetalBackend(BaseBackend):
 
         uses_shared_smem = "@global_smem" in src
         shared_bytes = max(int(metadata.get("shared", 0) or 0), 1)
+        simdgroup_strategy = (
+            getattr(opt, "simdgroup_matmul_strategy", "auto")
+            if opt is not None
+            else "auto"
+        )
+        if simdgroup_strategy not in ("auto", "native", "fallback"):
+            raise RuntimeError(
+                "Unsupported simdgroup_matmul_strategy: "
+                f"{simdgroup_strategy!r} (expected auto/native/fallback)"
+            )
+        # `fallback` forces portable software lowering for simdgroup matrix
+        # intrinsics. `auto`/`native` use MSL simdgroup intrinsics directly.
+        use_native_simdgroup = simdgroup_strategy != "fallback"
+        fallback_simdgroup_elem_types: set[str] = set()
 
         def split_top_level(text: str, sep: str = ",") -> list[str]:
             parts = []
@@ -1002,6 +1022,17 @@ class MetalBackend(BaseBackend):
         def ptr_type_to_msl(pointee_llvm_ty: str, addr_space: str | None = None) -> str:
             space = msl_addr_space(addr_space)
             return f"{space} {llvm_scalar_to_msl(pointee_llvm_ty)}*"
+
+        def simdgroup_elem_from_decl(msl_decl_ty: str | None) -> str | None:
+            if not msl_decl_ty:
+                return None
+            msl_decl_ty = msl_decl_ty.strip()
+            if msl_decl_ty.startswith("simdgroup_matrix<") and msl_decl_ty.endswith(">"):
+                inner = msl_decl_ty[len("simdgroup_matrix<") : -1]
+                return inner.split(",", 1)[0].strip()
+            if msl_decl_ty.startswith("__metal_sgmat_"):
+                return msl_decl_ty[len("__metal_sgmat_") :].replace("_", " ")
+            return None
 
         def extract_call_ret_type(ret_spec: str) -> str:
             ret_spec = ret_spec.strip()
@@ -1640,10 +1671,19 @@ class MetalBackend(BaseBackend):
                         vec_m = _RE_VEC_TYPE.match(ret_type)
                         if vec_m:
                             elem_ty = llvm_scalar_to_msl(vec_m.group(2))
-                        record_ssa_decl(
-                            out_ssa,
-                            msl_ty=f"simdgroup_matrix<{elem_ty}, 8, 8>",
-                        )
+                        if use_native_simdgroup:
+                            record_ssa_decl(
+                                out_ssa,
+                                msl_ty=f"simdgroup_matrix<{elem_ty}, 8, 8>",
+                            )
+                        else:
+                            if elem_ty not in ("float", "half"):
+                                raise RuntimeError(
+                                    "Software simdgroup fallback only supports "
+                                    f"float/half elements, got {elem_ty!r}"
+                                )
+                            fallback_simdgroup_elem_types.add(elem_ty)
+                            record_ssa_decl(out_ssa, msl_ty=f"__metal_sgmat_{elem_ty}")
                     elif ret_type.startswith("{"):
                         struct_name, _ = get_aggregate_struct_name(ret_type)
                         record_ssa_decl(out_ssa, msl_ty=struct_name)
@@ -1842,6 +1882,11 @@ class MetalBackend(BaseBackend):
             def emit(stmt: str):
                 body_lines.append(f"      {stmt}")
 
+            def simdgroup_elem_for_msl_value(msl_value: str) -> str:
+                msl_ty = ssa_decl_types.get(msl_value)
+                elem_ty = simdgroup_elem_from_decl(msl_ty)
+                return elem_ty if elem_ty is not None else "float"
+
             terminated = False
             for line in instrs:
                 if line == "ret void":
@@ -2027,17 +2072,33 @@ class MetalBackend(BaseBackend):
                     elif fn == "__metal_simd_shuffle" and len(args) == 2:
                         emit(f"{out} = simd_shuffle({args[0]}, {args[1]});")
                     elif fn == "__metal_simdgroup_load" and len(args) == 2:
-                        emit(
-                            f"simdgroup_load({out}, "
-                            f"(const device float*){args[0]}, {args[1]});"
-                        )
+                        elem_ty = simdgroup_elem_for_msl_value(out)
+                        if use_native_simdgroup:
+                            emit(
+                                f"simdgroup_load({out}, "
+                                f"(const device {elem_ty}*){args[0]}, {args[1]});"
+                            )
+                        else:
+                            fn_tag = elem_ty.replace(" ", "_")
+                            emit(
+                                f"{out} = __metal_sg_load_{fn_tag}("
+                                f"(const device {elem_ty}*){args[0]}, {args[1]});"
+                            )
                     elif (
                         fn == "__metal_simdgroup_multiply_accumulate" and len(args) == 3
                     ):
-                        emit(
-                            f"simdgroup_multiply_accumulate("
-                            f"{out}, {args[0]}, {args[1]}, {args[2]});"
-                        )
+                        elem_ty = simdgroup_elem_for_msl_value(out)
+                        if use_native_simdgroup:
+                            emit(
+                                f"simdgroup_multiply_accumulate("
+                                f"{out}, {args[0]}, {args[1]}, {args[2]});"
+                            )
+                        else:
+                            fn_tag = elem_ty.replace(" ", "_")
+                            emit(
+                                f"{out} = __metal_sg_mma_{fn_tag}("
+                                f"{args[0]}, {args[1]}, {args[2]});"
+                            )
                     else:
                         if fn.startswith("llvm."):
                             raise RuntimeError(
@@ -2167,10 +2228,18 @@ class MetalBackend(BaseBackend):
                                 barrier_flags = "mem_flags::mem_threadgroup"
                         emit(f"threadgroup_barrier({barrier_flags});")
                     elif fn == "__metal_simdgroup_store" and len(args) == 3:
-                        emit(
-                            f"simdgroup_store({args[0]}, "
-                            f"(device float*){args[1]}, {args[2]});"
-                        )
+                        elem_ty = simdgroup_elem_for_msl_value(args[0])
+                        if use_native_simdgroup:
+                            emit(
+                                f"simdgroup_store({args[0]}, "
+                                f"(device {elem_ty}*){args[1]}, {args[2]});"
+                            )
+                        else:
+                            fn_tag = elem_ty.replace(" ", "_")
+                            emit(
+                                f"__metal_sg_store_{fn_tag}({args[0]}, "
+                                f"(device {elem_ty}*){args[1]}, {args[2]});"
+                            )
                     elif fn.startswith("llvm.assume"):
                         emit("(void)0;")
                     elif fn.startswith("llvm.lifetime.start") or fn.startswith(
@@ -2516,6 +2585,59 @@ class MetalBackend(BaseBackend):
             "",
         ]
         msl_lines.extend(struct_defs)
+        if not use_native_simdgroup and fallback_simdgroup_elem_types:
+            if struct_defs:
+                msl_lines.append("")
+            for elem_ty in sorted(fallback_simdgroup_elem_types):
+                tag = elem_ty.replace(" ", "_")
+                acc_ty = "float" if elem_ty in ("half", "float", "bfloat") else elem_ty
+                msl_lines.extend(
+                    [
+                        f"struct __metal_sgmat_{tag} {{",
+                        f"  {elem_ty} e[64];",
+                        "};",
+                        "",
+                        f"inline __metal_sgmat_{tag} __metal_sg_load_{tag}(",
+                        f"    const device {elem_ty}* base, int stride_bytes) {{",
+                        f"  __metal_sgmat_{tag} out;",
+                        f"  int __row_stride = stride_bytes / (int)sizeof({elem_ty});",
+                        "  if (__row_stride <= 0) __row_stride = 8;",
+                        "  for (int r = 0; r < 8; ++r) {",
+                        "    for (int c = 0; c < 8; ++c) {",
+                        "      out.e[r * 8 + c] = base[r * __row_stride + c];",
+                        "    }",
+                        "  }",
+                        "  return out;",
+                        "}",
+                        "",
+                        f"inline void __metal_sg_store_{tag}(",
+                        f"    __metal_sgmat_{tag} mat, device {elem_ty}* base, int stride_bytes) {{",
+                        f"  int __row_stride = stride_bytes / (int)sizeof({elem_ty});",
+                        "  if (__row_stride <= 0) __row_stride = 8;",
+                        "  for (int r = 0; r < 8; ++r) {",
+                        "    for (int c = 0; c < 8; ++c) {",
+                        "      base[r * __row_stride + c] = mat.e[r * 8 + c];",
+                        "    }",
+                        "  }",
+                        "}",
+                        "",
+                        f"inline __metal_sgmat_{tag} __metal_sg_mma_{tag}(",
+                        f"    __metal_sgmat_{tag} a, __metal_sgmat_{tag} b, __metal_sgmat_{tag} c) {{",
+                        f"  __metal_sgmat_{tag} out;",
+                        "  for (int r = 0; r < 8; ++r) {",
+                        "    for (int n = 0; n < 8; ++n) {",
+                        f"      {acc_ty} acc = ({acc_ty})c.e[r * 8 + n];",
+                        "      for (int k = 0; k < 8; ++k) {",
+                        f"        acc += ({acc_ty})a.e[r * 8 + k] * ({acc_ty})b.e[k * 8 + n];",
+                        "      }",
+                        f"      out.e[r * 8 + n] = ({elem_ty})acc;",
+                        "    }",
+                        "  }",
+                        "  return out;",
+                        "}",
+                        "",
+                    ]
+                )
         if struct_defs:
             msl_lines.append("")
         msl_lines.extend(
