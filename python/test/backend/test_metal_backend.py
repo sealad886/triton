@@ -652,6 +652,9 @@ class TestMetalDriver:
         props = utils.get_device_properties()
         assert "max_shared_mem" in props
         assert "max_threadgroup_memory_length" in props
+        assert "mem_clock_rate" in props
+        assert "mem_bus_width" in props
+        assert "multiprocessor_count" in props
 
     def test_load_binary_runtime_contract(self):
         from third_party.metal.backend.driver import MetalUtils
@@ -716,6 +719,35 @@ class TestMetalDriver:
             assert str(device) == "mps"
         except ImportError:
             pytest.skip("torch not available")
+
+    def test_set_current_device_validation(self):
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver()
+        driver.set_current_device(0)
+        with pytest.raises(ValueError, match="single logical device"):
+            driver.set_current_device(1)
+
+    def test_get_device_interface_contract(self):
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver()
+        di = driver.get_device_interface()
+        assert di.current_device() == 0
+        start = di.Event(enable_timing=True)
+        end = di.Event(enable_timing=True)
+        start.record()
+        end.record()
+        assert start.elapsed_time(end) >= 0.0
+
+    def test_clear_cache_noop_and_tensor(self):
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver()
+        driver.clear_cache(None)
+        cache = MagicMock()
+        driver.clear_cache(cache)
+        cache.zero_.assert_called_once()
 
 
 # ── GPU family detection ────────────────────────────────────────────
@@ -3714,6 +3746,138 @@ class TestMetalRuntimeConformance:
         mock_enter.assert_called_once()
         mock_exit.assert_called_once()
 
+    def test_launcher_consumes_stream_argument(self):
+        from third_party.metal.backend.driver import (
+            MetalLauncher,
+            TorchMetalKernelHandle,
+        )
+
+        mock_lib = MagicMock()
+        mock_fn = MagicMock()
+        mock_lib.test_fn = mock_fn
+        handle = TorchMetalKernelHandle(
+            shader_library=mock_lib,
+            metadata={"name": "test_fn"},
+        )
+
+        launcher = MetalLauncher.__new__(MetalLauncher)
+        launcher.metadata = {"name": "test_fn"}
+        launcher._signature_layout = []
+        launcher._utils = MagicMock()
+        launcher._utils.activate_stream.return_value = (0, 7)
+
+        launcher(
+            1,
+            1,
+            1,
+            7,  # stream
+            handle,
+            {"name": "test_fn"},
+            {},
+            None,
+            None,
+        )
+
+        launcher._utils.activate_stream.assert_called_once_with(7)
+        launcher._utils.restore_stream.assert_called_once_with(0)
+
+    def test_source_handle_pyobjc_fallback(self):
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        dummy_handle = object()
+        with patch.object(
+            utils, "resolve_execution_mode", return_value="pyobjc"
+        ), patch.object(
+            utils, "get_device_properties", return_value={"gpu_family": "apple8"}
+        ), patch(
+            "third_party.metal.backend.driver._get_torch_module", return_value=None
+        ), patch.object(
+            utils, "_torch", None
+        ), patch(
+            "third_party.metal.backend.compiler.MetalBackend.make_metallib",
+            return_value=b"MTLB",
+        ), patch.object(
+            utils, "_load_metallib_handle", return_value=dummy_handle
+        ) as load_metallib:
+            handle = utils._load_msl_source_handle("kernel void test_fn() {}")
+
+        assert handle is dummy_handle
+        load_metallib.assert_called_once()
+
+    def test_utils_launch_consumes_stream(self):
+        from third_party.metal.backend.driver import MetalUtils, TorchMetalKernelHandle
+
+        mock_lib = MagicMock()
+        mock_lib.test_fn = MagicMock()
+        handle = TorchMetalKernelHandle(
+            shader_library=mock_lib,
+            metadata={"name": "test_fn"},
+        )
+        handle.launch_kernel = MagicMock()
+        utils = MetalUtils()
+        with patch.object(utils, "activate_stream", return_value=(0, 9)), patch.object(
+            utils, "restore_stream"
+        ) as restore_stream:
+            utils.launch(
+                1,
+                1,
+                1,
+                9,
+                handle,
+                False,
+                False,
+                {"name": "test_fn"},
+                {},
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                [],
+            )
+
+        handle.launch_kernel.assert_called_once()
+        assert handle.launch_kernel.call_args.kwargs["stream_id"] == 9
+        assert handle.launch_kernel.call_args.kwargs["sync"] is False
+        restore_stream.assert_called_once_with(0)
+
+    def test_utils_launch_rejects_cooperative_grid(self):
+        from third_party.metal.backend.driver import MetalUtils, TorchMetalKernelHandle
+
+        mock_lib = MagicMock()
+        mock_lib.test_fn = MagicMock()
+        handle = TorchMetalKernelHandle(
+            shader_library=mock_lib,
+            metadata={"name": "test_fn"},
+        )
+        handle.launch_kernel = MagicMock()
+        utils = MetalUtils()
+        with patch.object(utils, "activate_stream", return_value=(0, 1)), patch.object(
+            utils, "restore_stream"
+        ) as restore_stream:
+            with pytest.raises(RuntimeError, match="cooperative-grid"):
+                utils.launch(
+                    1,
+                    1,
+                    1,
+                    1,
+                    handle,
+                    True,
+                    False,
+                    {"name": "test_fn"},
+                    {},
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    [],
+                )
+        restore_stream.assert_called_once_with(0)
+
     # ── MetalDriver stream proxy ──────────────────────────────────
 
     @skip_non_darwin
@@ -4504,9 +4668,9 @@ define void @collision_kernel(ptr %out, i32 %n) {
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
         lines = msl.split("\n")
         int_decls = [l.strip() for l in lines if l.strip().startswith("int x_0")]
-        assert len(int_decls) >= 2, (
-            f"Expected at least 2 distinct x_0* declarations; got: {int_decls}"
-        )
+        assert (
+            len(int_decls) >= 2
+        ), f"Expected at least 2 distinct x_0* declarations; got: {int_decls}"
 
 
 class TestMetalAudit2AttrGroupWithDebugMetadata:
@@ -4527,9 +4691,9 @@ define void @attrdbg_kernel(ptr %out) {
 """
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
-        assert "thread_position_in_threadgroup.x" in msl, (
-            "Call with #N before !dbg was not matched after line cleaning"
-        )
+        assert (
+            "thread_position_in_threadgroup.x" in msl
+        ), "Call with #N before !dbg was not matched after line cleaning"
 
     def test_void_call_attr_group_before_comment(self):
         """#N before ; comment must be stripped."""
@@ -4546,9 +4710,9 @@ declare void @llvm.lifetime.end.p0(i64, ptr)
 """
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
-        assert "UNSUPPORTED" not in msl, (
-            "Void call with #N before ; comment was not cleaned properly"
-        )
+        assert (
+            "UNSUPPORTED" not in msl
+        ), "Void call with #N before ; comment was not cleaned properly"
 
 
 class TestMetalAudit2PowiUsePown:
@@ -4588,6 +4752,6 @@ declare float @llvm.powi.f32.i32(float, i32)
 """
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
-        assert "static_cast<float>" not in msl, (
-            "pown() takes integer exponent; float cast is unnecessary"
-        )
+        assert (
+            "static_cast<float>" not in msl
+        ), "pown() takes integer exponent; float cast is unnecessary"

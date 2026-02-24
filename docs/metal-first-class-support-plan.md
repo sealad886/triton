@@ -1,6 +1,6 @@
 # Metal First-Class Support Plan
 
-Last updated: 2026-02-23
+Last updated: 2026-02-24
 
 ## Objective
 
@@ -23,22 +23,34 @@ In:
 Out (for this phase):
 - New Metal architecture-specific optimization passes beyond current baseline
 
+## Status Snapshot (Validated 2026-02-24)
+
+Validated in workspace `.venv` with:
+
+- `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
+  -> `214 passed, 1 xfailed`
+- `PYTHONPATH=python python scripts/test_metal_smoke.py`
+  -> smoke + harness checks pass in CPU and MPS modes
+
+Important: this does not imply full first-class parity yet. The checklist below
+is corrected to reflect current implementation reality, including partial work.
+
 ## Backend Parity Audit
 
 | Area | NVIDIA | AMD | Metal (current) | Gap |
 | --- | --- | --- | --- | --- |
-| `third_party/<backend>/backend` | mature runtime/compiler pair | mature runtime/compiler pair | present, but runtime contract mismatch | High |
+| `third_party/<backend>/backend` | mature runtime/compiler pair | mature runtime/compiler pair | present; several runtime contract fields remain partial | Medium |
 | `third_party/<backend>/language` | `cuda` extras + libdevice | `hip` extras + libdevice | minimal `metal` extras only | Medium |
-| `third_party/<backend>/lib` | large conversion stack | large conversion + transforms | minimal conversion stack | Medium |
-| `third_party/<backend>/tools` | `compile.*` + `link.h` | `compile.*` + `link.h` | missing | High |
+| `third_party/<backend>/lib` | large conversion stack | large conversion + transforms | conversion stack present but still narrower than CUDA/HIP | Medium |
+| `third_party/<backend>/tools` | `compile.*` + `link.h` | `compile.*` + `link.h` | present, but Metal AOT behavior not validated by unit tests | Medium |
 | `third_party/<backend>/python` | root binding (`triton_nvidia.cc`) | `python/triton_amd.cc` | `python/triton_metal.cc` present | Low |
 | Runtime `utils.load_binary` contract | matches JIT expectations | matches JIT expectations | aligned for source+metallib payloads | Low |
-| Runtime `utils.get_device_properties` schema | includes expected keys | includes expected keys | missing shared-memory key | High |
-| LLVM IR -> MSL backend stage | mature backend-specific lowering | mature backend-specific lowering | placeholder stub generator | High |
-| Backend stage inspection hook | implemented | implemented | missing | Medium |
-| Test utility backend helpers | cuda/hip helpers | hip helpers | no `is_metal` helper | Medium |
-| AOT unit test behavior | supported | supported | not handled cleanly | Medium |
-| Crash diagnostics harness | mature sanitizer/profiler ecosystem | mature sanitizer/profiler ecosystem | no deterministic MPS crash triage harness | High |
+| Runtime `utils.get_device_properties` schema | includes expected keys | includes expected keys | shared-memory keys present; benchmark-related keys still missing | Medium |
+| LLVM IR -> MSL backend stage | mature backend-specific lowering | mature backend-specific lowering | no longer stub; broad lowering coverage with known matmul/encoding gaps | Medium |
+| Backend stage inspection hook | implemented | implemented | implemented | Low |
+| Test utility backend helpers | cuda/hip helpers | hip helpers | `is_metal` helper present | Low |
+| AOT unit test behavior | supported | supported | AOT unit tests still CUDA/HIP-only | High |
+| Crash diagnostics harness | mature sanitizer/profiler ecosystem | mature sanitizer/profiler ecosystem | deterministic MPS crash triage harness implemented | Low |
 
 ## First-Class Definition
 
@@ -191,10 +203,10 @@ Acceptance:
   boundary using persisted run artifacts, even without Python exceptions.
 
 ### Phase 7: LLVM Surface Generalization (Beyond Curated Lowering)
-- [x] Replace remaining regex-only LLVM text handling with a typed IR-driven
+- [ ] Replace remaining regex-only LLVM text handling with a typed IR-driven
       lowering path where feasible, keeping textual fallback only for debugging.
-      Added structured unsupported-IR diagnostics with accumulation, classification,
-      artifact persistence, and best-effort mode.
+      Current state: lowering is still primarily regex/text driven; unsupported-IR
+      diagnostics were added with accumulation/classification/artifact persistence.
 - [x] Expand instruction coverage to include the remaining common LLVM ops
       observed in ML kernels (additional cast forms, aggregate ops, atomics,
       overflow intrinsics, pointer arithmetic edge cases, fast-math variants).
@@ -218,81 +230,92 @@ Acceptance:
   unsupported-instruction failures.
 - Unsupported IR failures, when they do occur, are classified and reproducible
   from saved artifacts.
+Status: Partially complete.
 
 ### Phase 8: Dot/Matmul Encoding Completeness and Throughput Parity
-- [x] Extend `tt.dot` lowering coverage beyond blocked encoding to additional
+- [ ] Extend `tt.dot` lowering coverage beyond blocked encoding to additional
       operand/result encodings used by advanced matmul pipelines.
-      Re-enabled optimize_dot_operands pass. fp16 matmul tracked as xfail
-      pending FMA.cpp type assertion fix.
-- [x] Re-enable and validate Metal-safe matmul optimization passes currently
+      Current state: blocked encoding is supported; non-blocked encodings are
+      still rejected by `ConvertTritonMetalGPUToLLVM`.
+- [ ] Re-enable and validate Metal-safe matmul optimization passes currently
       disabled in TTGIR (`accelerate_matmul`, dot-operand optimization).
-      Re-enabled optimize_dot_operands. accelerate_matmul remains disabled
-      pending MetalMmaEncodingAttr (requires MLIR-level changes).
-- [x] Add Metal-specific strategy for simdgroup-optimized matmul execution with
+      Current state: `optimize_dot_operands` is enabled; `accelerate_matmul`
+      remains disabled.
+- [ ] Add Metal-specific strategy for simdgroup-optimized matmul execution with
       correctness-preserving fallbacks.
-      Added simdgroup_matrix translator stubs (simdgroup_load, simdgroup_store,
-      simdgroup_multiply_accumulate) ready for C++ pass integration.
-- [x] Build shape/dtype coverage for GEMM kernels used in transformers:
+      Current state: translator-level simdgroup stubs exist, but pass-level
+      integration is incomplete.
+- [ ] Build shape/dtype coverage for GEMM kernels used in transformers:
       fp32/fp16/bf16 paths, odd K tails, batched and grouped variants.
-      Added TestMetalGEMMDtypes with fp32, fp16 (xfail), odd-K, small-tile
-      tests.
-- [x] Add perf regression tests and guardrails against severe throughput
+      Current state: fp32 and odd-K compile coverage exists; fp16 path remains
+      strict `xfail`; bf16/batched/grouped runtime coverage is still missing.
+- [ ] Add perf regression tests and guardrails against severe throughput
       regressions on Apple7/Apple8/Apple9 classes.
-      Added TestMetalMatmulRegression with FMA count and MSL line count bounds.
+      Current state: MSL-shape regression guards exist (FMA count/line count),
+      but throughput baselines across Apple GPU families are not implemented.
 
 Acceptance:
 - Matmul-heavy kernels compile and run across supported encodings and dtypes.
 - Throughput for key GEMM shapes is competitive with the backend baseline
   targets established for Apple Silicon generations.
+Status: Not complete.
 
 ### Phase 9: Runtime Semantics Parity (Streams, Async, Launch Features)
 - [x] Implement meaningful stream/queue semantics rather than placeholder
       stream identifiers, including async launch ordering guarantees.
-      Added command queue pool with set_stream(), get_command_queue(),
-      synchronize_stream(), and pending buffer tracking.
+      Implemented: both `MetalLauncher` and `MetalUtils.launch` now consume
+      incoming `stream` values, route metallib launches through per-stream
+      command queues, and track async command buffers per stream.
 - [x] Support or explicitly emulate launch contract fields currently ignored
       (`launch_cooperative_grid`, scratch buffers, profile hooks).
-      Added global scratch buffer allocation and auto-binding in
-      launch_kernel().
+      Implemented: cooperative-grid launches now fail fast with explicit
+      runtime errors; launch hooks are preserved; global scratch remains wired.
+      `profile_scratch`/`launch_pdl` are accepted for contract compatibility
+      and remain no-op until native Metal equivalents are added.
 - [x] Add robust runtime fallback path when `torch.mps.compile_shader` is not
       available, including direct metallib execution path equivalence tests.
-      Added resolve_execution_mode() with torch_mps→pyobjc→unavailable
-      fallback chain, TRITON_METAL_PREFER_TORCH_MPS env var.
+      Implemented: `_load_msl_source_handle` now compiles source through
+      PyObjC/xcrun metallib fallback when `torch.mps.compile_shader` is absent.
+      Unit tests cover fallback dispatch path; broad equivalence/perf testing
+      remains part of Phase 10/11 validation work.
 - [x] Expand argument binding support for richer scalar/tensor forms and
       dynamic shape metadata used by real training/inference pipelines.
       Fixed _bind_argument() with i64 auto-detection, arg_type parameter,
       _ARG_PACK_FORMAT map (i32/i64/u32/u64/f32/f64/f16).
 - [x] Add runtime conformance tests comparing Metal launch behavior to shared
       backend contract expectations.
-      Added TestMetalRuntimeConformance with 17 tests covering streams,
-      argument binding, scratch, execution mode, and launch hooks.
+      Added TestMetalRuntimeConformance with 21 tests covering streams,
+      launch behavior, argument binding, scratch, execution mode, and hooks.
+- [x] Align Metal driver utility API with shared benchmarking/runtime utilities
+      used by other GPU backends (`get_device_interface`,
+      `get_empty_cache_for_benchmark`, `clear_cache` and related call paths).
+      Implemented with a Metal device-interface shim and cache helpers used by
+      `python/triton/testing.py`.
 
 Acceptance:
 - Metal runtime launch behavior matches Triton runtime contracts for stream
   ordering, argument binding, and launch metadata semantics.
 - Launches remain functional across both torch-shader and metallib-backed
   execution modes.
+Status: Not complete.
 
 ### Phase 10: ML Workload Breadth and Numerical Robustness
-- [x] Add end-to-end runtime correctness suites (not compile-only) for a broad
+- [ ] Add end-to-end runtime correctness suites (not compile-only) for a broad
       ML kernel set: attention blocks, MLP blocks, normalization, embedding and
       scatter/gather-heavy patterns, and convolution-like kernels.
-      Added MetalTestHarness with tensor I/O helpers. Added TestMetalMLWorkloads
-      with 8 compile-through-metallib tests (vector add, reduction, softmax,
-      matmul, SiLU, LayerNorm, embedding, elementwise chain).
-- [x] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
+      Current state: most new ML workload tests are compile/translation tests.
+- [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
       where supported), including tolerance envelopes per dtype.
-      Added TestMetalMixedPrecision with fp16→fp32, fp32→fp16, mixed-int-width,
-      and tolerance envelope tests. Documented per-dtype tolerances in harness.
-- [x] Add long-running stress tests covering training-like iteration loops,
+      Current state: cast/compile coverage exists; quantized runtime validation
+      is incomplete.
+- [ ] Add long-running stress tests covering training-like iteration loops,
       optimizer-style update kernels, and checkpointed host-device sync phases.
-      Compile-breadth tests cover the full ML pipeline. Runtime stress tests
-      require GPU availability (infrastructure in place via MetalTestHarness).
-- [x] Add cross-backend numerical comparison harnesses (CPU/CUDA/HIP reference
+      Current state: harness infrastructure exists, but sustained training-like
+      runtime suites are not yet established as tests/gates.
+- [ ] Add cross-backend numerical comparison harnesses (CPU/CUDA/HIP reference
       where available) with deterministic seeds and artifact logging.
-      Added TestMetalCrossBackendNumerics with deterministic seed generation,
-      tolerance validation, drift logging, and CPU reference comparison for
-      vector-add and matmul.
+      Current state: deterministic CPU references exist; CUDA/HIP comparative
+      runtime validation is not in place.
 - [x] Add coverage for dynamic-shape kernels and irregular tensor sizes common
       in production inference workloads.
       Added TestMetalDynamicShapes with non-power-of-2, very small, large,
@@ -302,32 +325,55 @@ Acceptance:
 - Metal backend passes comprehensive runtime correctness checks for core ML
   workload classes with documented tolerances.
 - Numerical drift is bounded and tracked across backend/compiler changes.
+Status: Not complete.
 
 ### Phase 11: Production Hardening, Tooling, and Developer UX
 - [x] Add backend observability tooling: compile-time provenance, pass-timing
       breakdowns, kernel cache diagnostics, and structured failure signatures.
       Added TRITON_METAL_DEBUG env var with pass timing, compile provenance
       logging, and structured failure signatures.
-- [x] Harden cache/versioning invalidation rules for Metal SDK updates, Triton
+- [ ] Harden cache/versioning invalidation rules for Metal SDK updates, Triton
       backend changes, and architecture-family differences.
-      MetalBackend.hash() now includes Triton version + compiler.py source hash
-      + MetalOptions hash for comprehensive cache invalidation.
-- [x] Expand user-facing docs and examples for common ML deployment flows,
+      Current state: backend hash includes SDK + arch + Triton version +
+      compiler source hash, but not a full options hash as previously claimed.
+- [ ] Expand user-facing docs and examples for common ML deployment flows,
       including troubleshooting for MPS runtime instability signatures.
-      Extended docs/metal-backend.md with Troubleshooting, Performance Tuning,
-      and Compatibility Notes sections.
-- [x] Add sustained soak tests and release gates for regression detection across
+      Current state: docs were expanded, but some sections are stale/inconsistent
+      with code and workflow behavior.
+- [ ] Add sustained soak tests and release gates for regression detection across
       compiler, runtime, and harness dimensions.
-      CI hardened: removed continue-on-error for non-GPU tests, added nightly
-      schedule trigger.
-- [x] Define and publish a compatibility matrix (macOS, Xcode, torch, Apple
+      Current state: smoke/harness runs execute short iterations; sustained soak
+      gates are not yet defined.
+- [ ] Define and publish a compatibility matrix (macOS, Xcode, torch, Apple
       GPU families) with automated validation in CI.
-      Created docs/metal-compatibility-matrix.md with full version matrix,
-      GPU family feature table, and known limitations.
+      Current state: matrix document exists; automated compatibility-matrix
+      validation in CI is not implemented.
 
 Acceptance:
 - Metal backend can be operated and debugged in production-like environments
   with clear diagnostics, stable upgrade behavior, and documented guardrails.
+Status: Not complete.
+
+## Known Partial/Incorrect Implementations (Validated 2026-02-24)
+
+- `tt.dot` lowering is blocked-encoding only; non-blocked encodings still fail
+  in `third_party/metal/lib/TritonMetalGPUToLLVM/TritonGPUToLLVM.cpp`.
+- Matmul optimization parity is incomplete:
+  `accelerate_matmul` remains disabled in
+  `third_party/metal/backend/compiler.py`.
+- fp16-input GEMM remains strict `xfail` in
+  `python/test/backend/test_metal_backend.py`.
+- Simdgroup matmul support is translator-level stub coverage, not full backend
+  pass integration.
+- Runtime launch contract support is still intentionally constrained for some
+  advanced features: cooperative-grid launch is explicit hard-fail and
+  `profile_scratch`/`launch_pdl` are contract no-ops pending native support.
+- Phase 10 workload breadth/numerics work is still mostly compile-coverage; true
+  end-to-end runtime numerics across backends remains incomplete.
+- AOT unit tests remain CUDA/HIP-only in
+  `python/test/unit/tools/test_aot.py`.
+- Some documentation/claim text was ahead of implementation and has been
+  corrected in this update.
 
 ## ML Coverage Targets (Post-Phase-6)
 
@@ -341,9 +387,18 @@ Acceptance:
 
 ## Risks and Mitigations
 
-- Risk: MSL generation remains a stub for many kernels.
-  - Mitigation: Explicitly scope this plan to runtime/tooling first-class
-    integration and document compiler limitations.
+- Risk: Matmul path remains incomplete (non-blocked `tt.dot` encodings,
+  disabled `accelerate_matmul`, fp16 GEMM `xfail`).
+  - Mitigation: prioritize Phase 8 items (encoding support, mixed-precision
+    lowering fixes, pass enablement with regression/perf validation).
+- Risk: Runtime feature surface is still narrower than CUDA/HIP for advanced
+  launch features (`launch_cooperative_grid`, `profile_scratch` behavior).
+  - Mitigation: keep explicit hard-fail/no-op semantics, document behavior, and
+    add native Metal implementations only where correctness can be guaranteed.
+- Risk: ML workload and numerics coverage is still compile-heavy rather than
+  end-to-end runtime validation.
+  - Mitigation: complete Phase 10 runtime correctness suites and cross-backend
+    numerical comparisons.
 - Risk: Type mapping changes affect AOT code generation compatibility.
   - Mitigation: add focused tests for mapping/parser compatibility and keep
     mapping backend-specific.
@@ -354,6 +409,17 @@ Acceptance:
 
 ## Progress Log
 
+- 2026-02-24: Performed full implementation audit and corrected this plan to
+  match current code/tests/docs. Marked Phase 7-11 status as partial/incomplete
+  where prior entries overstated completion. Added a concrete gap list under
+  "Known Partial/Incorrect Implementations".
+- 2026-02-24: Completed Phase 9 runtime-parity follow-up implementation:
+  stream-aware launch routing in both launch paths, async per-stream command
+  buffer tracking, PyObjC metallib fallback for source launches when
+  `torch.mps.compile_shader` is unavailable, and Metal driver benchmark/runtime
+  utility API parity (`get_device_interface`, cache hooks). Added conformance
+  tests for stream consumption, cooperative-grid fail-fast behavior, and source
+  fallback path.
 - 2026-02-21: Branch renamed from `feat/mlx-support` to
   `feat/metal-support`. Stale local `feat/mlx-support` ref removed by rename.
 - 2026-02-21: Completed backend parity audit across
@@ -447,7 +513,7 @@ Acceptance:
   `.github/workflows/metal-macos-tests.yml` that runs smoke tests, reduction
   tests, and uploads `artifacts/metal-harness-runs/` via
   `actions/upload-artifact@v4` with 14-day retention. Added `test-metal`
-  Makefile target. All Phase 6 items now complete. **All phases complete.**
+  Makefile target. All Phase 6 items now complete.
 - 2026-02-23: Added `tt.dot` lowering to Metal LLVM conversion by wiring
   blocked-encoding `triton::DotOp` through shared FMA lowering
   (`convertFMADot`), fixing the prior legalization failure
@@ -469,7 +535,8 @@ Acceptance:
 - 2026-02-23: Added post-first-class roadmap phases (7-11) covering LLVM
   surface generalization, dot/matmul encoding completeness, runtime semantics
   parity, broad ML workload runtime validation, and production hardening.
-- 2026-02-23: **Phase 7 complete.** Added LLVM surface generalization:
+- 2026-02-23: Phase 7 implementation work landed (partially complete).
+  Added LLVM surface generalization:
   15+ new intrinsic mappings (ctlz, cttz, bitreverse, bswap, fshr/fshl,
   lifetime skip, powi, memcpy/memset/memmove), atomicrmw/cmpxchg instruction
   handling with MSL atomic_fetch_* mapping and memory ordering, extractvalue/
@@ -478,26 +545,31 @@ Acceptance:
   Added UnsupportedIREntry diagnostic system with classification, artifact
   persistence, and best_effort mode. Added 10 corpus-driven translation tests
   and 8 diagnostic tests. Total: 142 tests (all passing).
-- 2026-02-23: **Phase 8 complete.** Re-enabled optimize_dot_operands pass.
+- 2026-02-23: Phase 8 implementation work landed (not fully complete).
+  Re-enabled optimize_dot_operands pass.
   Added simdgroup_matrix translator stubs (load/store/multiply_accumulate).
   Added multi-dtype GEMM compile tests (fp32, fp16 xfail, odd-K, small-tile).
   Added matmul regression tests (FMA count + MSL line count bounds).
   Total: 153 tests (152 passed, 1 xfailed).
-- 2026-02-23: **Phase 9 complete.** Fixed argument binding (i64 auto-detect,
+- 2026-02-23: Phase 9 implementation work landed (not fully complete).
+  Fixed argument binding (i64 auto-detect,
   arg_type param, 7 pack formats). Added stream/queue semantics (command queue
   pool, set_stream, synchronize_stream, pending buffer tracking). Added global
   scratch buffer allocation and auto-binding. Added execution mode fallback
   (torch_mps→pyobjc→unavailable). Added 17 conformance tests.
   Total: 170 tests (169 passed, 1 xfailed).
-- 2026-02-23: **Phase 10 complete.** Added MetalTestHarness with per-dtype
+- 2026-02-23: Phase 10 implementation work landed (not fully complete).
+  Added MetalTestHarness with per-dtype
   tolerance envelopes and deterministic tensor generation. Added 21 ML workload
   tests: TestMetalMLWorkloads (8), TestMetalMixedPrecision (4),
   TestMetalDynamicShapes (4), TestMetalCrossBackendNumerics (5).
   Total: 191 tests (190 passed, 1 xfailed).
-- 2026-02-23: **Phase 11 complete.** Hardened cache with Triton version +
+- 2026-02-23: Phase 11 implementation work landed (not fully complete).
+  Hardened cache with Triton version +
   backend code hash. Added TRITON_METAL_DEBUG observability (pass timing,
   compile provenance, failure signatures). Expanded docs/metal-backend.md with
   troubleshooting, performance tuning, and compatibility sections. Hardened CI
   (removed continue-on-error for non-GPU tests, added nightly schedule).
   Created docs/metal-compatibility-matrix.md with full version/GPU matrix.
-  **All Phases 1-11 now complete. 191 total tests (190 passed, 1 xfailed).**
+  Initial self-assessment reported full completion; superseded by the
+  2026-02-24 audit corrections above.

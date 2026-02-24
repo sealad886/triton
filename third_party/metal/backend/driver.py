@@ -6,12 +6,12 @@ with the Metal framework for device management, memory allocation, and
 kernel dispatch.
 """
 
-import functools
 import logging
 import os
 import struct
 import sys
 import threading
+import time
 
 from triton.backends.compiler import GPUTarget
 from triton.backends.driver import DriverBase
@@ -30,6 +30,7 @@ def _get_numpy_module():
     if not _numpy_checked:
         try:
             import numpy
+
             _numpy_module = numpy
         except ImportError:
             pass
@@ -39,6 +40,7 @@ def _get_numpy_module():
 
 def _ceildiv(a: int, b: int) -> int:
     return (a + b - 1) // b
+
 
 # ── Argument packing format map ─────────────────────────────────────
 
@@ -235,6 +237,51 @@ def _normalize_scalar_arg(sig, arg):
     return arg
 
 
+class _MetalTimingEvent:
+    """Best-effort timing event implementation for Metal benchmark paths."""
+
+    def __init__(self, enable_timing=True):
+        self.enable_timing = enable_timing
+        self._timestamp = None
+
+    def record(self):
+        # Keep timing deterministic for async MPS execution by synchronizing
+        # before taking host-side timestamps.
+        torch = _get_torch_module()
+        if (
+            torch is not None
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "synchronize")
+        ):
+            torch.mps.synchronize()
+        self._timestamp = time.perf_counter()
+
+    def elapsed_time(self, end_event):
+        if self._timestamp is None or end_event._timestamp is None:
+            raise RuntimeError("Event timing requested before record()")
+        return (end_event._timestamp - self._timestamp) * 1000.0
+
+
+class _MetalDeviceInterface:
+    """Subset of torch.cuda-like API consumed by triton.testing."""
+
+    Event = _MetalTimingEvent
+
+    @staticmethod
+    def synchronize():
+        torch = _get_torch_module()
+        if (
+            torch is not None
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "synchronize")
+        ):
+            torch.mps.synchronize()
+
+    @staticmethod
+    def current_device():
+        return 0
+
+
 class MetalUtils:
     """Utility class for Metal device operations."""
 
@@ -276,32 +323,79 @@ class MetalUtils:
         """Return the active stream id."""
         return self._current_stream
 
+    def _coerce_stream_id(self, stream_id) -> int:
+        if stream_id is None:
+            return self._current_stream
+        if isinstance(stream_id, bool):
+            return int(stream_id)
+        if isinstance(stream_id, int):
+            if stream_id < 0:
+                raise ValueError(f"Metal stream id must be non-negative, got {stream_id}")
+            return stream_id
+        for attr in ("stream_id", "cuda_stream"):
+            if hasattr(stream_id, attr):
+                value = int(getattr(stream_id, attr))
+                if value < 0:
+                    raise ValueError(
+                        f"Metal stream id from {attr} must be non-negative, got {value}"
+                    )
+                return value
+        try:
+            value = int(stream_id)
+        except Exception as exc:
+            raise TypeError(f"Unsupported stream identifier: {stream_id!r}") from exc
+        if value < 0:
+            raise ValueError(f"Metal stream id must be non-negative, got {value}")
+        return value
+
     def set_stream(self, stream_id: int) -> None:
         """Switch to the given stream, creating its command queue lazily."""
+        stream_id = self._coerce_stream_id(stream_id)
         self._current_stream = stream_id
         if stream_id not in self._command_queues and self.device is not None:
             self._command_queues[stream_id] = self.device.newCommandQueue()
             self._pending_buffers[stream_id] = []
 
+    def activate_stream(self, stream_id) -> tuple[int, int]:
+        """Activate a launch stream and return (previous_stream, active_stream)."""
+        target_stream = self._coerce_stream_id(stream_id)
+        previous_stream = self._current_stream
+        if target_stream != previous_stream:
+            self.set_stream(target_stream)
+        return previous_stream, target_stream
+
+    def restore_stream(self, previous_stream: int) -> None:
+        previous_stream = self._coerce_stream_id(previous_stream)
+        if previous_stream != self._current_stream:
+            self.set_stream(previous_stream)
+
     def get_command_queue(self, stream_id: int | None = None) -> object:
         """Return the command queue for *stream_id* (default: current)."""
-        if stream_id is None:
-            stream_id = self._current_stream
+        stream_id = self._coerce_stream_id(stream_id)
         if stream_id not in self._command_queues:
             self.set_stream(stream_id)
+        if stream_id not in self._command_queues:
+            raise RuntimeError("No Metal command queue available for requested stream")
         return self._command_queues[stream_id]
 
     def synchronize_stream(self, stream_id: int | None = None) -> None:
         """Wait for all pending command buffers on the given stream."""
-        if stream_id is None:
-            stream_id = self._current_stream
+        stream_id = self._coerce_stream_id(stream_id)
         pending = self._pending_buffers.get(stream_id, [])
         for buf in pending:
             buf.waitUntilCompleted()
         self._pending_buffers[stream_id] = []
+        torch = self._torch or _get_torch_module()
+        if (
+            torch is not None
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "synchronize")
+        ):
+            torch.mps.synchronize()
 
     def track_command_buffer(self, stream_id: int, cmd_buf: object) -> None:
         """Track a committed command buffer for later synchronization."""
+        stream_id = self._coerce_stream_id(stream_id)
         self._pending_buffers.setdefault(stream_id, []).append(cmd_buf)
 
     def resolve_execution_mode(self) -> str:
@@ -356,6 +450,9 @@ class MetalUtils:
                 "max_threads_per_threadgroup": 0,
                 "max_threadgroup_memory_length": 0,
                 "gpu_family": "unknown",
+                "mem_clock_rate": 0,
+                "mem_bus_width": 0,
+                "multiprocessor_count": 0,
             }
 
         max_threads = 1
@@ -373,6 +470,11 @@ class MetalUtils:
             "max_threads_per_threadgroup": max_threads,
             "max_threadgroup_memory_length": max_threadgroup_memory_length,
             "gpu_family": _detect_gpu_family(dev),
+            # Metal does not expose DRAM clocks/bus width through the public API.
+            # We provide stable sentinel values for shared utility compatibility.
+            "mem_clock_rate": 0,
+            "mem_bus_width": 0,
+            "multiprocessor_count": 0,
         }
 
     def _load_metallib_handle(self, binary_bytes, metadata=None):
@@ -448,16 +550,6 @@ class MetalUtils:
                 "Install PyObjC (pip install pyobjc-framework-Metal) "
                 "or use a torch build with torch.mps.compile_shader support."
             )
-        torch = self._torch or _get_torch_module()
-        if (
-            torch is None
-            or not hasattr(torch, "mps")
-            or not hasattr(torch.mps, "compile_shader")
-        ):
-            raise RuntimeError(
-                "torch.mps.compile_shader is required for Metal runtime launches. "
-                f"Current execution mode: {mode}"
-            )
 
         if isinstance(source, str):
             source_text = source
@@ -469,14 +561,47 @@ class MetalUtils:
                 f"got: {type(source)}"
             )
 
-        try:
-            shader_library = torch.mps.compile_shader(source_text)
-        except Exception as e:
-            raise RuntimeError(f"Failed to compile Metal shader source: {e}")
-
-        return TorchMetalKernelHandle(
-            shader_library=shader_library, metadata=metadata, source_text=source_text
+        torch = self._torch or _get_torch_module()
+        has_torch_compile_shader = (
+            torch is not None
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "compile_shader")
         )
+
+        if has_torch_compile_shader:
+            try:
+                shader_library = torch.mps.compile_shader(source_text)
+            except Exception as e:
+                raise RuntimeError(f"Failed to compile Metal shader source: {e}")
+            return TorchMetalKernelHandle(
+                shader_library=shader_library,
+                metadata=metadata,
+                source_text=source_text,
+            )
+
+        if mode != "pyobjc":
+            raise RuntimeError(
+                "torch.mps.compile_shader is required for Metal runtime launches "
+                "unless PyObjC fallback mode is active. "
+                f"Current execution mode: {mode}"
+            )
+
+        try:
+            from third_party.metal.backend.compiler import MetalBackend, MetalOptions
+
+            arch = self.get_device_properties().get("gpu_family", "apple8")
+            opts = MetalOptions(arch=arch)
+            metallib = MetalBackend.make_metallib(source_text, {}, opts)
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to compile Metal shader source through PyObjC fallback "
+                f"path: {e}"
+            )
+
+        fallback_metadata = dict(metadata)
+        fallback_metadata.setdefault("source_mode", "pyobjc_metallib_fallback")
+        fallback_metadata.setdefault("name", metadata.get("name"))
+        return self._load_metallib_handle(metallib, metadata=fallback_metadata)
 
     def load_binary(self, *args):
         """
@@ -540,22 +665,46 @@ class MetalUtils:
         args,
     ):
         """Launch a Metal compute kernel."""
-        handle = function
-        if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
-            raise RuntimeError("Expected Metal kernel handle for Metal launch")
+        previous_stream, active_stream = self.activate_stream(stream)
+        if launch_enter_hook is not None:
+            launch_enter_hook(kernel_metadata, launch_metadata)
 
-        kernel_name = _resolve_and_validate_kernel_name(kernel_metadata, None, handle)
+        try:
+            if launch_cooperative_grid:
+                raise RuntimeError(
+                    "Metal backend does not currently support cooperative-grid launches"
+                )
 
-        num_warps = _extract_num_warps(kernel_metadata) or 4
-        block = (max(1, int(num_warps) * 32), 1, 1)
-        grid = _scale_grid_for_pyobjc(handle, (grid_x, grid_y, grid_z), block)
+            # Accepted to preserve launch contract parity with other backends.
+            _ = launch_pdl, global_scratch, profile_scratch, arg_annotations, kernel_signature
 
-        handle.launch_kernel(
-            name=kernel_name,
-            args=list(args) if args else [],
-            grid=grid,
-            block=block,
-        )
+            handle = function
+            if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
+                raise RuntimeError("Expected Metal kernel handle for Metal launch")
+
+            kernel_name = _resolve_and_validate_kernel_name(kernel_metadata, None, handle)
+
+            num_warps = _extract_num_warps(kernel_metadata) or 4
+            block = (max(1, int(num_warps) * 32), 1, 1)
+            grid = _scale_grid_for_pyobjc(handle, (grid_x, grid_y, grid_z), block)
+
+            launch_kwargs = {
+                "name": kernel_name,
+                "args": list(args) if args else [],
+                "grid": grid,
+                "block": block,
+                "sync": False,
+                "stream_id": active_stream,
+                "utils": self,
+            }
+            if isinstance(handle, MetalKernelHandle):
+                launch_kwargs["command_queue"] = self.get_command_queue(active_stream)
+
+            handle.launch_kernel(**launch_kwargs)
+        finally:
+            if launch_exit_hook is not None:
+                launch_exit_hook(kernel_metadata, launch_metadata)
+            self.restore_stream(previous_stream)
 
 
 class TorchMetalKernelHandle:
@@ -587,7 +736,16 @@ class TorchMetalKernelHandle:
             self._kernels[name] = fn
             return fn
 
-    def launch_kernel(self, name, args=None, grid=(1, 1, 1), block=(256, 1, 1)):
+    def launch_kernel(
+        self,
+        name,
+        args=None,
+        grid=(1, 1, 1),
+        block=(256, 1, 1),
+        sync=True,
+        stream_id=None,
+        utils=None,
+    ):
         kernel = self.get_kernel(name)
         args = list(args) if args else []
         gx, gy, gz = (int(grid[0]), int(grid[1]), int(grid[2]))
@@ -598,6 +756,9 @@ class TorchMetalKernelHandle:
             kernel(*args, threads=threads, group_size=group_size)
         except Exception as e:
             raise RuntimeError(f"Failed to launch Metal kernel '{name}': {e}")
+        if sync:
+            utils = utils or MetalUtils()
+            utils.synchronize_stream(stream_id)
 
 
 class MetalKernelHandle:
@@ -665,6 +826,9 @@ class MetalKernelHandle:
         block: tuple[int, int, int] = (256, 1, 1),
         arg_types: list[str] | None = None,
         sync: bool = True,
+        command_queue=None,
+        stream_id: int | None = None,
+        utils=None,
     ):
         """
         Dispatch a compute kernel on the Metal device.
@@ -678,7 +842,10 @@ class MetalKernelHandle:
             sync: If True (default), wait for completion before returning
         """
         pipeline = self.get_pipeline(name)
-        cmd_buf = self.command_queue.commandBuffer()
+        queue = command_queue if command_queue is not None else self.command_queue
+        if queue is None:
+            raise RuntimeError("No Metal command queue available for kernel launch")
+        cmd_buf = queue.commandBuffer()
         encoder = cmd_buf.computeCommandEncoder()
         encoder.setComputePipelineState_(pipeline)
 
@@ -707,9 +874,10 @@ class MetalKernelHandle:
         if sync:
             cmd_buf.waitUntilCompleted()
         else:
-            MetalUtils().track_command_buffer(
-                MetalUtils().get_current_stream(), cmd_buf
-            )
+            utils = utils or MetalUtils()
+            if stream_id is None:
+                stream_id = utils.get_current_stream()
+            utils.track_command_buffer(stream_id, cmd_buf)
 
 
 def _bind_argument(device, encoder, idx, arg, arg_type: str | None = None):
@@ -793,6 +961,7 @@ class MetalLauncher:
     def __init__(self, src, metadata):
         self.metadata = metadata
         self.src = src
+        self._utils = MetalUtils()
         self._signature_layout = (
             list(src.signature.values()) if hasattr(src, "signature") else []
         )
@@ -810,44 +979,56 @@ class MetalLauncher:
         launch_exit_hook,
         *args,
     ):
+        utils = getattr(self, "_utils", None) or MetalUtils()
+        previous_stream, active_stream = utils.activate_stream(stream)
+
         if launch_enter_hook is not None:
             launch_enter_hook(kernel_metadata, launch_metadata)
 
-        handle = function
-        if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
-            raise RuntimeError("Expected Metal kernel handle for Metal launch")
+        try:
+            handle = function
+            if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
+                raise RuntimeError("Expected Metal kernel handle for Metal launch")
 
-        kernel_name = _resolve_and_validate_kernel_name(
-            kernel_metadata, self.metadata, handle
-        )
+            kernel_name = _resolve_and_validate_kernel_name(
+                kernel_metadata, self.metadata, handle
+            )
 
-        num_warps = (
-            _extract_num_warps(kernel_metadata)
-            or _extract_num_warps(self.metadata)
-            or _extract_num_warps(getattr(handle, "metadata", None))
-            or 4
-        )
-        block = (max(1, int(num_warps) * 32), 1, 1)
+            num_warps = (
+                _extract_num_warps(kernel_metadata)
+                or _extract_num_warps(self.metadata)
+                or _extract_num_warps(getattr(handle, "metadata", None))
+                or 4
+            )
+            block = (max(1, int(num_warps) * 32), 1, 1)
 
-        flat_args = _flatten_runtime_args(self._signature_layout, args)
-        runtime_args = []
-        for sig, arg in flat_args:
-            if isinstance(sig, str) and sig.startswith("*"):
-                runtime_args.append(_normalize_pointer_arg(arg))
-            else:
-                runtime_args.append(_normalize_scalar_arg(sig, arg))
+            flat_args = _flatten_runtime_args(self._signature_layout, args)
+            runtime_args = []
+            for sig, arg in flat_args:
+                if isinstance(sig, str) and sig.startswith("*"):
+                    runtime_args.append(_normalize_pointer_arg(arg))
+                else:
+                    runtime_args.append(_normalize_scalar_arg(sig, arg))
 
-        grid = _scale_grid_for_pyobjc(handle, (gridX, gridY, gridZ), block)
+            grid = _scale_grid_for_pyobjc(handle, (gridX, gridY, gridZ), block)
 
-        handle.launch_kernel(
-            name=kernel_name,
-            args=runtime_args,
-            grid=grid,
-            block=block,
-        )
+            launch_kwargs = {
+                "name": kernel_name,
+                "args": runtime_args,
+                "grid": grid,
+                "block": block,
+                "sync": False,
+                "stream_id": active_stream,
+                "utils": utils,
+            }
+            if isinstance(handle, MetalKernelHandle):
+                launch_kwargs["command_queue"] = utils.get_command_queue(active_stream)
 
-        if launch_exit_hook is not None:
-            launch_exit_hook(kernel_metadata, launch_metadata)
+            handle.launch_kernel(**launch_kwargs)
+        finally:
+            if launch_exit_hook is not None:
+                launch_exit_hook(kernel_metadata, launch_metadata)
+            utils.restore_stream(previous_stream)
 
 
 class MetalDriver(DriverBase):
@@ -894,7 +1075,10 @@ class MetalDriver(DriverBase):
         return 0  # Metal typically has one device
 
     def set_current_device(self, device_id):
-        pass  # Metal doesn't support device selection
+        if int(device_id) != 0:
+            raise ValueError(
+                f"Metal backend exposes a single logical device (0), got {device_id}"
+            )
 
     def get_current_stream(self, device_id=0):
         return self.utils.get_current_stream(device_id)
@@ -935,3 +1119,23 @@ class MetalDriver(DriverBase):
         from triton.testing import do_bench
 
         return do_bench
+
+    def get_device_interface(self):
+        return _MetalDeviceInterface()
+
+    def get_empty_cache_for_benchmark(self):
+        torch = _get_torch_module()
+        if torch is None or not hasattr(torch, "empty"):
+            return None
+        try:
+            cache_size = 256 * 1024 * 1024
+            return torch.empty(int(cache_size // 4), dtype=torch.int, device="mps")
+        except Exception:
+            return None
+
+    def clear_cache(self, cache):
+        if cache is None:
+            return
+        zero_ = getattr(cache, "zero_", None)
+        if callable(zero_):
+            zero_()
