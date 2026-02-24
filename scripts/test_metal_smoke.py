@@ -340,7 +340,16 @@ def _run_harness_script(script_name, mode, extra_args):
         f"smoke-{script_name.replace('.py', '')}-{mode}",
     ]
     cmd.extend(extra_args)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    with tempfile.TemporaryDirectory(prefix="triton-metal-smoke-cache-") as cache_dir:
+        env = os.environ.copy()
+        env["TRITON_CACHE_DIR"] = cache_dir
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env,
+        )
     if result.returncode != 0:
         print("FAIL: Harness script failed")
         print("  command:", " ".join(cmd))
@@ -394,6 +403,23 @@ def test_project_flow_harness_mps():
     )
 
 
+def test_training_loop_harness_cpu():
+    """Smoke-test training-loop stress harness in CPU mode."""
+    return _run_harness_script("metal_mps_training_loop_stress.py", "cpu", [])
+
+
+def test_training_loop_harness_mps():
+    """Smoke-test training-loop stress harness in MPS mode."""
+    if not _torch_mps_available():
+        print("SKIP: torch MPS backend unavailable")
+        return True
+    return _run_harness_script(
+        "metal_mps_training_loop_stress.py",
+        "mps",
+        ["--sync-before-transfer", "--sync-after-transfer"],
+    )
+
+
 def main():
     print("=" * 60)
     print("Metal Backend Smoke Tests")
@@ -409,6 +435,8 @@ def main():
         ("Transfer harness (MPS)", test_transfer_harness_mps),
         ("Project-flow harness (CPU)", test_project_flow_harness_cpu),
         ("Project-flow harness (MPS)", test_project_flow_harness_mps),
+        ("Training-loop harness (CPU)", test_training_loop_harness_cpu),
+        ("Training-loop harness (MPS)", test_training_loop_harness_mps),
     ]
 
     results = []

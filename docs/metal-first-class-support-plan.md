@@ -327,10 +327,13 @@ Status: Complete for current runtime contract scope.
       where supported), including tolerance envelopes per dtype.
       Current state: fp16 and bf16 runtime matmul validation are in place;
       int8/fp8 runtime validation is still incomplete.
-- [ ] Add long-running stress tests covering training-like iteration loops,
+- [x] Add long-running stress tests covering training-like iteration loops,
       optimizer-style update kernels, and checkpointed host-device sync phases.
-      Current state: harness infrastructure exists, but sustained training-like
-      runtime suites are not yet established as tests/gates.
+      Current state: added deterministic CPU/MPS
+      `metal_mps_training_loop_stress.py` with optimizer-style update phases,
+      transfer checkpoints, and crash-safe artifacts; smoke harness now runs it
+      in both modes. Sustained multi-hour soak gating remains tracked in
+      Phase 11.
 - [ ] Add cross-backend numerical comparison harnesses (CPU/CUDA/HIP reference
       where available) with deterministic seeds and artifact logging.
       Current state: deterministic CPU references exist; CUDA/HIP comparative
@@ -438,6 +441,16 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Hardened Metal validation determinism against stale-kernel false
+  attribution by isolating Triton cache directories in
+  `python/test/backend/test_metal_backend.py` and per-harness subprocess runs
+  in `scripts/test_metal_smoke.py`. This eliminated full-suite-only
+  softmax-mismatch repros caused by cross-run cache contamination.
+- 2026-02-24: Added deterministic training-style crash-classification harness
+  `python/test/backend/metal_mps_training_loop_stress.py` with explicit
+  forward/backward/optimizer/transfer/cleanup checkpoints and optimizer-style
+  parameter updates (Triton kernel on MPS path). Integrated the harness into
+  `scripts/test_metal_smoke.py` in both CPU and MPS modes.
 - 2026-02-24: Fixed `tritongpu-accelerate-matmul` target handling at source by
   making `TritonGPUAccelerateMatmul` explicitly skip non-CUDA targets instead
   of asserting on `target` prefixes. Re-enabled

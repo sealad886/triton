@@ -25,6 +25,10 @@ failures:
    - Mirrors Triton runtime flow using `torch.mps.compile_shader`.
    - Deterministic CPU reference maintained in parallel for correctness drift.
    - CPU and MPS modes.
+3. `python/test/backend/metal_mps_training_loop_stress.py`
+   - Deterministic training-style loop with forward/backward/optimizer phases.
+   - Uses Triton-kernel optimizer step on MPS path to exercise real launch flow.
+   - CPU and MPS modes with checkpointed transfer boundaries.
 
 Both harnesses emit startup banners with:
 - Python version
@@ -73,6 +77,7 @@ python python/test/backend/metal_mps_project_flow_stress.py --mode cpu --iters 3
 # MPS stress variants
 python python/test/backend/metal_mps_transfer_stress.py --mode mps --iters 1500 --shape 65536 --transfer-every 1 --sync-before-transfer --sync-after-transfer --tag mps-transfer-stress
 python python/test/backend/metal_mps_project_flow_stress.py --mode mps --iters 800 --shape 65536 --transfer-every 1 --sync-before-transfer --sync-after-transfer --tag mps-project-stress
+python python/test/backend/metal_mps_training_loop_stress.py --mode mps --iters 800 --shape 65536 --transfer-every 1 --sync-before-transfer --sync-after-transfer --tag mps-training-stress
 
 # Aggressive no-extra-sync transfer stress
 python python/test/backend/metal_mps_transfer_stress.py --mode mps --iters 3000 --shape 131072 --transfer-every 1 --tag mps-transfer-nosync
@@ -86,6 +91,7 @@ python python/test/backend/metal_mps_transfer_stress.py --mode mps --iters 3000 
 | `cpu-project-baseline` | CPU | Success | Deterministic project-flow baseline stable |
 | `mps-transfer-stress` | MPS | Success | 1500 transfer boundaries, no native crash |
 | `mps-project-stress` | MPS | Success | 800 shader-launch + transfer boundaries, no native crash |
+| `mps-training-stress` | MPS | Success | 800 training-style optimizer iterations with checkpoints |
 | `mps-transfer-nosync` | MPS | Success | 3000 transfer boundaries, no extra syncs |
 
 Representative summaries are available in `summary.json` files under each run
@@ -104,6 +110,8 @@ Observed outcomes:
 - Transfer harness MPS: success
 - Project-flow harness CPU: success
 - Project-flow harness MPS: success
+- Training-loop harness CPU: success
+- Training-loop harness MPS: success
 
 Run directories persisted under `artifacts/metal-harness-runs/` with timestamped
 subdirectories and checkpoint/state artifacts intact.
@@ -115,6 +123,9 @@ subdirectories and checkpoint/state artifacts intact.
   - `compute_*` -> compute-time crash
   - `transfer_to_cpu_*` -> transfer/sync crash
   - `cleanup_sync_*` -> teardown crash
+- Additional reproducible non-crash failure boundary:
+  full-suite-only numerical mismatches were traced to cross-run Triton cache
+  contamination; isolated cache directories removed the mismatch.
 - For future native crashes, `last_successful_checkpoint.txt` and
   `run_state.json` provide the first failing boundary by exclusion.
 
@@ -144,6 +155,11 @@ subdirectories and checkpoint/state artifacts intact.
    a native crash terminates the interpreter.
 4. Smoke-level integration in `scripts/test_metal_smoke.py` to exercise both
    harnesses in CPU and MPS modes during routine validation.
+5. Isolated Triton cache directories for validation runs to avoid false
+   attribution from stale artifacts:
+   - module-scoped cache isolation in
+     `python/test/backend/test_metal_backend.py`
+   - per-subprocess cache isolation in `scripts/test_metal_smoke.py`
 
 Tradeoff:
 - Frequent fsync/checkpoint writes increase harness overhead, but this is

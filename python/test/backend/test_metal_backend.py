@@ -11,6 +11,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -86,6 +87,21 @@ kernel void write_constant(
     out[id] = 42.0f;
 }
 """
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_triton_cache_dir_for_metal_backend_tests():
+    """Use an isolated Triton cache to avoid cross-run stale artifact reuse."""
+    prev = os.environ.get("TRITON_CACHE_DIR")
+    with tempfile.TemporaryDirectory(prefix="triton-metal-backend-cache-") as tmpdir:
+        os.environ["TRITON_CACHE_DIR"] = tmpdir
+        try:
+            yield
+        finally:
+            if prev is None:
+                os.environ.pop("TRITON_CACHE_DIR", None)
+            else:
+                os.environ["TRITON_CACHE_DIR"] = prev
 
 
 # ── MetalOptions tests ──────────────────────────────────────────────
