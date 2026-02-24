@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `223 passed`
+  -> `228 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 
@@ -222,7 +222,8 @@ Acceptance:
       observed in ML kernels (additional cast forms, aggregate ops, atomics,
       overflow intrinsics, pointer arithmetic edge cases, fast-math variants).
       Added: atomicrmw, cmpxchg, extractvalue, insertvalue, alloca, switch,
-      fence, overflow intrinsics (sadd/ssub/smul.with.overflow).
+      fence, overflow intrinsics (sadd/ssub/smul.with.overflow),
+      `shufflevector`, and vector-typed `phi` parsing.
 - [x] Expand call-lowering coverage for additional LLVM/libdevice symbols
       frequently emitted by Triton optimization pipelines.
       Added: ctlz→clz, cttz→ctz, bitreverse→reverse_bits, bswap, fshr/fshl,
@@ -244,10 +245,12 @@ Acceptance:
 Status: Partially complete.
 
 ### Phase 8: Dot/Matmul Encoding Completeness and Throughput Parity
-- [ ] Extend `tt.dot` lowering coverage beyond blocked encoding to additional
+- [x] Extend `tt.dot` lowering coverage beyond blocked encoding to additional
       operand/result encodings used by advanced matmul pipelines.
-      Current state: blocked encoding is supported; non-blocked encodings are
-      still rejected by `ConvertTritonMetalGPUToLLVM`.
+      Current state: Metal no longer hard-rejects non-blocked distributed dot
+      result encodings; FMA dot lowering now accepts generic distributed
+      layouts instead of blocked-only. Matrix-core/simdgroup-specific encodings
+      still require dedicated optimization-path integration.
 - [ ] Re-enable and validate Metal-safe matmul optimization passes currently
       disabled in TTGIR (`accelerate_matmul`, dot-operand optimization).
       Current state: `optimize_dot_operands` is enabled; `accelerate_matmul`
@@ -258,8 +261,8 @@ Status: Partially complete.
       integration is incomplete.
 - [ ] Build shape/dtype coverage for GEMM kernels used in transformers:
       fp32/fp16/bf16 paths, odd K tails, batched and grouped variants.
-      Current state: fp32/fp16 and odd-K compile coverage exists; bf16/batched/
-      grouped runtime coverage is still missing.
+      Current state: fp32/fp16 plus odd-K and batched runtime coverage now
+      exists; bf16/grouped runtime coverage is still missing.
 - [ ] Add perf regression tests and guardrails against severe throughput
       regressions on Apple7/Apple8/Apple9 classes.
       Current state: MSL-shape regression guards exist (FMA count/line count),
@@ -314,13 +317,13 @@ Status: Complete for current runtime contract scope.
 - [ ] Add end-to-end runtime correctness suites (not compile-only) for a broad
       ML kernel set: attention blocks, MLP blocks, normalization, embedding and
       scatter/gather-heavy patterns, and convolution-like kernels.
-      Current state: initial runtime correctness tests exist for vector add and
-      blocked matmul on MPS, plus row-softmax runtime validation; broader
-      ML-runtime coverage is still incomplete.
+      Current state: runtime correctness now covers vector add, blocked matmul,
+      row-softmax, row-layernorm, batched matmul, and embedding-gather on MPS;
+      attention/MLP/convolution-style runtime suites are still incomplete.
 - [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
       where supported), including tolerance envelopes per dtype.
-      Current state: cast/compile coverage exists; quantized runtime validation
-      is incomplete.
+      Current state: fp16 runtime matmul validation is in place; bf16/int8/fp8
+      runtime validation is still incomplete.
 - [ ] Add long-running stress tests covering training-like iteration loops,
       optimizer-style update kernels, and checkpointed host-device sync phases.
       Current state: harness infrastructure exists, but sustained training-like
@@ -372,8 +375,9 @@ Status: Not complete.
 
 ## Known Partial/Incorrect Implementations (Validated 2026-02-24)
 
-- `tt.dot` lowering is blocked-encoding only; non-blocked encodings still fail
-  in `third_party/metal/lib/TritonMetalGPUToLLVM/TritonGPUToLLVM.cpp`.
+- Non-blocked distributed `tt.dot` encodings now lower through the generic FMA
+  path, but matrix-core/simdgroup-optimized encoding families still lack full
+  pass-level integration and throughput tuning.
 - Matmul optimization parity is incomplete:
   `accelerate_matmul` remains disabled in
   `third_party/metal/backend/compiler.py`.
@@ -405,8 +409,8 @@ Status: Not complete.
 
 ## Risks and Mitigations
 
-- Risk: Matmul path remains incomplete (non-blocked `tt.dot` encodings,
-  disabled `accelerate_matmul`, limited runtime dtype/shape breadth).
+- Risk: Matmul path remains incomplete (disabled `accelerate_matmul`, missing
+  simdgroup matmul integration, limited runtime dtype/shape breadth).
   - Mitigation: prioritize Phase 8 items (encoding support, mixed-precision
     lowering fixes, pass enablement with regression/perf validation).
 - Risk: Runtime feature surface is still narrower than CUDA/HIP for advanced
@@ -427,6 +431,17 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Landed additional first-class LLVM→MSL/runtime coverage:
+  (1) generalized FMA-dot lowering to accept distributed result encodings and
+  removed Metal blocked-only dot rejection,
+  (2) fixed vector-typed `phi` parsing (`<N x T>` forms),
+  (3) added `shufflevector` lowering (including `zeroinitializer` masks),
+  (4) fixed unsigned vector binop casts (`lshr`/`udiv`/`urem`) to emit legal
+  vector unsigned types in MSL (`uintN`/`ushortN`/etc),
+  and (5) expanded runtime ML correctness tests with fp16 blocked matmul,
+  batched blocked matmul, embedding gather, and shufflevector regression.
+  Revalidated `python/test/backend/test_metal_backend.py` (228 passed) and
+  `scripts/test_metal_smoke.py` (all checks pass).
 - 2026-02-24: Extended Metal backend hash invalidation inputs to include
   `third_party/metal/lib/TritonMetalGPUToLLVM/{TargetInfo,Utility}.{h,cpp}`
   so C++ conversion/runtime semantic changes invalidate stale kernel-cache

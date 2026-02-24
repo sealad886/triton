@@ -4668,6 +4668,284 @@ class TestMetalRuntimeMLCorrectness:
         expected = torch.softmax(x_cpu, dim=1)
         assert torch.allclose(y_cpu, expected, atol=1e-4, rtol=1e-4)
 
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_row_layernorm_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _row_layernorm(
+            x_ptr,
+            w_ptr,
+            b_ptr,
+            y_ptr,
+            n_cols,
+            eps,
+            BLOCK: tl.constexpr,
+        ):
+            pid = tl.program_id(axis=0)
+            offs = tl.arange(0, BLOCK)
+            mask = offs < n_cols
+            row_base = pid * n_cols
+
+            x = tl.load(x_ptr + row_base + offs, mask=mask, other=0.0)
+            mean = tl.sum(x, axis=0) / n_cols
+            centered = x - mean
+            var = tl.sum(centered * centered, axis=0) / n_cols
+            inv_std = 1.0 / tl.sqrt(var + eps)
+
+            w = tl.load(w_ptr + offs, mask=mask, other=1.0)
+            b = tl.load(b_ptr + offs, mask=mask, other=0.0)
+            y = centered * inv_std * w + b
+            tl.store(y_ptr + row_base + offs, y, mask=mask)
+
+        torch.manual_seed(29)
+        rows, cols = 4, 64
+        eps = 1e-5
+        x_cpu = torch.randn((rows, cols), dtype=torch.float32)
+        w_cpu = torch.randn((cols,), dtype=torch.float32)
+        b_cpu = torch.randn((cols,), dtype=torch.float32)
+
+        x_mps = x_cpu.to("mps")
+        w_mps = w_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        y_mps = torch.empty_like(x_mps)
+
+        _row_layernorm[(rows,)](x_mps, w_mps, b_mps, y_mps, cols, eps, BLOCK=64)
+        torch.mps.synchronize()
+        y_cpu = y_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.nn.functional.layer_norm(
+            x_cpu, normalized_shape=(cols,), weight=w_cpu, bias=b_cpu, eps=eps
+        )
+        assert torch.allclose(y_cpu, expected, atol=2e-3, rtol=2e-3)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_fp16_blocked_matmul_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _matmul_fp16(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c = acc.to(tl.float16)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, c, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(31)
+        m, n, k = 32, 32, 48
+        a_cpu = torch.randn((m, k), dtype=torch.float16)
+        b_cpu = torch.randn((k, n), dtype=torch.float16)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((m, n), device="mps", dtype=torch.float16)
+
+        _matmul_fp16[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=16,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = (a_cpu.float() @ b_cpu.float()).half()
+        assert torch.allclose(c_cpu, expected, atol=4e-2, rtol=4e-2)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_batched_blocked_matmul_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _batched_matmul(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_ab,
+            stride_am,
+            stride_ak,
+            stride_bb,
+            stride_bk,
+            stride_bn,
+            stride_cb,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            pid_b = tl.program_id(axis=2)
+
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            a_base = a_ptr + pid_b * stride_ab
+            b_base = b_ptr + pid_b * stride_bb
+            c_base = c_ptr + pid_b * stride_cb
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_base
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_base
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c_ptrs = c_base + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(37)
+        batch, m, n, k = 3, 16, 24, 20
+        a_cpu = torch.randn((batch, m, k), dtype=torch.float32)
+        b_cpu = torch.randn((batch, k, n), dtype=torch.float32)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((batch, m, n), device="mps", dtype=torch.float32)
+
+        _batched_matmul[(triton.cdiv(m, 16), triton.cdiv(n, 16), batch)](
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            a_mps.stride(2),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            b_mps.stride(2),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            c_mps.stride(2),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=8,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.bmm(a_cpu, b_cpu)
+        assert torch.allclose(c_cpu, expected, atol=2e-4, rtol=2e-4)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_embedding_gather_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _embedding_gather(
+            table_ptr,
+            idx_ptr,
+            out_ptr,
+            row_stride,
+            n_cols,
+            BLOCK: tl.constexpr,
+        ):
+            pid = tl.program_id(axis=0)
+            idx = tl.load(idx_ptr + pid)
+            offs = tl.arange(0, BLOCK)
+            mask = offs < n_cols
+            row = tl.load(table_ptr + idx * row_stride + offs, mask=mask, other=0.0)
+            tl.store(out_ptr + pid * n_cols + offs, row, mask=mask)
+
+        torch.manual_seed(41)
+        vocab, dim, n_idx = 128, 64, 32
+        table_cpu = torch.randn((vocab, dim), dtype=torch.float32)
+        idx_cpu = torch.randint(0, vocab, (n_idx,), dtype=torch.int32)
+
+        table_mps = table_cpu.to("mps")
+        idx_mps = idx_cpu.to("mps")
+        out_mps = torch.empty((n_idx, dim), device="mps", dtype=torch.float32)
+
+        _embedding_gather[(n_idx,)](
+            table_mps, idx_mps, out_mps, table_mps.stride(0), dim, BLOCK=64
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = table_cpu[idx_cpu.to(torch.long)]
+        assert torch.allclose(out_cpu, expected, atol=1e-5, rtol=1e-5)
+
 
 # ── LLVM vector-constant lowering regressions ───────────────────────
 
@@ -4691,6 +4969,31 @@ entry:
         assert "UNSUPPORTED" not in msl
         assert "int2(" in msl
         assert "&" in msl
+
+
+# ── LLVM shufflevector lowering regressions ────────────────────────
+
+
+class TestMetalShuffleVectorLowering:
+    def test_make_metal_ir_shufflevector_half(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """\
+define void @shuffle_half_kernel(ptr %out, <2 x half> %a, <2 x half> %b) {
+entry:
+  %s = shufflevector <2 x half> %a, <2 x half> %b, <2 x i32> <i32 0, i32 2>
+  %e0 = extractelement <2 x half> %s, i64 0
+  %p0 = getelementptr half, ptr %out, i64 0
+  store half %e0, ptr %p0
+  %e1 = extractelement <2 x half> %s, i64 1
+  %p1 = getelementptr half, ptr %out, i64 1
+  store half %e1, ptr %p1
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "half2(" in msl
 
 
 # ── Unsupported LLVM intrinsic guards ───────────────────────────────

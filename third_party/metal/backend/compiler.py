@@ -178,13 +178,19 @@ _RE_INSERTELEM_DECL = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*insertelement\s+(<\s*\d+\s+x\s+.+\s*>)"
     r"\s+([^,]+),\s+.+\s+([^,]+),\s+i\d+\s+(.+)$"
 )
+_RE_SHUFFLEVECTOR_DECL = re.compile(
+    r"^("
+    + _SSA_NAME_RE
+    + r")\s*=\s*shufflevector\s+<\s*(\d+)\s+x\s+(.+?)\s*>\s+([^,]+),\s*"
+    r"<\s*(\d+)\s+x\s+.+?\s*>\s+([^,]+),\s*<\s*(\d+)\s+x\s+i\d+\s*>\s+(.+)$"
+)
 _RE_LOAD_DECL = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*load\s+([^,]+),"
     r"\s+ptr(?:\s+addrspace\(\d+\))?\s+(.+)$"
 )
 
 # Code-generation pass patterns
-_RE_PHI = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+[^ ]+\s+(.+)$")
+_RE_PHI = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+.+?\s+(\[.+)$")
 _RE_VOID_CALL = re.compile(
     r"^(?:tail\s+)?call(?:\s+\w+)*\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
 )
@@ -207,6 +213,12 @@ _RE_EXTRACTELEM = re.compile(
 _RE_INSERTELEM = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*insertelement\s+<\s*(\d+)\s+x\s+.+\s*>"
     r"\s+([^,]+),\s+.+\s+([^,]+),\s+i\d+\s+(.+)$"
+)
+_RE_SHUFFLEVECTOR = re.compile(
+    r"^("
+    + _SSA_NAME_RE
+    + r")\s*=\s*shufflevector\s+<\s*(\d+)\s+x\s+(.+?)\s*>\s+([^,]+),\s*"
+    r"<\s*(\d+)\s+x\s+.+?\s*>\s+([^,]+),\s*<\s*(\d+)\s+x\s+i\d+\s*>\s+(.+)$"
 )
 _RE_LOAD = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*load\s+(.+?),"
@@ -941,6 +953,26 @@ class MetalBackend(BaseBackend):
 
         def unsigned_msl(msl_ty: str) -> str:
             return _UNSIGNED_MSL_MAP.get(msl_ty, f"unsigned {msl_ty}")
+
+        def vector_alias_msl(msl_scalar_ty: str, width: int) -> str:
+            aliases = {
+                "bool": "bool",
+                "char": "char",
+                "short": "short",
+                "int": "int",
+                "long": "long",
+                "half": "half",
+                "float": "float",
+                "double": "double",
+                "unsigned char": "uchar",
+                "unsigned short": "ushort",
+                "unsigned int": "uint",
+                "unsigned long": "ulong",
+            }
+            base = aliases.get(msl_scalar_ty)
+            if base is None:
+                return f"vec<{msl_scalar_ty}, {width}>"
+            return f"{base}{width}"
 
         def llvm_type_to_msl(llvm_ty: str) -> str:
             llvm_ty = llvm_ty.strip()
@@ -1682,6 +1714,21 @@ class MetalBackend(BaseBackend):
                     record_ssa_decl(out_ssa, llvm_ty=vec_ty)
                     continue
 
+                m = (
+                    _RE_SHUFFLEVECTOR_DECL.match(line)
+                    if _opc == "shufflevector"
+                    else None
+                )
+                if m:
+                    out_ssa, _, elem_ty, _, _, _, out_width_s, _ = m.groups()
+                    out_width = int(out_width_s)
+                    scalar_ty = llvm_scalar_to_msl(elem_ty.strip())
+                    if out_width <= 1:
+                        record_ssa_decl(out_ssa, msl_ty=scalar_ty)
+                    else:
+                        record_ssa_decl(out_ssa, msl_ty=f"{scalar_ty}{out_width}")
+                    continue
+
                 m = _RE_EXTRACTVALUE.match(line) if _opc == "extractvalue" else None
                 if m:
                     out_ssa, agg_type, _, idx_str = m.groups()
@@ -1825,8 +1872,24 @@ class MetalBackend(BaseBackend):
                         # These LLVM IR ops have unsigned semantics but MSL
                         # integer types are signed.  Cast to unsigned before
                         # the operation to preserve correctness.
-                        msl_ty = llvm_scalar_to_msl(llvm_ty_binop)
-                        u_ty = unsigned_msl(msl_ty)
+                        vec_ty = _RE_VEC_TYPE.match(llvm_ty_binop.strip())
+                        if vec_ty:
+                            lanes = int(vec_ty.group(1))
+                            scalar_ty = llvm_scalar_to_msl(vec_ty.group(2))
+                            msl_ty = (
+                                vector_alias_msl(scalar_ty, lanes)
+                                if lanes > 1
+                                else scalar_ty
+                            )
+                            u_scalar = unsigned_msl(scalar_ty)
+                            u_ty = (
+                                vector_alias_msl(u_scalar, lanes)
+                                if lanes > 1
+                                else u_scalar
+                            )
+                        else:
+                            msl_ty = llvm_scalar_to_msl(llvm_ty_binop)
+                            u_ty = unsigned_msl(msl_ty)
                         emit(
                             f"{out} = ({msl_ty})(({u_ty}){lhs_expr} "
                             f"{bin_map[op]} ({u_ty}){rhs_expr});"
@@ -2178,6 +2241,72 @@ class MetalBackend(BaseBackend):
                     else:
                         emit(f"{out} = {to_expr(vec)};")
                         emit(f"{out}[{to_expr(idx)}] = {to_expr(val)};")
+                    continue
+
+                m = _RE_SHUFFLEVECTOR.match(line) if _opc == "shufflevector" else None
+                if m:
+                    (
+                        out_ssa,
+                        lhs_width_s,
+                        elem_ty,
+                        lhs_vec,
+                        rhs_width_s,
+                        rhs_vec,
+                        out_width_s,
+                        mask_spec,
+                    ) = m.groups()
+                    out = msl_id(out_ssa)
+                    ssa[out_ssa] = out
+                    lhs_width = int(lhs_width_s)
+                    rhs_width = int(rhs_width_s)
+                    out_width = int(out_width_s)
+                    lhs_expr = to_expr(extract_value_token(lhs_vec))
+                    rhs_expr = to_expr(extract_value_token(rhs_vec))
+                    scalar_ty = llvm_scalar_to_msl(elem_ty.strip())
+
+                    mask = mask_spec.strip()
+                    if mask == "zeroinitializer":
+                        mask_elems = ["0"] * out_width
+                    elif mask in ("undef", "poison"):
+                        mask_elems = [mask] * out_width
+                    else:
+                        if mask.startswith("<") and mask.endswith(">"):
+                            mask = mask[1:-1].strip()
+                        mask_elems = split_top_level(mask)
+
+                    def _lane(vec_expr: str, width: int, lane: int) -> str:
+                        if width <= 1:
+                            return vec_expr
+                        return f"{vec_expr}[{lane}]"
+
+                    shuffled: list[str] = []
+                    for mask_elem in mask_elems:
+                        _, lane_tok = split_typed_value(mask_elem)
+                        lane_tok = lane_tok.strip()
+                        if lane_tok in ("undef", "poison"):
+                            shuffled.append("0")
+                            continue
+                        if lane_tok == "zeroinitializer":
+                            lane_tok = "0"
+                        if not _RE_CONST_INT.match(lane_tok):
+                            raise RuntimeError(
+                                f"Unsupported shufflevector lane token: '{lane_tok}'"
+                            )
+                        lane = int(lane_tok)
+                        if lane < lhs_width:
+                            shuffled.append(_lane(lhs_expr, lhs_width, lane))
+                        elif lane < lhs_width + rhs_width:
+                            shuffled.append(_lane(rhs_expr, rhs_width, lane - lhs_width))
+                        else:
+                            shuffled.append("0")
+
+                    if len(shuffled) < out_width:
+                        shuffled.extend(["0"] * (out_width - len(shuffled)))
+
+                    if out_width <= 1:
+                        emit(f"{out} = {shuffled[0] if shuffled else '0'};")
+                    else:
+                        emit(f"{out} = {scalar_ty}{out_width}({', '.join(shuffled[:out_width])});")
                     continue
 
                 m = _RE_EXTRACTVALUE.match(line) if _opc == "extractvalue" else None

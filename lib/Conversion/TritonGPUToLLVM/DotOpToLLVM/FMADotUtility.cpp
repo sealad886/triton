@@ -93,10 +93,13 @@ LogicalResult parametricConvertFMADot(DotOp op, DotOp::Adaptor adaptor,
   auto dShapePerCTA =
       expandMatrixShapeWithBatch(ArrayRef(getShapePerCTA(dTensorTy)));
 
-  BlockedEncodingAttr dLayout =
-      cast<BlockedEncodingAttr>(dTensorTy.getEncoding());
+  auto dLayout = dyn_cast<DistributedEncodingTrait>(dTensorTy.getEncoding());
+  if (!dLayout)
+    return rewriter.notifyMatchFailure(
+        op, "dot accumulator uses a non-distributed encoding");
   // TODO process A and B operand separately
-  auto inRepOrder = expandMatrixOrderWithBatch(dLayout.getOrder());
+  auto inRepOrder =
+      expandMatrixOrderWithBatch(getOrder(dLayout, dTensorTy.getShape()));
   auto repOrder = expandMatrixOrderWithBatch(dLayout.getRepOrder());
   auto cc = unpackLLElements(loc, adaptor.getC(), rewriter);
 
@@ -106,9 +109,10 @@ LogicalResult parametricConvertFMADot(DotOp op, DotOp::Adaptor adaptor,
   auto sizePerThread = getContigPerThread(dTensorTy);
   auto numElemsPerThread = product(sizePerThread);
   SmallVector<unsigned> shapePerCTATile;
+  auto threadsPerWarp = getThreadsPerWarp(dLayout, dTensorTy.getShape());
+  auto warpsPerCTA = getWarpsPerCTA(dLayout, dTensorTy.getShape());
   for (auto [reg, thread, warp] :
-       llvm::zip(sizePerThread, dLayout.getThreadsPerWarp(),
-                 dLayout.getWarpsPerCTA())) {
+       llvm::zip(sizePerThread, threadsPerWarp, warpsPerCTA)) {
     shapePerCTATile.push_back(reg * thread * warp);
   }
   shapePerCTATile = expandMatrixShapeWithBatch(ArrayRef(shapePerCTATile));

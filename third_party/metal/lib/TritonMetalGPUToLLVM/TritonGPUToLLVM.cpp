@@ -232,10 +232,10 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Value d = op.getResult();
     auto dEncoding = cast<RankedTensorType>(d.getType()).getEncoding();
-    if (isa<triton::gpu::BlockedEncodingAttr>(dEncoding))
-      return convertFMADot(op, adaptor, getTypeConverter(), rewriter);
-    return rewriter.notifyMatchFailure(
-        op, "unsupported tt.dot encoding for Metal LLVM lowering");
+    if (!isa<triton::gpu::DistributedEncodingTrait>(dEncoding))
+      return rewriter.notifyMatchFailure(
+          op, "tt.dot result encoding is not distributed");
+    return convertFMADot(op, adaptor, getTypeConverter(), rewriter);
   }
 };
 
