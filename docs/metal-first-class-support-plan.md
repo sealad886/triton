@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `214 passed, 1 xfailed`
+  -> `215 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 
@@ -247,8 +247,8 @@ Status: Partially complete.
       integration is incomplete.
 - [ ] Build shape/dtype coverage for GEMM kernels used in transformers:
       fp32/fp16/bf16 paths, odd K tails, batched and grouped variants.
-      Current state: fp32 and odd-K compile coverage exists; fp16 path remains
-      strict `xfail`; bf16/batched/grouped runtime coverage is still missing.
+      Current state: fp32/fp16 and odd-K compile coverage exists; bf16/batched/
+      grouped runtime coverage is still missing.
 - [ ] Add perf regression tests and guardrails against severe throughput
       regressions on Apple7/Apple8/Apple9 classes.
       Current state: MSL-shape regression guards exist (FMA count/line count),
@@ -361,8 +361,6 @@ Status: Not complete.
 - Matmul optimization parity is incomplete:
   `accelerate_matmul` remains disabled in
   `third_party/metal/backend/compiler.py`.
-- fp16-input GEMM remains strict `xfail` in
-  `python/test/backend/test_metal_backend.py`.
 - Simdgroup matmul support is translator-level stub coverage, not full backend
   pass integration.
 - Runtime launch contract support is still intentionally constrained for some
@@ -388,7 +386,7 @@ Status: Not complete.
 ## Risks and Mitigations
 
 - Risk: Matmul path remains incomplete (non-blocked `tt.dot` encodings,
-  disabled `accelerate_matmul`, fp16 GEMM `xfail`).
+  disabled `accelerate_matmul`, limited runtime dtype/shape breadth).
   - Mitigation: prioritize Phase 8 items (encoding support, mixed-precision
     lowering fixes, pass enablement with regression/perf validation).
 - Risk: Runtime feature surface is still narrower than CUDA/HIP for advanced
@@ -420,6 +418,11 @@ Status: Not complete.
   utility API parity (`get_device_interface`, cache hooks). Added conformance
   tests for stream consumption, cooperative-grid fail-fast behavior, and source
   fallback path.
+- 2026-02-24: Fixed mixed-precision dot lowering at source by updating
+  `lib/Conversion/TritonGPUToLLVM/DotOpToLLVM/FMA.cpp` to cast float operands
+  to accumulator type before emitting `llvm.fmuladd`/FMA. Removed the fp16 GEMM
+  `xfail` in `python/test/backend/test_metal_backend.py`; fp16-input blocked
+  matmul compile test now passes.
 - 2026-02-21: Branch renamed from `feat/mlx-support` to
   `feat/metal-support`. Stale local `feat/mlx-support` ref removed by rename.
 - 2026-02-21: Completed backend parity audit across

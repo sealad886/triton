@@ -21,21 +21,39 @@ public:
     assert(b.size() == K);
     Value accum = c;
     Type tgtTy = accum.getType();
-    for (auto it = llvm::zip(a, b).begin(); it != llvm::zip(a, b).end(); ++it) {
-      const auto &aElem = std::get<0>(*it);
-      const auto &bElem = std::get<1>(*it);
+    auto castToTargetFloatTy = [&](Value v) -> Value {
+      if (v.getType() == tgtTy)
+        return v;
+      auto srcTy = dyn_cast<FloatType>(v.getType());
+      auto dstTy = dyn_cast<FloatType>(tgtTy);
+      if (!srcTy || !dstTy)
+        return Value();
+      if (srcTy.getWidth() < dstTy.getWidth())
+        return LLVM::FPExtOp::create(builder, loc, tgtTy, v);
+      if (srcTy.getWidth() > dstTy.getWidth())
+        return LLVM::FPTruncOp::create(builder, loc, tgtTy, v);
+      return LLVM::BitcastOp::create(builder, loc, tgtTy, v);
+    };
 
-      assert(aElem.getType() == tgtTy);
-      assert(bElem.getType() == tgtTy);
+    for (auto it = llvm::zip(a, b).begin(); it != llvm::zip(a, b).end(); ++it) {
+      Value aElem = std::get<0>(*it);
+      Value bElem = std::get<1>(*it);
 
       // to avoid: 'llvm.intr.fmuladd' op operand #0 must be floating point LLVM
       // type or LLVM dialect-compatible vector of floating point LLVM type, but
       // got 'i32'
       llvm::TypeSwitch<Type>(tgtTy)
           .Case<FloatType>([&](auto) {
+            if (aElem.getType() != tgtTy)
+              aElem = castToTargetFloatTy(aElem);
+            if (bElem.getType() != tgtTy)
+              bElem = castToTargetFloatTy(bElem);
+            assert(aElem && bElem && "expected float operands for float dot");
             accum = LLVM::FMulAddOp::create(builder, loc, aElem, bElem, accum);
           })
           .Case<IntegerType>([&](auto) {
+            assert(aElem.getType() == tgtTy);
+            assert(bElem.getType() == tgtTy);
             accum = LLVM::AddOp::create(
                 builder, loc, LLVM::MulOp::create(builder, loc, aElem, bElem),
                 accum);

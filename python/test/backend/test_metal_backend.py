@@ -3032,11 +3032,6 @@ class TestMetalGEMMDtypes:
 
     @skip_non_darwin
     @skip_no_xcrun
-    @pytest.mark.xfail(
-        reason="Metal C++ FMA pass asserts on mixed-precision dot (fp16 input, fp32 acc) — "
-        "FMA.cpp:28 aElem.getType() == tgtTy. Tracked for Phase 8 resolution.",
-        strict=True,
-    )
     def test_gemm_fp16_input(self):
         """fp16 x fp16 -> fp32 accumulation."""
         import triton
