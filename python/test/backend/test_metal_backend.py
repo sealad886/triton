@@ -28,6 +28,25 @@ skip_no_xcrun = pytest.mark.skipif(
 )
 
 
+def _has_mps_runtime() -> bool:
+    try:
+        import torch
+
+        return bool(
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_built()
+            and torch.backends.mps.is_available()
+        )
+    except Exception:
+        return False
+
+
+skip_no_mps = pytest.mark.skipif(
+    not _has_mps_runtime(),
+    reason="MPS runtime not available",
+)
+
+
 def assert_metal_compilation_artifacts(kernel):
     """Verify that a compiled kernel contains LLIR, MSL source, and a valid metallib."""
     assert "llir" in kernel.asm and len(kernel.asm["llir"]) > 0
@@ -4473,6 +4492,153 @@ class TestMetalCrossBackendNumerics:
         )
         expected = a @ b
         assert expected.shape == (64, 64)
+
+
+# ── Runtime ML correctness tests (MPS) ──────────────────────────────
+
+
+class TestMetalRuntimeMLCorrectness:
+    """Runtime correctness checks against CPU references on MPS."""
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_vector_add_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _vadd(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            y = tl.load(y_ptr + offs, mask=mask, other=0.0)
+            tl.store(out_ptr + offs, x + y, mask=mask)
+
+        torch.manual_seed(7)
+        n = 4096
+        x_cpu = torch.randn((n,), dtype=torch.float32)
+        y_cpu = torch.randn((n,), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        y_mps = y_cpu.to("mps")
+        out_mps = torch.empty_like(x_mps)
+
+        _vadd[(triton.cdiv(n, 128),)](x_mps, y_mps, out_mps, n, BLOCK=128)
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = x_cpu + y_cpu
+        assert torch.allclose(out_cpu, expected, atol=1e-5, rtol=1e-5)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_small_blocked_matmul_matches_cpu(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _matmul(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(11)
+        m = n = k = 32
+        a_cpu = torch.randn((m, k), dtype=torch.float32)
+        b_cpu = torch.randn((k, n), dtype=torch.float32)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((m, n), device="mps", dtype=torch.float32)
+
+        _matmul[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=16,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = a_cpu @ b_cpu
+        assert torch.allclose(c_cpu, expected, atol=1e-4, rtol=1e-4)
+
+
+# ── LLVM vector-constant lowering regressions ───────────────────────
+
+
+class TestMetalVectorConstantLowering:
+    def test_binary_vector_constant_form(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """\
+define void @vec_mask_kernel(ptr %out) {
+entry:
+  %v = and <2 x i32> <i32 15, i32 7>, <i32 8, i32 4>
+  %e0 = extractelement <2 x i32> %v, i64 0
+  %p0 = getelementptr i32, ptr %out, i64 0
+  store i32 %e0, ptr %p0
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "UNSUPPORTED" not in msl
+        assert "int2(" in msl
+        assert "&" in msl
 
 
 # ── Audit ERR regression tests ──────────────────────────────────────

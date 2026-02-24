@@ -128,6 +128,9 @@ _RE_LINE_CLEAN = re.compile(
     r"|\s*;.*$"  # Trailing comments
     r"|\s+#\d+\s*$"  # Attribute-group references
 )
+_RE_LLVM_VECTOR_REDUCE = re.compile(
+    r"^llvm\.vector\.reduce\.([a-z]+)\.v(\d+)([A-Za-z0-9]+)$"
+)
 
 # Structural / parsing patterns
 _RE_LABEL = re.compile(r'^([A-Za-z0-9_."]+):$')
@@ -725,6 +728,8 @@ class MetalBackend(BaseBackend):
         # passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
+        if opt.num_stages != 0:
+            passes.ttgpuir.add_pipeline(pm, opt.num_stages, False)
         passes.ttir.add_loop_aware_cse(pm)
         passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
@@ -855,9 +860,9 @@ class MetalBackend(BaseBackend):
             cur = []
             depth = 0
             for ch in text:
-                if ch in "([":
+                if ch in "([{<":
                     depth += 1
-                elif ch in ")]":
+                elif ch in ")]}>":
                     depth = max(0, depth - 1)
                 if ch == sep and depth == 0:
                     part = "".join(cur).strip()
@@ -963,6 +968,28 @@ class MetalBackend(BaseBackend):
                 return "0"
             if token in ("true", "false", "nullptr", "null"):
                 return "nullptr" if token == "null" else token
+            if token.startswith("<") and token.endswith(">"):
+                inner = token[1:-1].strip()
+                elems = split_top_level(inner)
+                if elems:
+                    elem_vals = []
+                    elem_msl_ty = None
+                    vector_ok = True
+                    for elem in elems:
+                        llvm_ty, val = split_typed_value(elem)
+                        llvm_ty = llvm_ty.strip()
+                        if not llvm_ty:
+                            vector_ok = False
+                            break
+                        cur_msl_ty = llvm_scalar_to_msl(llvm_ty)
+                        if elem_msl_ty is None:
+                            elem_msl_ty = cur_msl_ty
+                        elif elem_msl_ty != cur_msl_ty:
+                            vector_ok = False
+                            break
+                        elem_vals.append(constant_to_msl(val))
+                    if vector_ok and elem_msl_ty is not None:
+                        return f"{elem_msl_ty}{len(elem_vals)}({', '.join(elem_vals)})"
             if _RE_CONST_INT.match(token):
                 return token
             # LLVM IR hex float: 0x followed by 16 hex digits encoding an
@@ -1019,14 +1046,15 @@ class MetalBackend(BaseBackend):
                 arg = arg.strip()
                 if not arg:
                     continue
-                if "%" in arg:
-                    values.append(arg[arg.rfind("%") :].strip())
-                else:
-                    values.append(arg.split()[-1].strip())
+                values.append(extract_value_token(arg))
             return values
 
         def extract_value_token(spec: str) -> str:
             spec = spec.strip()
+            if spec.startswith("<") and spec.endswith(">"):
+                return spec
+            if spec.startswith("{") and spec.endswith("}"):
+                return spec
             if "%" in spec:
                 return spec[spec.rfind("%") :].strip()
             if "@" in spec:
@@ -1235,6 +1263,89 @@ class MetalBackend(BaseBackend):
 
         def lower_intrinsic(fn: str, args: list[str]) -> str | None:
             nargs = len(args)
+
+            def fold_infix(terms: list[str], op: str) -> str:
+                expr = terms[0]
+                for term in terms[1:]:
+                    expr = f"({expr} {op} {term})"
+                return expr
+
+            def fold_func(terms: list[str], fn_name: str) -> str:
+                expr = terms[0]
+                for term in terms[1:]:
+                    expr = f"{fn_name}({expr}, {term})"
+                return expr
+
+            def lower_vector_reduce() -> str | None:
+                m = _RE_LLVM_VECTOR_REDUCE.match(fn)
+                if not m:
+                    return None
+                reduce_op = m.group(1)
+                lanes = int(m.group(2))
+                elem_ty = m.group(3)
+                if lanes <= 0:
+                    return None
+
+                init: str | None = None
+                vec_arg: str | None = None
+                if reduce_op in (
+                    "fadd",
+                    "fmul",
+                    "fmax",
+                    "fmin",
+                    "fmaximum",
+                    "fminimum",
+                ):
+                    if nargs == 1:
+                        vec_arg = args[0]
+                    elif nargs == 2:
+                        init, vec_arg = args
+                    else:
+                        return None
+                else:
+                    if nargs != 1:
+                        return None
+                    vec_arg = args[0]
+
+                terms = [f"({vec_arg}[{i}])" for i in range(lanes)]
+                if reduce_op in ("umax", "umin") and elem_ty.startswith("i"):
+                    u_ty = unsigned_msl(llvm_scalar_to_msl(elem_ty))
+                    terms = [f"(({u_ty}){term})" for term in terms]
+                    if init is not None:
+                        init = f"(({u_ty})({init}))"
+
+                if reduce_op in ("or", "and", "xor", "add", "mul", "fadd", "fmul"):
+                    op_map = {
+                        "or": "|",
+                        "and": "&",
+                        "xor": "^",
+                        "add": "+",
+                        "mul": "*",
+                        "fadd": "+",
+                        "fmul": "*",
+                    }
+                    expr = fold_infix(terms, op_map[reduce_op])
+                    if init is not None:
+                        expr = fold_infix([f"({init})", f"({expr})"], op_map[reduce_op])
+                    return expr
+
+                if reduce_op in ("smax", "umax", "fmax", "fmaximum"):
+                    expr = fold_func(terms, "max")
+                    if init is not None:
+                        expr = f"max(({init}), ({expr}))"
+                    return expr
+
+                if reduce_op in ("smin", "umin", "fmin", "fminimum"):
+                    expr = fold_func(terms, "min")
+                    if init is not None:
+                        expr = f"min(({init}), ({expr}))"
+                    return expr
+
+                return None
+
+            reduced = lower_vector_reduce()
+            if reduced is not None:
+                return reduced
 
             # Table-driven simple intrinsics (DUP-001 consolidation)
             if nargs == 1:
@@ -1608,6 +1719,42 @@ class MetalBackend(BaseBackend):
             instrs = blocks.get(block, [])
             body_lines.append(f"    case {block_id}: {{")
 
+            # Shared-memory dot/staging loops lowered from TTGIR can arrive
+            # without explicit barrier ops in LLIR. Detect the canonical
+            # pattern (shared stores + shared loads + loop backedge) and
+            # conservatively inject threadgroup barriers at the translation
+            # boundary to preserve correctness across simdgroups.
+            has_tg_store = False
+            has_tg_load = False
+            has_backedge = False
+            for scan_line in instrs:
+                scan_opc = _extract_ir_opcode(scan_line)
+                scan_store = _RE_STORE.match(scan_line) if scan_opc == "store" else None
+                if scan_store and scan_store.group(2) == "3":
+                    has_tg_store = True
+                scan_load = _RE_LOAD.match(scan_line) if scan_opc == "load" else None
+                if scan_load and scan_load.group(3) == "3":
+                    has_tg_load = True
+                if scan_opc == "br":
+                    scan_br = _RE_BR.match(scan_line)
+                    if scan_br is not None:
+                        target = normalize_label(scan_br.group(1))
+                        target_id = block_ids.get(target)
+                        if target_id is not None and target_id <= block_id:
+                            has_backedge = True
+                    scan_cond = _RE_BR_COND.match(scan_line)
+                    if scan_cond is not None:
+                        t_lbl = normalize_label(scan_cond.group(2))
+                        f_lbl = normalize_label(scan_cond.group(3))
+                        t_id = block_ids.get(t_lbl)
+                        f_id = block_ids.get(f_lbl)
+                        if (t_id is not None and t_id <= block_id) or (
+                            f_id is not None and f_id <= block_id
+                        ):
+                            has_backedge = True
+            needs_tg_loop_sync = has_tg_store and has_tg_load and has_backedge
+            inserted_tg_sync_before_load = False
+
             def emit(stmt: str):
                 body_lines.append(f"      {stmt}")
 
@@ -1662,6 +1809,13 @@ class MetalBackend(BaseBackend):
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
                     llvm_ty = llvm_ty.strip()
+                    if (
+                        needs_tg_loop_sync
+                        and addr_space == "3"
+                        and not inserted_tg_sync_before_load
+                    ):
+                        emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
+                        inserted_tg_sync_before_load = True
                     ptr_expr = to_expr(strip_operand_attrs(ptr))
                     msl_ty = llvm_type_to_msl(llvm_ty)
                     emit(
@@ -1811,6 +1965,8 @@ class MetalBackend(BaseBackend):
                         raise RuntimeError(
                             f"Unknown branch target '{target}' in Metal lowering"
                         )
+                    if needs_tg_loop_sync and target_id <= block_id:
+                        emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
                     emit(f"__triton_pred_block = {block_id};")
                     emit(f"__pc = {target_id};")
                     emit("continue;")
@@ -1828,6 +1984,8 @@ class MetalBackend(BaseBackend):
                         raise RuntimeError(
                             f"Unknown branch targets '{t_lbl}'/'{f_lbl}' in Metal lowering"
                         )
+                    if needs_tg_loop_sync and (t_id <= block_id or f_id <= block_id):
+                        emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
                     emit(
                         f"if ({to_expr(cond)}) {{ __triton_pred_block = {block_id}; __pc = {t_id}; }} "
                         f"else {{ __triton_pred_block = {block_id}; __pc = {f_id}; }}"

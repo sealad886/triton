@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `216 passed`
+  -> `219 passed`
 - `PYTHONPATH=python python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 
@@ -160,6 +160,12 @@ Acceptance:
       offseted base expressions used by matmul-generated IR).
 - [x] Lower `llvm.fmuladd.*` to MSL `fma(...)` to compile FMA-heavy dot loops
       emitted by blocked matmul lowering.
+- [x] Lower vector constants and vector-reduction intrinsics
+      (`llvm.vector.reduce.*`) used by blocked matmul and reduction-adjacent
+      kernels.
+- [x] Restore runtime correctness for shared-memory blocked matmul loops by
+      inserting threadgroup synchronization in LLVM->MSL loop-body lowering
+      when LLIR lacks explicit barriers (store+load+backedge pattern).
 
 Acceptance:
 - Kernels that lower through the Metal LLVM pipeline compile through
@@ -303,7 +309,8 @@ Status: Complete for current runtime contract scope.
 - [ ] Add end-to-end runtime correctness suites (not compile-only) for a broad
       ML kernel set: attention blocks, MLP blocks, normalization, embedding and
       scatter/gather-heavy patterns, and convolution-like kernels.
-      Current state: most new ML workload tests are compile/translation tests.
+      Current state: initial runtime correctness tests exist for vector add and
+      blocked matmul on MPS; broader ML-runtime coverage is still incomplete.
 - [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
       where supported), including tolerance envelopes per dtype.
       Current state: cast/compile coverage exists; quantized runtime validation
@@ -364,6 +371,9 @@ Status: Not complete.
   `third_party/metal/backend/compiler.py`.
 - Simdgroup matmul support is translator-level stub coverage, not full backend
   pass integration.
+- Shared-memory synchronization for blocked matmul is currently enforced by a
+  translator-level loop heuristic in `make_metal_ir`; a dedicated upstream
+  Metal fence/barrier insertion pass is still missing.
 - Runtime launch contract support is still intentionally constrained for some
   advanced features: cooperative-grid launch is explicit hard-fail and
   `profile_scratch`/`launch_pdl` are contract no-ops pending native support.
@@ -409,6 +419,15 @@ Status: Not complete.
 
 ## Progress Log
 
+- 2026-02-24: Closed the blocked-matmul runtime correctness regression by
+  fixing two LLVM->MSL lowering gaps:
+  (1) added vector-constant parsing and `llvm.vector.reduce.*` intrinsic
+  lowering, and
+  (2) added threadgroup synchronization insertion for shared-memory loop bodies
+  with store+load+backedge patterns when LLIR lacks explicit barriers.
+  Added MPS runtime correctness tests for vector add and blocked matmul and
+  validated `python/test/backend/test_metal_backend.py` (219 passed) plus
+  `scripts/test_metal_smoke.py` (all checks pass).
 - 2026-02-24: Performed full implementation audit and corrected this plan to
   match current code/tests/docs. Marked Phase 7-11 status as partial/incomplete
   where prior entries overstated completion. Added a concrete gap list under
