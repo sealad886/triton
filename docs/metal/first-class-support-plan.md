@@ -277,7 +277,7 @@ Status: Partially complete.
 - [x] Add perf regression tests and guardrails against severe throughput
       regressions on Apple7/Apple8/Apple9 classes.
       Current state: `scripts/metal_matmul_throughput_guard.py` with
-      per-arch baseline file (`docs/metal-matmul-throughput-baselines.json`) is
+      per-arch baseline file (`docs/metal/matmul-throughput-baselines.json`) is
       implemented and wired into `scripts/metal_release_checks.py`.
 
 Acceptance:
@@ -378,7 +378,7 @@ Status: Partially complete.
       LLVM->MSL semantics.
 - [x] Expand user-facing docs and examples for common ML deployment flows,
       including troubleshooting for MPS runtime instability signatures.
-      Current state: `metal-backend.md`, `metal-compatibility-matrix.md`, and
+      Current state: `backend.md`, `compatibility-matrix.md`, and
       crash incident docs are synchronized with current pipeline/runtime behavior.
 - [ ] Add sustained soak tests and release gates for regression detection across
       compiler, runtime, and harness dimensions.
@@ -480,7 +480,7 @@ Status: Not complete.
   fallback helper generation. Added runtime int8 blocked matmul correctness
   coverage in `python/test/backend/test_metal_backend.py`. Added
   `scripts/metal_matmul_throughput_guard.py` with
-  `docs/metal-matmul-throughput-baselines.json`, added
+  `docs/metal/matmul-throughput-baselines.json`, added
   `python/test/backend/metal_cross_backend_compare.py` for CPU-reference MPS/CUDA
   comparisons with artifacts, and wired both into
   `scripts/metal_release_checks.py`. Revalidated:
@@ -745,9 +745,9 @@ Status: Not complete.
 - 2026-02-23: Phase 11 implementation work landed (not fully complete).
   Hardened cache with Triton version +
   backend code hash. Added TRITON_METAL_DEBUG observability (pass timing,
-  compile provenance, failure signatures). Expanded docs/metal-backend.md with
+  compile provenance, failure signatures). Expanded docs/metal/backend.md with
   troubleshooting, performance tuning, and compatibility sections. Hardened CI
   (removed continue-on-error for non-GPU tests, added nightly schedule).
-  Created docs/metal-compatibility-matrix.md with full version/GPU matrix.
+  Created docs/metal/compatibility-matrix.md with full version/GPU matrix.
   Initial self-assessment reported full completion; superseded by the
   2026-02-24 audit corrections above.

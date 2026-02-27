@@ -45,10 +45,10 @@ Release-check artifacts:
   - Initialized `test_utils_src` outside CUDA/HIP-only branches to avoid
     non-backend collection `NameError`.
 - Updated and synchronized docs:
-  - `docs/metal-backend.md`
-  - `docs/metal-compatibility-matrix.md`
-  - `docs/metal-first-class-support-plan.md`
-  - `docs/metal-mps-crash-incident-report.md`
+  - `docs/metal/backend.md`
+  - `docs/metal/compatibility-matrix.md`
+  - `docs/metal/first-class-support-plan.md`
+  - `docs/metal/mps-crash-incident-report.md`
 
 ## Release Readiness Assessment
 

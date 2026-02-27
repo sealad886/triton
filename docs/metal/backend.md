@@ -163,7 +163,7 @@ Common causes:
   the issue is in Metal dispatch or computation logic.
 - Enable the Metal validation layer via Xcode's GPU diagnostics or by setting
   `MTL_DEBUG_LAYER=1` in your environment.
-- Check `docs/metal-mps-crash-incident-report.md` for known patterns.
+- Check `docs/metal/mps-crash-incident-report.md` for known patterns.
 
 ## Performance Tuning
 
@@ -199,7 +199,7 @@ now:
 - **PyTorch 2.1+** for `torch.mps.compile_shader` support.
 - **Apple GPU family**: `apple7` (M1) minimum. `apple9` (M3/M4) required
   for bf16 support.
-- See [metal-compatibility-matrix.md](metal-compatibility-matrix.md) for the
+- See [compatibility-matrix.md](compatibility-matrix.md) for the
   full compatibility matrix.
 
 ## Development

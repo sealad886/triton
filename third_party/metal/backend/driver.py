@@ -336,7 +336,9 @@ class MetalUtils:
             return int(stream_id)
         if isinstance(stream_id, int):
             if stream_id < 0:
-                raise ValueError(f"Metal stream id must be non-negative, got {stream_id}")
+                raise ValueError(
+                    f"Metal stream id must be non-negative, got {stream_id}"
+                )
             return stream_id
         for attr in ("stream_id", "cuda_stream"):
             if hasattr(stream_id, attr):
@@ -682,13 +684,21 @@ class MetalUtils:
                 )
 
             # Accepted to preserve launch contract parity with other backends.
-            _ = launch_pdl, global_scratch, profile_scratch, arg_annotations, kernel_signature
+            _ = (
+                launch_pdl,
+                global_scratch,
+                profile_scratch,
+                arg_annotations,
+                kernel_signature,
+            )
 
             handle = function
             if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
                 raise RuntimeError("Expected Metal kernel handle for Metal launch")
 
-            kernel_name = _resolve_and_validate_kernel_name(kernel_metadata, None, handle)
+            kernel_name = _resolve_and_validate_kernel_name(
+                kernel_metadata, None, handle
+            )
 
             num_warps = _extract_num_warps(kernel_metadata) or 4
             block = (max(1, int(num_warps) * 32), 1, 1)

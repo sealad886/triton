@@ -218,7 +218,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Triton Metal matmul throughput guardrails")
     parser.add_argument(
         "--baseline",
-        default="docs/metal-matmul-throughput-baselines.json",
+        default="docs/metal/matmul-throughput-baselines.json",
         help="Path to throughput baseline JSON file.",
     )
     parser.add_argument(

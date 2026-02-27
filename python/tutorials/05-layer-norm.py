@@ -122,7 +122,7 @@ def _layer_norm_fwd_fused(
 # Let the number of input rows :math:`M = 4` and :math:`\text{GROUP_SIZE_M} = 2`,
 # here's a diagram of the parallel reduction strategy for :math:`\nabla_{w}` (:math:`\nabla_{b}` is omitted for brevity):
 #
-#   .. image:: parallel_reduction.png
+#   .. image:: parallel-reduction.png
 #
 # In Stage 1, the rows of X that have the same color share the same buffer and thus a lock is used to ensure that only one kernel instance writes to the buffer at a time.
 # In Stage 2, the buffers are further reduced to compute the final :math:`\nabla_{w}` and :math:`\nabla_{b}`.

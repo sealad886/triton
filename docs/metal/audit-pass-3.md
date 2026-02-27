@@ -126,19 +126,19 @@ producing **258 passed, 0 failed, 0 xfailed**.
 
 | File | Line | Old | New |
 |---|---|---|---|
-| `docs/metal-compatibility-matrix.md` | 49 | `240 passed` | `258 passed` |
-| `docs/metal-first-class-support-plan.md` | 31 | `240 passed` | `258 passed` |
+| `docs/metal/compatibility-matrix.md` | 49 | `240 passed` | `258 passed` |
+| `docs/metal/first-class-support-plan.md` | 31 | `240 passed` | `258 passed` |
 
 ### Verified correct (not modified)
 
 | File | Status |
 |---|---|
-| `docs/metal-backend.md` | Architecture doc — no test counts |
-| `docs/metal-errors-audit-2.md` | Historical snapshot (203→207) — left as-is |
-| `docs/metal-errors-audit-pass2.md` | Historical snapshot (240→259 reference) — left as-is |
-| `docs/metal-release-audit.md` | Historical snapshot (235 passed) — left as-is |
-| `docs/metal-performance-audit.md` | Performance data — no test counts |
-| `docs/metal-mps-crash-incident-report.md` | Incident report — no test counts |
+| `docs/metal/backend.md` | Architecture doc — no test counts |
+| `docs/metal/errors-audit-2.md` | Historical snapshot (203→207) — left as-is |
+| `docs/metal/errors-audit-pass-2.md` | Historical snapshot (240→259 reference) — left as-is |
+| `docs/metal/release-audit.md` | Historical snapshot (235 passed) — left as-is |
+| `docs/metal/performance-audit.md` | Performance data — no test counts |
+| `docs/metal/mps-crash-incident-report.md` | Incident report — no test counts |
 
 Historical docs are point-in-time records and were intentionally not modified.
 

@@ -17,8 +17,8 @@ Conference recordings and materials are now available online:
 - **Conference Slides:** [Google Drive Folder](https://drive.google.com/drive/folders/1KB6tD3UM1J0_eUp-F-JSlGrargLBawIr)
 
 For previous conference materials, see:
-- [2024 Conference Materials](docs/meetups/dev_conference_2024.md)
-- [2023 Conference Materials](docs/meetups/dev-meetup-2023.md)
+- [2024 Conference Materials](docs/meetups/dev-conference-2024.md)
+- [2023 Conference Materials](docs/meetups/dev-conference-2023.md)
 
 # Triton
 

@@ -1059,7 +1059,9 @@ class MetalBackend(BaseBackend):
             if not msl_decl_ty:
                 return None
             msl_decl_ty = msl_decl_ty.strip()
-            if msl_decl_ty.startswith("simdgroup_matrix<") and msl_decl_ty.endswith(">"):
+            if msl_decl_ty.startswith("simdgroup_matrix<") and msl_decl_ty.endswith(
+                ">"
+            ):
                 inner = msl_decl_ty[len("simdgroup_matrix<") : -1]
                 return inner.split(",", 1)[0].strip()
             if msl_decl_ty.startswith("__metal_sgmat_"):
@@ -2017,9 +2019,7 @@ class MetalBackend(BaseBackend):
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
                     ptr_msl_ty = ptr_type_to_msl(elem_ty, addr_space=addr_space)
-                    emit(
-                        f"{out} = ({ptr_msl_ty})({to_expr(base)}) + {to_expr(idx)};"
-                    )
+                    emit(f"{out} = ({ptr_msl_ty})({to_expr(base)}) + {to_expr(idx)};")
                     continue
 
                 parsed_gep = (
@@ -2030,9 +2030,7 @@ class MetalBackend(BaseBackend):
                     out = msl_id(out_ssa)
                     ssa[out_ssa] = out
                     ptr_msl_ty = ptr_type_to_msl(elem_ty, addr_space=addr_space)
-                    emit(
-                        f"{out} = ({ptr_msl_ty})({to_expr(base)}) + {to_expr(idx)};"
-                    )
+                    emit(f"{out} = ({ptr_msl_ty})({to_expr(base)}) + {to_expr(idx)};")
                     continue
 
                 m = _RE_CAST.match(line) if _opc in _CAST_OPCODES else None
@@ -2414,7 +2412,9 @@ class MetalBackend(BaseBackend):
                         if lane < lhs_width:
                             shuffled.append(_lane(lhs_expr, lhs_width, lane))
                         elif lane < lhs_width + rhs_width:
-                            shuffled.append(_lane(rhs_expr, rhs_width, lane - lhs_width))
+                            shuffled.append(
+                                _lane(rhs_expr, rhs_width, lane - lhs_width)
+                            )
                         else:
                             shuffled.append("0")
 
@@ -2424,7 +2424,9 @@ class MetalBackend(BaseBackend):
                     if out_width <= 1:
                         emit(f"{out} = {shuffled[0] if shuffled else '0'};")
                     else:
-                        emit(f"{out} = {scalar_ty}{out_width}({', '.join(shuffled[:out_width])});")
+                        emit(
+                            f"{out} = {scalar_ty}{out_width}({', '.join(shuffled[:out_width])});"
+                        )
                     continue
 
                 m = _RE_EXTRACTVALUE.match(line) if _opc == "extractvalue" else None
