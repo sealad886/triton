@@ -6,7 +6,6 @@ LLVM IR to AIR (Apple Intermediate Representation) and then to .metallib binarie
 via xcrun.
 """
 
-import dataclasses
 import functools
 import hashlib
 import math
@@ -18,7 +17,6 @@ import subprocess
 import tempfile
 import warnings
 from dataclasses import dataclass
-from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, Tuple
 
@@ -45,7 +43,7 @@ def _compile_provenance(options: "MetalOptions | None", src_hash: str) -> None:
 # ── Unsupported IR diagnostics ──────────────────────────────────────
 
 
-@dataclasses.dataclass
+@dataclass
 class UnsupportedIREntry:
     """A single LLVM IR line that the Metal translator could not lower."""
 
@@ -117,10 +115,6 @@ _RE_CAST = re.compile(
 )
 
 # ── Additional pre-compiled regex (PERF-001) ────────────────────────
-# Line-cleaning patterns (applied to every raw LLVM IR line)
-_RE_DBG_STRIP = re.compile(r",\s*!dbg\s*![0-9]+.*$")
-_RE_COMMENT_STRIP = re.compile(r"\s*;.*$")
-
 # Combined line-cleaning regex: strips debug metadata, trailing
 # comments, and attribute-group references in a single pass.
 _RE_LINE_CLEAN = re.compile(

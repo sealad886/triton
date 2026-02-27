@@ -46,7 +46,7 @@ Last updated: 2026-02-24
 Validated on branch `feat/metal-support` (2026-02-24):
 
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
-  - `235 passed`
+  - `240 passed`
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
   - all smoke checks passed (including transfer/project/training harnesses in CPU and MPS modes)
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
@@ -58,4 +58,5 @@ Validated on branch `feat/metal-support` (2026-02-24):
 |----------|--------|-------------|
 | `TRITON_METAL_DEBUG` | `1`, `true`, `yes` | Enable verbose compile diagnostics |
 | `TRITON_CACHE_DIR` | path | Override default cache/artifact directory (~/.triton) |
+| `TRITON_METAL_PREFER_TORCH_MPS` | `0` / `1` (default: `1`) | Prefer torch.mps execution path when available; set to `0` to force PyObjC fallback |
 | `MTL_DEBUG_LAYER` | `1` | Enable Apple's Metal validation layer |
