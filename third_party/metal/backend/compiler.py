@@ -319,6 +319,32 @@ _CAST_OPCODES = frozenset(
     }
 )
 
+# ── Typed IR instruction imports (Phase 2) ──────────────────────────
+# Placed after all regex/constant definitions to avoid circular import:
+# ir_types.py imports regex patterns from this module, so those must be
+# fully defined before we import ir_types.
+from triton.backends.metal.ir_types import (  # noqa: E402
+    parse_block as _parse_block,
+    BinOp as _BinOp,
+    Load as _Load,
+    Store as _Store,
+    Cast as _Cast,
+    ICmp as _ICmp,
+    FCmp as _FCmp,
+    Call as _Call,
+    GEP as _GEP,
+    Phi as _Phi,
+    Select as _Select,
+    FNeg as _FNeg,
+    Freeze as _Freeze,
+    VectorOp as _VectorOp,
+    AggregateOp as _AggregateOp,
+    AtomicOp as _AtomicOp,
+    Alloca as _Alloca,
+    Terminator as _Terminator,
+    UnknownInstruction as _UnknownInstruction,
+)
+
 
 def _extract_ir_opcode(line: str) -> str:
     """Extract LLVM IR opcode from an instruction line for dispatch.
@@ -1182,39 +1208,40 @@ class MetalBackend(BaseBackend):
         ctx.block_ids = block_ids
         ctx.param_ids = param_ids
 
-        for block in ctx.block_order:
-            for line in ctx.blocks.get(block, []):
-                if not line.startswith("%"):
+        # ── Phase 2: parse blocks into typed instruction objects ─────────
+        parsed_blocks: dict[str, list] = {}
+        for label in ctx.block_order:
+            parsed_blocks[label] = _parse_block(ctx.blocks.get(label, []))
+        # Store on ctx so the codegen pass (Phase 3) can reuse it later.
+        ctx.parsed_blocks = parsed_blocks
+
+        # ── SSA declaration pass (isinstance dispatch) ──────────────────
+        for block_label in ctx.block_order:
+            for inst in parsed_blocks[block_label]:
+                # Only instructions with out_ssa need SSA declaration
+                if not hasattr(inst, 'out_ssa') or getattr(inst, 'out_ssa', None) is None:
                     continue
 
-                _opc = _extract_ir_opcode(line)
+                if isinstance(inst, _BinOp):
+                    m_binop = _RE_BINOP.match(inst.raw_line)
+                    if m_binop:
+                        _, _, operands_spec = m_binop.groups()
+                        parts = split_top_level(operands_spec)
+                        if len(parts) >= 2:
+                            llvm_ty, _ = ctx.split_typed_value(parts[0])
+                            ctx.record_ssa_decl(inst.out_ssa, llvm_ty=llvm_ty)
 
-                m = _RE_BINOP.match(line) if _opc in _BINOP_OPCODES else None
-                if m:
-                    out_ssa, _, operands_spec = m.groups()
-                    parts = split_top_level(operands_spec)
-                    if len(parts) != 2:
+                elif isinstance(inst, _Load):
+                    ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.llvm_ty)
+
+                elif isinstance(inst, _Cast):
+                    ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.to_ty.strip())
+
+                elif isinstance(inst, _Call):
+                    if inst.is_void:
                         continue
-                    llvm_ty, _ = ctx.split_typed_value(parts[0])
-                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
-                    continue
-
-                m = _RE_LOAD_DECL.match(line) if _opc == "load" else None
-                if m:
-                    out_ssa, llvm_ty, _ = m.groups()
-                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
-                    continue
-
-                m = _RE_CAST.match(line) if _opc in _CAST_OPCODES else None
-                if m:
-                    out_ssa, _, _, dst_ty = m.groups()
-                    ctx.record_ssa_decl(out_ssa, llvm_ty=dst_ty.strip())
-                    continue
-
-                m = _RE_CALL_OUT.match(line) if _opc == "call" else None
-                if m:
-                    out_ssa, ret_spec, fn_name, _ = m.groups()
-                    ret_type = ctx.extract_call_ret_type(ret_spec)
+                    ret_type = ctx.extract_call_ret_type(inst.ret_type)
+                    fn_name = inst.fn_name
                     if fn_name in (
                         "__metal_simdgroup_load",
                         "__metal_simdgroup_multiply_accumulate",
@@ -1225,7 +1252,7 @@ class MetalBackend(BaseBackend):
                             elem_ty = ctx.llvm_scalar_to_msl(vec_m.group(2))
                         if ctx.use_native_simdgroup:
                             ctx.record_ssa_decl(
-                                out_ssa,
+                                inst.out_ssa,
                                 msl_ty=f"simdgroup_matrix<{elem_ty}, 8, 8>",
                             )
                         else:
@@ -1235,138 +1262,127 @@ class MetalBackend(BaseBackend):
                                     f"float/half elements, got {elem_ty!r}"
                                 )
                             ctx.fallback_simdgroup_elem_types.add(elem_ty)
-                            ctx.record_ssa_decl(out_ssa, msl_ty=f"__metal_sgmat_{elem_ty}")
+                            ctx.record_ssa_decl(
+                                inst.out_ssa, msl_ty=f"__metal_sgmat_{elem_ty}"
+                            )
                     elif ret_type.startswith("{"):
                         struct_name, _ = ctx.get_aggregate_struct_name(ret_type)
-                        ctx.record_ssa_decl(out_ssa, msl_ty=struct_name)
+                        ctx.record_ssa_decl(inst.out_ssa, msl_ty=struct_name)
                     else:
-                        ctx.record_ssa_decl(out_ssa, llvm_ty=ret_type)
-                    continue
+                        ctx.record_ssa_decl(inst.out_ssa, llvm_ty=ret_type)
 
-                m = _RE_GEP_DECL.match(line) if _opc == "getelementptr" else None
-                if m:
-                    out_ssa, elem_ty, addr_space, _, _ = m.groups()
-                    ctx.record_ssa_decl(
-                        out_ssa, msl_ty=ctx.ptr_type_to_msl(elem_ty, addr_space=addr_space)
-                    )
-                    continue
-
-                parsed_gep = ctx.parse_gep_instruction(line)
-                if parsed_gep is not None:
-                    out_ssa, elem_ty, addr_space, _, _ = parsed_gep
-                    ctx.record_ssa_decl(
-                        out_ssa, msl_ty=ctx.ptr_type_to_msl(elem_ty, addr_space=addr_space)
-                    )
-                    continue
-
-                m = _RE_ICMP.match(line) if _opc == "icmp" else None
-                if m:
-                    out_ssa, _, _, _, _ = m.groups()
-                    ctx.record_ssa_decl(out_ssa, msl_ty="bool")
-                    continue
-
-                m = _RE_FCMP.match(line) if _opc == "fcmp" else None
-                if m:
-                    out_ssa, _, _, _ = m.groups()
-                    ctx.record_ssa_decl(out_ssa, msl_ty="bool")
-                    continue
-
-                m = _RE_PHI_DECL.match(line) if _opc == "phi" else None
-                if m:
-                    out_ssa, llvm_ty = m.groups()
-                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
-                    continue
-
-                m = _RE_SELECT_DECL.match(line) if _opc == "select" else None
-                if m:
-                    out_ssa, llvm_ty = m.groups()
-                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
-                    continue
-
-                m = _RE_FNEG_DECL.match(line) if _opc == "fneg" else None
-                if m:
-                    out_ssa, llvm_ty, _ = m.groups()
-                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
-                    continue
-
-                m = _RE_FREEZE_DECL.match(line) if _opc == "freeze" else None
-                if m:
-                    out_ssa, llvm_ty, _ = m.groups()
-                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
-                    continue
-
-                m = (
-                    _RE_EXTRACTELEM_DECL.match(line)
-                    if _opc == "extractelement"
-                    else None
-                )
-                if m:
-                    out_ssa, elem_ty, _, _ = m.groups()
-                    ctx.record_ssa_decl(out_ssa, llvm_ty=elem_ty)
-                    continue
-
-                m = _RE_INSERTELEM_DECL.match(line) if _opc == "insertelement" else None
-                if m:
-                    out_ssa, vec_ty, _, _, _ = m.groups()
-                    ctx.record_ssa_decl(out_ssa, llvm_ty=vec_ty)
-                    continue
-
-                m = (
-                    _RE_SHUFFLEVECTOR_DECL.match(line)
-                    if _opc == "shufflevector"
-                    else None
-                )
-                if m:
-                    out_ssa, _, elem_ty, _, _, _, out_width_s, _ = m.groups()
-                    out_width = int(out_width_s)
-                    scalar_ty = ctx.llvm_scalar_to_msl(elem_ty.strip())
-                    if out_width <= 1:
-                        ctx.record_ssa_decl(out_ssa, msl_ty=scalar_ty)
+                elif isinstance(inst, _GEP):
+                    m_gep = _RE_GEP_DECL.match(inst.raw_line)
+                    if m_gep:
+                        elem_ty = m_gep.group(2)
+                        addr_space = m_gep.group(3)
+                        ctx.record_ssa_decl(
+                            inst.out_ssa,
+                            msl_ty=ctx.ptr_type_to_msl(
+                                elem_ty, addr_space=addr_space
+                            ),
+                        )
                     else:
-                        ctx.record_ssa_decl(out_ssa, msl_ty=f"{scalar_ty}{out_width}")
-                    continue
+                        parsed_gep = ctx.parse_gep_instruction(inst.raw_line)
+                        if parsed_gep is not None:
+                            _, elem_ty, addr_space, _, _ = parsed_gep
+                            ctx.record_ssa_decl(
+                                inst.out_ssa,
+                                msl_ty=ctx.ptr_type_to_msl(
+                                    elem_ty, addr_space=addr_space
+                                ),
+                            )
 
-                m = _RE_EXTRACTVALUE.match(line) if _opc == "extractvalue" else None
-                if m:
-                    out_ssa, agg_type, _, idx_str = m.groups()
-                    _, field_types = ctx.get_aggregate_struct_name(agg_type)
-                    idx = int(idx_str)
-                    ft = field_types[idx] if idx < len(field_types) else "int"
-                    ctx.record_ssa_decl(out_ssa, msl_ty=ft)
-                    continue
+                elif isinstance(inst, _ICmp):
+                    ctx.record_ssa_decl(inst.out_ssa, msl_ty="bool")
 
-                m = _RE_INSERTVALUE.match(line) if _opc == "insertvalue" else None
-                if m:
-                    out_ssa, agg_type, _, _, _, _ = m.groups()
-                    struct_name, _ = ctx.get_aggregate_struct_name(agg_type)
-                    ctx.record_ssa_decl(out_ssa, msl_ty=struct_name)
-                    continue
+                elif isinstance(inst, _FCmp):
+                    ctx.record_ssa_decl(inst.out_ssa, msl_ty="bool")
 
-                m = _RE_ATOMICRMW.match(line) if _opc == "atomicrmw" else None
-                if m:
-                    out_ssa = m.group(1)
-                    val_type = m.group(5)
-                    ctx.record_ssa_decl(out_ssa, llvm_ty=val_type.strip())
-                    continue
+                elif isinstance(inst, _Phi):
+                    ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.llvm_ty)
 
-                m = _RE_CMPXCHG.match(line) if _opc == "cmpxchg" else None
-                if m:
-                    out_ssa = m.group(1)
-                    val_type = m.group(4)
-                    agg_type = "{" + val_type.strip() + ", i1}"
-                    struct_name, _ = ctx.get_aggregate_struct_name(agg_type)
-                    ctx.record_ssa_decl(out_ssa, msl_ty=struct_name)
-                    continue
+                elif isinstance(inst, _Select):
+                    m_sel = _RE_SELECT_DECL.match(inst.raw_line)
+                    if m_sel:
+                        ctx.record_ssa_decl(inst.out_ssa, llvm_ty=m_sel.group(2))
 
-                m = _RE_ALLOCA.match(line) if _opc == "alloca" else None
-                if m:
-                    out_ssa, elem_type = m.groups()
-                    msl_ty = ctx.llvm_scalar_to_msl(elem_type.strip())
-                    ctx.record_ssa_decl(out_ssa, msl_ty=f"thread {msl_ty}*")
-                    storage_name = f"{ctx.msl_id(out_ssa)}_storage"
+                elif isinstance(inst, _FNeg):
+                    m_fneg = _RE_FNEG_DECL.match(inst.raw_line)
+                    if m_fneg:
+                        ctx.record_ssa_decl(inst.out_ssa, llvm_ty=m_fneg.group(2))
+
+                elif isinstance(inst, _Freeze):
+                    ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.llvm_ty)
+
+                elif isinstance(inst, _VectorOp):
+                    if inst.vector_op == "extractelement":
+                        m_vec = _RE_EXTRACTELEM_DECL.match(inst.raw_line)
+                        if m_vec:
+                            elem_ty = m_vec.group(2)
+                            ctx.record_ssa_decl(inst.out_ssa, llvm_ty=elem_ty)
+                    elif inst.vector_op == "insertelement":
+                        m_vec = _RE_INSERTELEM_DECL.match(inst.raw_line)
+                        if m_vec:
+                            vec_ty = m_vec.group(2)
+                            ctx.record_ssa_decl(inst.out_ssa, llvm_ty=vec_ty)
+                    elif inst.vector_op == "shufflevector":
+                        m_vec = _RE_SHUFFLEVECTOR_DECL.match(inst.raw_line)
+                        if m_vec:
+                            elem_ty = m_vec.group(3)
+                            out_width = int(m_vec.group(7))
+                            scalar_ty = ctx.llvm_scalar_to_msl(elem_ty.strip())
+                            if out_width <= 1:
+                                ctx.record_ssa_decl(inst.out_ssa, msl_ty=scalar_ty)
+                            else:
+                                ctx.record_ssa_decl(
+                                    inst.out_ssa,
+                                    msl_ty=f"{scalar_ty}{out_width}",
+                                )
+
+                elif isinstance(inst, _AggregateOp):
+                    if inst.agg_op == "extractvalue":
+                        m_agg = _RE_EXTRACTVALUE.match(inst.raw_line)
+                        if m_agg:
+                            agg_type = m_agg.group(2)
+                            idx_str = m_agg.group(4)
+                            _, field_types = ctx.get_aggregate_struct_name(agg_type)
+                            idx = int(idx_str)
+                            ft = field_types[idx] if idx < len(field_types) else "int"
+                            ctx.record_ssa_decl(inst.out_ssa, msl_ty=ft)
+                    elif inst.agg_op == "insertvalue":
+                        m_agg = _RE_INSERTVALUE.match(inst.raw_line)
+                        if m_agg:
+                            agg_type = m_agg.group(2)
+                            struct_name, _ = ctx.get_aggregate_struct_name(agg_type)
+                            ctx.record_ssa_decl(inst.out_ssa, msl_ty=struct_name)
+
+                elif isinstance(inst, _AtomicOp):
+                    if inst.atomic_op in (
+                        "add", "sub", "xchg", "and", "or", "xor",
+                        "nand", "max", "min", "umax", "umin",
+                        "fadd", "fsub", "fmax", "fmin",
+                    ):
+                        m_atom = _RE_ATOMICRMW.match(inst.raw_line)
+                        if m_atom:
+                            val_type = m_atom.group(5)
+                            ctx.record_ssa_decl(
+                                inst.out_ssa, llvm_ty=val_type.strip()
+                            )
+                    elif inst.atomic_op == "cmpxchg":
+                        m_atom = _RE_CMPXCHG.match(inst.raw_line)
+                        if m_atom:
+                            val_type = m_atom.group(4)
+                            agg_type = "{" + val_type.strip() + ", i1}"
+                            struct_name, _ = ctx.get_aggregate_struct_name(agg_type)
+                            ctx.record_ssa_decl(inst.out_ssa, msl_ty=struct_name)
+
+                elif isinstance(inst, _Alloca):
+                    msl_ty = ctx.llvm_scalar_to_msl(inst.alloc_ty.strip())
+                    ctx.record_ssa_decl(inst.out_ssa, msl_ty=f"thread {msl_ty}*")
+                    storage_name = f"{ctx.msl_id(inst.out_ssa)}_storage"
                     if storage_name not in ctx.ssa_decl_types:
                         ctx.ssa_decl_types[storage_name] = msl_ty
-                    continue
 
         ctx.body_lines = [
             "  int __triton_pred_block = -1;",

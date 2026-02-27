@@ -278,6 +278,7 @@ class TranslatorContext:
         "shared_bytes",
         "kernel_name",
         "param_ids",
+        "parsed_blocks",
     )
 
     def __init__(
@@ -306,6 +307,7 @@ class TranslatorContext:
         self.shared_bytes: int = shared_bytes
         self.kernel_name: str = kernel_name
         self.param_ids: set[str] = set()
+        self.parsed_blocks: dict[str, list] = {}
 
     # ── Batch 1: Type Conversion (Task 1.3) ─────────────────────────
 
