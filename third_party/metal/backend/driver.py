@@ -1110,26 +1110,32 @@ class MetalDriver(DriverBase):
         }
         return family_map.get(gpu_family, (8, 0))
 
+    _TYPE_MAP = {
+        "i1": "bool",
+        "i8": "int8_t",
+        "u8": "uint8_t",
+        "i16": "int16_t",
+        "u16": "uint16_t",
+        "i32": "int32_t",
+        "i64": "int64_t",
+        "u32": "uint32_t",
+        "u64": "uint64_t",
+        "fp16": "half",
+        "f16": "half",
+        "bf16": "bfloat16_t",
+        "fp32": "float",
+        "f32": "float",
+        "fp64": "double",
+        "f64": "double",
+    }
+
     def map_python_to_cpp_type(self, ty: str) -> str:
-        if ty[0] == "*":
-            return "MTLBufferPtr"
-        return {
-            "i1": "bool",
-            "i8": "int8_t",
-            "i16": "int16_t",
-            "i32": "int32_t",
-            "i64": "int64_t",
-            "u1": "uint8_t",
-            "u8": "uint8_t",
-            "u16": "uint16_t",
-            "u32": "uint32_t",
-            "u64": "uint64_t",
-            "fp16": "uint16_t",
-            "bf16": "uint16_t",
-            "fp32": "float",
-            "f32": "float",
-            "fp64": "double",
-        }.get(ty, "uint32_t")
+        if "*" in ty:
+            return "id<MTLBuffer>"
+        try:
+            return self._TYPE_MAP[ty]
+        except KeyError:
+            raise TypeError(f"Unsupported Triton type for Metal AOT codegen: {ty!r}")
 
     def get_benchmarker(self):
         from triton.testing import do_bench

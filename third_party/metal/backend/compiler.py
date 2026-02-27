@@ -772,6 +772,22 @@ class MetalBackend(BaseBackend):
             metadata.shared,
         )
 
+    @staticmethod
+    def check_dot_compatibility(lhs_type, rhs_type):
+        """Validate that *lhs_type* and *rhs_type* are supported for dot on Metal.
+
+        Returns the minimum (M, N, K) tile supported.  Raises ``CompileError``
+        for truly unsupported operand types (e.g. fp64).
+        """
+        lhs_bw = lhs_type.scalar.primitive_bitwidth
+        rhs_bw = rhs_type.scalar.primitive_bitwidth
+        if lhs_bw == 64 or rhs_bw == 64:
+            raise ValueError(
+                "Metal does not support fp64/i64 dot operands "
+                f"(got lhs={lhs_bw}-bit, rhs={rhs_bw}-bit)"
+            )
+        return (1, 1, 1)
+
     def get_codegen_implementation(self, options):
         return {"min_dot_size": lambda lhs_type, rhs_type: (1, 1, 1)}
 

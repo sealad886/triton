@@ -782,10 +782,10 @@ class TestMetalDriver:
         from third_party.metal.backend.driver import MetalDriver
 
         driver = MetalDriver.__new__(MetalDriver)
-        assert driver.map_python_to_cpp_type("*fp32") == "MTLBufferPtr"
+        assert driver.map_python_to_cpp_type("*fp32") == "id<MTLBuffer>"
         assert driver.map_python_to_cpp_type("i32") == "int32_t"
         assert driver.map_python_to_cpp_type("fp32") == "float"
-        assert driver.map_python_to_cpp_type("fp16") == "uint16_t"
+        assert driver.map_python_to_cpp_type("fp16") == "half"
 
     def test_get_active_torch_device(self):
         from third_party.metal.backend.driver import MetalDriver
@@ -7403,3 +7403,114 @@ class TestMetalBroadMLWorkloads:
 
         expected = (q_cpu @ k_cpu.T) * inv_sqrt_dk
         assert torch.allclose(s_cpu, expected, atol=1e-4, rtol=1e-4)
+
+
+# ── Driver / Backend Feature-Parity Tests ─────────────────────────────
+
+
+class TestMetalDriverFeatures:
+    """Tests for Metal driver and backend feature parity additions."""
+
+    # -- check_dot_compatibility ------------------------------------------
+
+    @skip_non_darwin
+    def test_check_dot_compatibility_valid(self):
+        from unittest.mock import MagicMock
+
+        from third_party.metal.backend.compiler import MetalBackend
+
+        for bw in (8, 16, 32):
+            scalar = MagicMock()
+            scalar.primitive_bitwidth = bw
+            ty = MagicMock()
+            ty.scalar = scalar
+            result = MetalBackend.check_dot_compatibility(ty, ty)
+            assert result == (1, 1, 1), f"Expected (1,1,1) for {bw}-bit operands"
+
+    @skip_non_darwin
+    def test_check_dot_compatibility_invalid_fp64(self):
+        from unittest.mock import MagicMock
+
+        from third_party.metal.backend.compiler import MetalBackend
+
+        scalar_64 = MagicMock()
+        scalar_64.primitive_bitwidth = 64
+        ty64 = MagicMock()
+        ty64.scalar = scalar_64
+
+        scalar_32 = MagicMock()
+        scalar_32.primitive_bitwidth = 32
+        ty32 = MagicMock()
+        ty32.scalar = scalar_32
+
+        with pytest.raises(ValueError, match="Metal does not support fp64/i64"):
+            MetalBackend.check_dot_compatibility(ty64, ty32)
+
+        with pytest.raises(ValueError, match="Metal does not support fp64/i64"):
+            MetalBackend.check_dot_compatibility(ty32, ty64)
+
+    # -- map_python_to_cpp_type -------------------------------------------
+
+    @skip_non_darwin
+    def test_map_python_to_cpp_type_scalars(self):
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver.__new__(MetalDriver)
+        expected = {
+            "i1": "bool",
+            "i8": "int8_t",
+            "u8": "uint8_t",
+            "i16": "int16_t",
+            "u16": "uint16_t",
+            "i32": "int32_t",
+            "i64": "int64_t",
+            "u32": "uint32_t",
+            "u64": "uint64_t",
+            "fp16": "half",
+            "f16": "half",
+            "bf16": "bfloat16_t",
+            "fp32": "float",
+            "f32": "float",
+            "fp64": "double",
+            "f64": "double",
+        }
+        for ty, cpp in expected.items():
+            assert driver.map_python_to_cpp_type(ty) == cpp, f"{ty} -> {cpp}"
+
+    @skip_non_darwin
+    def test_map_python_to_cpp_type_pointers(self):
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver.__new__(MetalDriver)
+        assert driver.map_python_to_cpp_type("*fp32") == "id<MTLBuffer>"
+        assert driver.map_python_to_cpp_type("*i32") == "id<MTLBuffer>"
+        assert driver.map_python_to_cpp_type("*bf16") == "id<MTLBuffer>"
+
+    @skip_non_darwin
+    def test_map_python_to_cpp_type_unknown(self):
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver.__new__(MetalDriver)
+        with pytest.raises(TypeError, match="Unsupported Triton type"):
+            driver.map_python_to_cpp_type("complex128")
+
+    # -- metal_ext module -------------------------------------------------
+
+    @skip_non_darwin
+    def test_metal_ext_module_importable(self):
+        from third_party.metal.language import metal_ext
+
+        assert hasattr(metal_ext, "thread_position_in_grid")
+        assert hasattr(metal_ext, "simdgroup_index")
+        assert hasattr(metal_ext, "threadgroup_position")
+        assert hasattr(metal_ext, "METAL_BUILTINS")
+        assert callable(metal_ext.thread_position_in_grid)
+
+    @skip_non_darwin
+    def test_metal_ext_builtins_dict(self):
+        from third_party.metal.language import metal_ext
+
+        assert isinstance(metal_ext.METAL_BUILTINS, dict)
+        assert "thread_position_in_grid" in metal_ext.METAL_BUILTINS
+        assert "simdgroup_index_in_threadgroup" in metal_ext.METAL_BUILTINS
+        assert len(metal_ext.METAL_BUILTINS) >= 6
