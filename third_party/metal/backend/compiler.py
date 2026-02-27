@@ -23,6 +23,17 @@ from typing import Any, Dict, Tuple
 from triton import knobs
 from triton._C.libtriton import ir, llvm, passes
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
+from triton.backends.metal.translator_context import (
+    TranslatorContext,
+    _RE_ALIGN_STRIP,
+    _UNSIGNED_MSL_MAP,
+    extract_value_token,
+    normalize_label,
+    split_top_level,
+    strip_operand_attrs,
+    unsigned_msl,
+    vector_alias_msl,
+)
 
 # ── Compile observability ───────────────────────────────────────────
 
@@ -140,7 +151,7 @@ _RE_PARAM_TYPE = re.compile(
 _RE_MSL_ID_CLEAN = re.compile(r"[^A-Za-z0-9_]")
 _RE_PTR_TYPE = re.compile(r"^ptr(?:\s+addrspace\((\d+)\))?$")
 _RE_VEC_TYPE = re.compile(r"^<\s*(\d+)\s+x\s+(.+)\s*>$")
-_RE_ALIGN_STRIP = re.compile(r",\s*align\s+\d+$")
+# _RE_ALIGN_STRIP: imported from translator_context
 _RE_CONST_INT = re.compile(r"^-?[0-9]+$")
 _RE_CONST_HEX_FLOAT = re.compile(r"^0x([0-9A-Fa-f]{16})$")
 _RE_CONST_HEX_HALF = re.compile(r"^0xH([0-9A-Fa-f]{4})$")
@@ -417,13 +428,7 @@ _MSL_RESERVED_IDENTIFIERS = frozenset(
     }
 )
 
-_UNSIGNED_MSL_MAP = {
-    "bool": "bool",
-    "char": "unsigned char",
-    "short": "unsigned short",
-    "int": "unsigned int",
-    "long": "unsigned long",
-}
+# _UNSIGNED_MSL_MAP: imported from translator_context
 
 _CMP_MAP = {
     "eq": "==",
@@ -1007,312 +1012,6 @@ class MetalBackend(BaseBackend):
         # `fallback` forces portable software lowering for simdgroup matrix
         # intrinsics. `auto`/`native` use MSL simdgroup intrinsics directly.
         use_native_simdgroup = simdgroup_strategy != "fallback"
-        fallback_simdgroup_elem_types: set[str] = set()
-
-        def split_top_level(text: str, sep: str = ",") -> list[str]:
-            parts = []
-            cur = []
-            depth = 0
-            for ch in text:
-                if ch in "([{<":
-                    depth += 1
-                elif ch in ")]}>":
-                    depth = max(0, depth - 1)
-                if ch == sep and depth == 0:
-                    part = "".join(cur).strip()
-                    if part:
-                        parts.append(part)
-                    cur = []
-                    continue
-                cur.append(ch)
-            tail = "".join(cur).strip()
-            if tail:
-                parts.append(tail)
-            return parts
-
-        _msl_id_used: dict[str, str] = {}  # msl_name -> llvm_name that claimed it
-
-        def msl_id(llvm_name: str) -> str:
-            raw = llvm_name.lstrip("%")
-            # Only invoke regex sub when there are chars that need cleaning;
-            # most SSA names (e.g. "0", "v1", "arg0") are already clean.
-            if _RE_MSL_ID_CLEAN.search(raw):
-                raw = _RE_MSL_ID_CLEAN.sub("_", raw)
-            if not raw:
-                raw = "tmp"
-            if raw[0].isdigit():
-                raw = f"v{raw}"
-            if raw in _MSL_RESERVED_IDENTIFIERS:
-                raw = f"v_{raw}"
-            # Disambiguate collisions: different LLVM names (e.g. %foo.bar
-            # vs %foo_bar) can map to the same MSL identifier after
-            # character replacement.
-            owner = _msl_id_used.get(raw)
-            if owner is not None and owner != llvm_name:
-                suffix = 2
-                candidate = f"{raw}_{suffix}"
-                while candidate in _msl_id_used:
-                    suffix += 1
-                    candidate = f"{raw}_{suffix}"
-                raw = candidate
-            _msl_id_used[raw] = llvm_name
-            return raw
-
-        def llvm_scalar_to_msl(llvm_ty: str) -> str:
-            return _LLVM_SCALAR_TO_MSL.get(llvm_ty.strip(), "int")
-
-        def unsigned_msl(msl_ty: str) -> str:
-            return _UNSIGNED_MSL_MAP.get(msl_ty, f"unsigned {msl_ty}")
-
-        def vector_alias_msl(msl_scalar_ty: str, width: int) -> str:
-            aliases = {
-                "bool": "bool",
-                "char": "char",
-                "short": "short",
-                "int": "int",
-                "long": "long",
-                "half": "half",
-                "float": "float",
-                "double": "double",
-                "unsigned char": "uchar",
-                "unsigned short": "ushort",
-                "unsigned int": "uint",
-                "unsigned long": "ulong",
-            }
-            base = aliases.get(msl_scalar_ty)
-            if base is None:
-                return f"vec<{msl_scalar_ty}, {width}>"
-            return f"{base}{width}"
-
-        def llvm_type_to_msl(llvm_ty: str) -> str:
-            llvm_ty = llvm_ty.strip()
-            ptr_match = _RE_PTR_TYPE.match(llvm_ty)
-            if ptr_match:
-                addr_space = ptr_match.group(1)
-                if addr_space == "3":
-                    return "threadgroup uint*"
-                return "device uint*"
-            vec_match = _RE_VEC_TYPE.match(llvm_ty)
-            if vec_match:
-                width = int(vec_match.group(1))
-                scalar = llvm_scalar_to_msl(vec_match.group(2))
-                if width == 1:
-                    return scalar
-                return f"vec<{scalar}, {width}>"
-            return llvm_scalar_to_msl(llvm_ty)
-
-        def msl_addr_space(addr_space: str | None) -> str:
-            return "threadgroup" if addr_space == "3" else "device"
-
-        def ptr_type_to_msl(pointee_llvm_ty: str, addr_space: str | None = None) -> str:
-            space = msl_addr_space(addr_space)
-            return f"{space} {llvm_scalar_to_msl(pointee_llvm_ty)}*"
-
-        def simdgroup_elem_from_decl(msl_decl_ty: str | None) -> str | None:
-            if not msl_decl_ty:
-                return None
-            msl_decl_ty = msl_decl_ty.strip()
-            if msl_decl_ty.startswith("simdgroup_matrix<") and msl_decl_ty.endswith(
-                ">"
-            ):
-                inner = msl_decl_ty[len("simdgroup_matrix<") : -1]
-                return inner.split(",", 1)[0].strip()
-            if msl_decl_ty.startswith("__metal_sgmat_"):
-                return msl_decl_ty[len("__metal_sgmat_") :].replace("_", " ")
-            return None
-
-        def extract_call_ret_type(ret_spec: str) -> str:
-            ret_spec = ret_spec.strip()
-            if not ret_spec:
-                return "void"
-            if "void" in ret_spec.split():
-                return "void"
-            if "{" in ret_spec:
-                start = ret_spec.index("{")
-                depth = 0
-                for i in range(start, len(ret_spec)):
-                    if ret_spec[i] == "{":
-                        depth += 1
-                    elif ret_spec[i] == "}":
-                        depth -= 1
-                    if depth == 0:
-                        return ret_spec[start : i + 1]
-                return ret_spec[start:]
-            vec_match = _RE_CALL_RET_VEC.search(ret_spec)
-            if vec_match:
-                return vec_match.group(0)
-            ptr_match = _RE_CALL_RET_PTR.search(ret_spec)
-            if ptr_match:
-                return ptr_match.group(0)
-            scalar_matches = _RE_CALL_RET_SCALAR.findall(ret_spec)
-            if scalar_matches:
-                return scalar_matches[-1]
-            return "i32"
-
-        def constant_to_msl(token: str) -> str:
-            token = token.strip()
-            if token in ("undef", "poison", "zeroinitializer"):
-                return "0"
-            if token in ("true", "false", "nullptr", "null"):
-                return "nullptr" if token == "null" else token
-            if token.startswith("<") and token.endswith(">"):
-                inner = token[1:-1].strip()
-                elems = split_top_level(inner)
-                if elems:
-                    elem_vals = []
-                    elem_msl_ty = None
-                    vector_ok = True
-                    for elem in elems:
-                        llvm_ty, val = split_typed_value(elem)
-                        llvm_ty = llvm_ty.strip()
-                        if not llvm_ty:
-                            vector_ok = False
-                            break
-                        cur_msl_ty = llvm_scalar_to_msl(llvm_ty)
-                        if elem_msl_ty is None:
-                            elem_msl_ty = cur_msl_ty
-                        elif elem_msl_ty != cur_msl_ty:
-                            vector_ok = False
-                            break
-                        elem_vals.append(constant_to_msl(val))
-                    if vector_ok and elem_msl_ty is not None:
-                        return f"{elem_msl_ty}{len(elem_vals)}({', '.join(elem_vals)})"
-            if _RE_CONST_INT.match(token):
-                return token
-            # LLVM IR hex float: 0x followed by 16 hex digits encoding an
-            # IEEE-754 double. Convert to the actual floating-point value
-            # so MSL receives a numeric literal, not a huge integer.
-            hex_m = _RE_CONST_HEX_FLOAT.match(token)
-            if hex_m:
-                raw = int(hex_m.group(1), 16)
-                dval = struct.unpack("d", struct.pack("Q", raw))[0]
-                if math.isinf(dval):
-                    return "-INFINITY" if dval < 0 else "INFINITY"
-                if math.isnan(dval):
-                    return "NAN"
-                return f"{dval!r}f"
-            # LLVM IR half-precision hex float: 0xH followed by 4 hex digits
-            # encoding an IEEE-754 binary16 value.
-            hex_h = _RE_CONST_HEX_HALF.match(token)
-            if hex_h:
-                raw16 = int(hex_h.group(1), 16)
-                # Decode IEEE-754 binary16 → Python float
-                sign = (raw16 >> 15) & 1
-                exp = (raw16 >> 10) & 0x1F
-                frac = raw16 & 0x3FF
-                if exp == 0:
-                    hval = (-1) ** sign * (2**-14) * (frac / 1024.0)
-                elif exp == 0x1F:
-                    if frac:
-                        return "NAN"
-                    return "-INFINITY" if sign else "INFINITY"
-                else:
-                    hval = (-1) ** sign * (2 ** (exp - 15)) * (1.0 + frac / 1024.0)
-                if hval == 0.0 and sign:
-                    return "(-0.0h)"
-                return f"(half)({hval!r}f)"
-            # LLVM IR bfloat16 hex float: 0xR followed by 4 hex digits.
-            hex_bf = _RE_CONST_HEX_BFLOAT.match(token)
-            if hex_bf:
-                raw_bf = int(hex_bf.group(1), 16)
-                # bfloat16 is the upper 16 bits of an IEEE-754 float32
-                f32_bits = raw_bf << 16
-                fval = struct.unpack("f", struct.pack("I", f32_bits))[0]
-                if math.isinf(fval):
-                    return "-INFINITY" if fval < 0 else "INFINITY"
-                if math.isnan(fval):
-                    return "NAN"
-                return f"{fval!r}f"
-            if _RE_CONST_FLOAT.match(token):
-                return token if token.endswith("f") else f"{token}f"
-            return token
-
-        def parse_call_args(arg_list: str) -> list[str]:
-            values = []
-            for arg in split_top_level(arg_list):
-                arg = arg.strip()
-                if not arg:
-                    continue
-                values.append(extract_value_token(arg))
-            return values
-
-        def extract_value_token(spec: str) -> str:
-            spec = spec.strip()
-            if spec.startswith("<") and spec.endswith(">"):
-                return spec
-            if spec.startswith("{") and spec.endswith("}"):
-                return spec
-            if "%" in spec:
-                return spec[spec.rfind("%") :].strip()
-            if "@" in spec:
-                return spec[spec.rfind("@") :].strip()
-            return spec.split()[-1].strip()
-
-        def split_typed_value(spec: str) -> tuple[str, str]:
-            spec = spec.strip()
-            value = extract_value_token(spec)
-            idx = spec.rfind(value)
-            llvm_ty = spec[:idx].strip() if idx >= 0 else spec
-            return llvm_ty, value
-
-        def strip_operand_attrs(spec: str) -> str:
-            spec = spec.strip()
-            spec = _RE_ALIGN_STRIP.sub("", spec)
-            return spec.strip()
-
-        def parse_ptr_spec(spec: str) -> tuple[str | None, str] | None:
-            m = _RE_PTR_SPEC.match(spec.strip())
-            if not m:
-                return None
-            return m.group(1), m.group(2).strip()
-
-        def parse_gep_components(spec: str) -> tuple[str, str | None, str, str] | None:
-            parts = split_top_level(spec)
-            if len(parts) < 3:
-                return None
-            elem_ty = parts[0].strip()
-            ptr_info = parse_ptr_spec(parts[1])
-            if ptr_info is None:
-                return None
-            addr_space, base = ptr_info
-            _, idx_token = split_typed_value(parts[2])
-            return elem_ty, addr_space, base, idx_token
-
-        def parse_gep_instruction(
-            line: str,
-        ) -> tuple[str, str, str | None, str, str] | None:
-            m = _RE_GEP_INSTRUCTION_FALLBACK.match(line)
-            if not m:
-                return None
-            out_ssa = m.group(1)
-            comps = parse_gep_components(m.group(2))
-            if comps is None:
-                return None
-            elem_ty, addr_space, base, idx_token = comps
-            return out_ssa, elem_ty, addr_space, base, idx_token
-
-        def parse_gep_constexpr(token: str) -> tuple[str, str | None, str, str] | None:
-            if not token.startswith("getelementptr"):
-                return None
-            rest = token[len("getelementptr") :].strip()
-            while True:
-                stripped = _RE_GEP_FLAG_STRIP.sub("", rest, count=1)
-                if stripped == rest:
-                    break
-                rest = stripped
-            if rest.startswith("(") and rest.endswith(")"):
-                rest = rest[1:-1].strip()
-            comps = parse_gep_components(rest)
-            if comps is None:
-                return None
-            elem_ty, addr_space, base, idx_token = comps
-            return elem_ty, addr_space, base, idx_token
-
-        def normalize_label(label: str) -> str:
-            label = label.strip()
-            if label.startswith('"') and label.endswith('"'):
-                return label[1:-1]
-            return label
 
         func_header = _RE_KERNEL_FUNC.search(src)
         if not func_header:
@@ -1324,6 +1023,13 @@ class MetalBackend(BaseBackend):
         if kernel_name in reserved:
             msl_kernel_name = f"triton_{kernel_name}"
         metadata["name"] = msl_kernel_name
+
+        ctx = TranslatorContext(
+            uses_shared_smem=uses_shared_smem,
+            shared_bytes=shared_bytes,
+            use_native_simdgroup=use_native_simdgroup,
+            kernel_name=kernel_name,
+        )
 
         sig_l = src.find("(", func_header.start())
         depth = 0
@@ -1384,23 +1090,7 @@ class MetalBackend(BaseBackend):
                 src,
             )
             pointee = m[-1] if m else "float"
-            ptr_elem[p["llvm_name"]] = llvm_scalar_to_msl(pointee)
-
-        aggregate_type_structs: dict[str, tuple[str, list[str]]] = {}
-        struct_defs: list[str] = []
-
-        def get_aggregate_struct_name(agg_type_str: str) -> tuple[str, list[str]]:
-            agg_type_str = agg_type_str.strip()
-            if agg_type_str in aggregate_type_structs:
-                return aggregate_type_structs[agg_type_str]
-            idx = len(aggregate_type_structs)
-            name = f"__triton_aggr_{idx}"
-            inner = agg_type_str.strip("{ }")
-            field_types = [llvm_type_to_msl(t.strip()) for t in inner.split(",")]
-            aggregate_type_structs[agg_type_str] = (name, field_types)
-            fields = "".join(f"  {ft} field{i};\n" for i, ft in enumerate(field_types))
-            struct_defs.append(f"struct {name} {{\n{fields}}};")
-            return name, field_types
+            ptr_elem[p["llvm_name"]] = ctx.llvm_scalar_to_msl(pointee)
 
         ssa = {}
         param_lines = []
@@ -1413,7 +1103,7 @@ class MetalBackend(BaseBackend):
                     f"    device {elem_ty}* {arg_name} [[buffer({p['index']})]]"
                 )
             else:
-                scalar_ty = llvm_scalar_to_msl(p["llvm_type"])
+                scalar_ty = ctx.llvm_scalar_to_msl(p["llvm_type"])
                 param_lines.append(
                     f"    constant {scalar_ty}& {arg_name} [[buffer({p['index']})]]"
                 )
@@ -1427,224 +1117,8 @@ class MetalBackend(BaseBackend):
             ]
         )
 
-        def to_expr(token: str) -> str:
-            token = token.strip()
-            # Fast path: SSA name lookup (most common case, ~60% of calls)
-            cached = ssa.get(token)
-            if cached is not None:
-                return cached
-            if token.startswith("%"):
-                out = msl_id(token)
-                ssa[token] = out
-                return out
-            if token == "@global_smem":
-                return "((threadgroup char*)__triton_shared)"
-            gep_cexpr = parse_gep_constexpr(token)
-            if gep_cexpr is not None:
-                _, _, base, idx_token = gep_cexpr
-                return f"({to_expr(base)} + {to_expr(idx_token)})"
-            return constant_to_msl(token)
-
         cmp_map = _CMP_MAP
         float_bin_map = _FLOAT_BIN_MAP
-
-        def lower_intrinsic(fn: str, args: list[str]) -> str | None:
-            nargs = len(args)
-
-            def fold_infix(terms: list[str], op: str) -> str:
-                expr = terms[0]
-                for term in terms[1:]:
-                    expr = f"({expr} {op} {term})"
-                return expr
-
-            def fold_func(terms: list[str], fn_name: str) -> str:
-                expr = terms[0]
-                for term in terms[1:]:
-                    expr = f"{fn_name}({expr}, {term})"
-                return expr
-
-            def lower_vector_reduce() -> str | None:
-                m = _RE_LLVM_VECTOR_REDUCE.match(fn)
-                if not m:
-                    return None
-                reduce_op = m.group(1)
-                lanes = int(m.group(2))
-                elem_ty = m.group(3)
-                if lanes <= 0:
-                    return None
-
-                init: str | None = None
-                vec_arg: str | None = None
-                if reduce_op in (
-                    "fadd",
-                    "fmul",
-                    "fmax",
-                    "fmin",
-                    "fmaximum",
-                    "fminimum",
-                ):
-                    if nargs == 1:
-                        vec_arg = args[0]
-                    elif nargs == 2:
-                        init, vec_arg = args
-                    else:
-                        return None
-                else:
-                    if nargs != 1:
-                        return None
-                    vec_arg = args[0]
-
-                terms = [f"({vec_arg}[{i}])" for i in range(lanes)]
-                if reduce_op in ("umax", "umin") and elem_ty.startswith("i"):
-                    u_ty = unsigned_msl(llvm_scalar_to_msl(elem_ty))
-                    terms = [f"(({u_ty}){term})" for term in terms]
-                    if init is not None:
-                        init = f"(({u_ty})({init}))"
-
-                if reduce_op in ("or", "and", "xor", "add", "mul", "fadd", "fmul"):
-                    op_map = {
-                        "or": "|",
-                        "and": "&",
-                        "xor": "^",
-                        "add": "+",
-                        "mul": "*",
-                        "fadd": "+",
-                        "fmul": "*",
-                    }
-                    expr = fold_infix(terms, op_map[reduce_op])
-                    if init is not None:
-                        expr = fold_infix([f"({init})", f"({expr})"], op_map[reduce_op])
-                    return expr
-
-                if reduce_op in ("smax", "umax", "fmax", "fmaximum"):
-                    expr = fold_func(terms, "max")
-                    if init is not None:
-                        expr = f"max(({init}), ({expr}))"
-                    return expr
-
-                if reduce_op in ("smin", "umin", "fmin", "fminimum"):
-                    expr = fold_func(terms, "min")
-                    if init is not None:
-                        expr = f"min(({init}), ({expr}))"
-                    return expr
-
-                return None
-
-            reduced = lower_vector_reduce()
-            if reduced is not None:
-                return reduced
-
-            # Table-driven simple intrinsics (DUP-001 consolidation)
-            if nargs == 1:
-                for prefix, builtin in _LLVM_INTRINSIC_UNARY:
-                    if fn.startswith(prefix):
-                        return f"{builtin}({args[0]})"
-
-            if nargs >= 1:
-                for prefix, builtin in _LLVM_INTRINSIC_UNARY_RELAXED:
-                    if fn.startswith(prefix):
-                        return f"{builtin}({args[0]})"
-
-            if nargs == 2:
-                for prefix, builtin in _LLVM_INTRINSIC_BINARY:
-                    if fn.startswith(prefix):
-                        return f"{builtin}({args[0]}, {args[1]})"
-                if any(fn.startswith(p) for p in _LLVM_INTRINSIC_MAX_PREFIXES):
-                    return f"max({args[0]}, {args[1]})"
-                if any(fn.startswith(p) for p in _LLVM_INTRINSIC_MIN_PREFIXES):
-                    return f"min({args[0]}, {args[1]})"
-
-            if nargs == 3:
-                for prefix, builtin in _LLVM_INTRINSIC_TERNARY:
-                    if fn.startswith(prefix):
-                        return f"{builtin}({args[0]}, {args[1]}, {args[2]})"
-
-            # Special-case intrinsics that need inline expansion
-            if fn == "llvm.bswap.i32" and nargs == 1:
-                a = args[0]
-                return (
-                    f"((({a}) >> 24) | ((({a}) >> 8) & 0xFF00) | "
-                    f"((({a}) << 8) & 0xFF0000) | (({a}) << 24))"
-                )
-            if fn == "llvm.bswap.i64" and nargs == 1:
-                a = args[0]
-                return (
-                    f"(((unsigned long)({a}) >> 56) | "
-                    f"(((unsigned long)({a}) >> 40) & 0xFF00UL) | "
-                    f"(((unsigned long)({a}) >> 24) & 0xFF0000UL) | "
-                    f"(((unsigned long)({a}) >> 8) & 0xFF000000UL) | "
-                    f"(((unsigned long)({a}) << 8) & 0xFF00000000UL) | "
-                    f"(((unsigned long)({a}) << 24) & 0xFF0000000000UL) | "
-                    f"(((unsigned long)({a}) << 40) & 0xFF000000000000UL) | "
-                    f"((unsigned long)({a}) << 56))"
-                )
-            if fn.startswith("llvm.fshr.") and nargs == 3:
-                bits = "32" if "i32" in fn else "64"
-                u_ty = "unsigned int" if "i32" in fn else "unsigned long"
-                a, b, c = args[0], args[1], args[2]
-                # Guard against UB: when shift % bits == 0, shifting by
-                # the full bit width is undefined in C/MSL.  Use a
-                # ternary so the complementary shift is only evaluated
-                # when the amount is non-zero.
-                return (
-                    f"(({c} & ({bits} - 1)) == 0 ? ({u_ty})({b}) : "
-                    f"(({u_ty})({b}) >> ({c} & ({bits} - 1))) | "
-                    f"(({u_ty})({a}) << ({bits} - ({c} & ({bits} - 1)))))"
-                )
-            if fn.startswith("llvm.fshl.") and nargs == 3:
-                bits = "32" if "i32" in fn else "64"
-                u_ty = "unsigned int" if "i32" in fn else "unsigned long"
-                a, b, c = args[0], args[1], args[2]
-                return (
-                    f"(({c} & ({bits} - 1)) == 0 ? ({u_ty})({a}) : "
-                    f"(({u_ty})({a}) << ({c} & ({bits} - 1))) | "
-                    f"(({u_ty})({b}) >> ({bits} - ({c} & ({bits} - 1)))))"
-                )
-            if fn.startswith("llvm.powi.") and nargs == 2:
-                return f"pown({args[0]}, {args[1]})"
-
-            # LLVM IR emitted by shared Triton pipelines can still reference
-            # CUDA/OCML-style libdevice symbols. Lower these to equivalent MSL
-            # math builtins so Metal compilation remains backend-agnostic.
-            if nargs == 1:
-                for pat, builtin in _LIBDEVICE_UNARY:
-                    if pat.match(fn):
-                        return f"{builtin}({args[0]})"
-
-            if nargs == 2:
-                for pat, builtin in _LIBDEVICE_BINARY:
-                    if pat.match(fn):
-                        return f"{builtin}({args[0]}, {args[1]})"
-
-            if nargs == 3 and _LIBDEVICE_FMA.match(fn):
-                return f"fma({args[0]}, {args[1]}, {args[2]})"
-            return None
-
-        def fcmp_expr(pred: str, lhs: str, rhs: str) -> str:
-            ordered = f"(!isnan({lhs}) && !isnan({rhs}))"
-            unordered = f"(isnan({lhs}) || isnan({rhs}))"
-            table = {
-                "false": "false",
-                "true": "true",
-                "oeq": f"({ordered} && ({lhs} == {rhs}))",
-                "ogt": f"({ordered} && ({lhs} > {rhs}))",
-                "oge": f"({ordered} && ({lhs} >= {rhs}))",
-                "olt": f"({ordered} && ({lhs} < {rhs}))",
-                "ole": f"({ordered} && ({lhs} <= {rhs}))",
-                "one": f"({ordered} && ({lhs} != {rhs}))",
-                "ord": ordered,
-                "ueq": f"({unordered} || ({lhs} == {rhs}))",
-                "ugt": f"({unordered} || ({lhs} > {rhs}))",
-                "uge": f"({unordered} || ({lhs} >= {rhs}))",
-                "ult": f"({unordered} || ({lhs} < {rhs}))",
-                "ule": f"({unordered} || ({lhs} <= {rhs}))",
-                "une": f"({unordered} || ({lhs} != {rhs}))",
-                "uno": unordered,
-            }
-            if pred not in table:
-                raise RuntimeError(f"Unsupported fcmp predicate '{pred}'")
-            return table[pred]
-
         bin_map = _BIN_MAP
         axis_helper_map = _AXIS_HELPER_MAP
 
@@ -1699,57 +1173,48 @@ class MetalBackend(BaseBackend):
 
         block_ids = {label: idx for idx, label in enumerate(block_order)}
         param_ids = set(ssa.values())
-        ssa_decl_types: dict[str, str] = {}
 
-        def record_ssa_decl(
-            out_ssa: str, llvm_ty: str | None = None, msl_ty: str | None = None
-        ) -> None:
-            out = msl_id(out_ssa)
-            ssa[out_ssa] = out
-            if out in param_ids or out in ssa_decl_types:
-                return
-            resolved = (
-                msl_ty if msl_ty is not None else llvm_type_to_msl(llvm_ty or "i32")
-            )
-            ssa_decl_types[out] = resolved
+        # Transfer locally-built state into the translator context.
+        ctx.ssa = ssa
+        ctx.ptr_elem = ptr_elem
+        ctx.blocks = blocks
+        ctx.block_order = block_order
+        ctx.block_ids = block_ids
+        ctx.param_ids = param_ids
 
-        for block in block_order:
-            for line in blocks.get(block, []):
-                # Lines that don't start with '%' cannot produce SSA
-                # declarations — skip all regex testing for them.
+        for block in ctx.block_order:
+            for line in ctx.blocks.get(block, []):
                 if not line.startswith("%"):
                     continue
 
                 _opc = _extract_ir_opcode(line)
 
-                # Reordered by frequency: binop > load > cast > call > GEP >
-                # icmp/fcmp > phi > select > fneg > freeze > extract/insert
                 m = _RE_BINOP.match(line) if _opc in _BINOP_OPCODES else None
                 if m:
                     out_ssa, _, operands_spec = m.groups()
                     parts = split_top_level(operands_spec)
                     if len(parts) != 2:
                         continue
-                    llvm_ty, _ = split_typed_value(parts[0])
-                    record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
+                    llvm_ty, _ = ctx.split_typed_value(parts[0])
+                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
                 m = _RE_LOAD_DECL.match(line) if _opc == "load" else None
                 if m:
                     out_ssa, llvm_ty, _ = m.groups()
-                    record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
+                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
                 m = _RE_CAST.match(line) if _opc in _CAST_OPCODES else None
                 if m:
                     out_ssa, _, _, dst_ty = m.groups()
-                    record_ssa_decl(out_ssa, llvm_ty=dst_ty.strip())
+                    ctx.record_ssa_decl(out_ssa, llvm_ty=dst_ty.strip())
                     continue
 
                 m = _RE_CALL_OUT.match(line) if _opc == "call" else None
                 if m:
                     out_ssa, ret_spec, fn_name, _ = m.groups()
-                    ret_type = extract_call_ret_type(ret_spec)
+                    ret_type = ctx.extract_call_ret_type(ret_spec)
                     if fn_name in (
                         "__metal_simdgroup_load",
                         "__metal_simdgroup_multiply_accumulate",
@@ -1757,9 +1222,9 @@ class MetalBackend(BaseBackend):
                         elem_ty = "float"
                         vec_m = _RE_VEC_TYPE.match(ret_type)
                         if vec_m:
-                            elem_ty = llvm_scalar_to_msl(vec_m.group(2))
-                        if use_native_simdgroup:
-                            record_ssa_decl(
+                            elem_ty = ctx.llvm_scalar_to_msl(vec_m.group(2))
+                        if ctx.use_native_simdgroup:
+                            ctx.record_ssa_decl(
                                 out_ssa,
                                 msl_ty=f"simdgroup_matrix<{elem_ty}, 8, 8>",
                             )
@@ -1769,65 +1234,65 @@ class MetalBackend(BaseBackend):
                                     "Software simdgroup fallback only supports "
                                     f"float/half elements, got {elem_ty!r}"
                                 )
-                            fallback_simdgroup_elem_types.add(elem_ty)
-                            record_ssa_decl(out_ssa, msl_ty=f"__metal_sgmat_{elem_ty}")
+                            ctx.fallback_simdgroup_elem_types.add(elem_ty)
+                            ctx.record_ssa_decl(out_ssa, msl_ty=f"__metal_sgmat_{elem_ty}")
                     elif ret_type.startswith("{"):
-                        struct_name, _ = get_aggregate_struct_name(ret_type)
-                        record_ssa_decl(out_ssa, msl_ty=struct_name)
+                        struct_name, _ = ctx.get_aggregate_struct_name(ret_type)
+                        ctx.record_ssa_decl(out_ssa, msl_ty=struct_name)
                     else:
-                        record_ssa_decl(out_ssa, llvm_ty=ret_type)
+                        ctx.record_ssa_decl(out_ssa, llvm_ty=ret_type)
                     continue
 
                 m = _RE_GEP_DECL.match(line) if _opc == "getelementptr" else None
                 if m:
                     out_ssa, elem_ty, addr_space, _, _ = m.groups()
-                    record_ssa_decl(
-                        out_ssa, msl_ty=ptr_type_to_msl(elem_ty, addr_space=addr_space)
+                    ctx.record_ssa_decl(
+                        out_ssa, msl_ty=ctx.ptr_type_to_msl(elem_ty, addr_space=addr_space)
                     )
                     continue
 
-                parsed_gep = parse_gep_instruction(line)
+                parsed_gep = ctx.parse_gep_instruction(line)
                 if parsed_gep is not None:
                     out_ssa, elem_ty, addr_space, _, _ = parsed_gep
-                    record_ssa_decl(
-                        out_ssa, msl_ty=ptr_type_to_msl(elem_ty, addr_space=addr_space)
+                    ctx.record_ssa_decl(
+                        out_ssa, msl_ty=ctx.ptr_type_to_msl(elem_ty, addr_space=addr_space)
                     )
                     continue
 
                 m = _RE_ICMP.match(line) if _opc == "icmp" else None
                 if m:
                     out_ssa, _, _, _, _ = m.groups()
-                    record_ssa_decl(out_ssa, msl_ty="bool")
+                    ctx.record_ssa_decl(out_ssa, msl_ty="bool")
                     continue
 
                 m = _RE_FCMP.match(line) if _opc == "fcmp" else None
                 if m:
                     out_ssa, _, _, _ = m.groups()
-                    record_ssa_decl(out_ssa, msl_ty="bool")
+                    ctx.record_ssa_decl(out_ssa, msl_ty="bool")
                     continue
 
                 m = _RE_PHI_DECL.match(line) if _opc == "phi" else None
                 if m:
                     out_ssa, llvm_ty = m.groups()
-                    record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
+                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
                 m = _RE_SELECT_DECL.match(line) if _opc == "select" else None
                 if m:
                     out_ssa, llvm_ty = m.groups()
-                    record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
+                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
                 m = _RE_FNEG_DECL.match(line) if _opc == "fneg" else None
                 if m:
                     out_ssa, llvm_ty, _ = m.groups()
-                    record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
+                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
                 m = _RE_FREEZE_DECL.match(line) if _opc == "freeze" else None
                 if m:
                     out_ssa, llvm_ty, _ = m.groups()
-                    record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
+                    ctx.record_ssa_decl(out_ssa, llvm_ty=llvm_ty)
                     continue
 
                 m = (
@@ -1837,13 +1302,13 @@ class MetalBackend(BaseBackend):
                 )
                 if m:
                     out_ssa, elem_ty, _, _ = m.groups()
-                    record_ssa_decl(out_ssa, llvm_ty=elem_ty)
+                    ctx.record_ssa_decl(out_ssa, llvm_ty=elem_ty)
                     continue
 
                 m = _RE_INSERTELEM_DECL.match(line) if _opc == "insertelement" else None
                 if m:
                     out_ssa, vec_ty, _, _, _ = m.groups()
-                    record_ssa_decl(out_ssa, llvm_ty=vec_ty)
+                    ctx.record_ssa_decl(out_ssa, llvm_ty=vec_ty)
                     continue
 
                 m = (
@@ -1854,34 +1319,34 @@ class MetalBackend(BaseBackend):
                 if m:
                     out_ssa, _, elem_ty, _, _, _, out_width_s, _ = m.groups()
                     out_width = int(out_width_s)
-                    scalar_ty = llvm_scalar_to_msl(elem_ty.strip())
+                    scalar_ty = ctx.llvm_scalar_to_msl(elem_ty.strip())
                     if out_width <= 1:
-                        record_ssa_decl(out_ssa, msl_ty=scalar_ty)
+                        ctx.record_ssa_decl(out_ssa, msl_ty=scalar_ty)
                     else:
-                        record_ssa_decl(out_ssa, msl_ty=f"{scalar_ty}{out_width}")
+                        ctx.record_ssa_decl(out_ssa, msl_ty=f"{scalar_ty}{out_width}")
                     continue
 
                 m = _RE_EXTRACTVALUE.match(line) if _opc == "extractvalue" else None
                 if m:
                     out_ssa, agg_type, _, idx_str = m.groups()
-                    _, field_types = get_aggregate_struct_name(agg_type)
+                    _, field_types = ctx.get_aggregate_struct_name(agg_type)
                     idx = int(idx_str)
                     ft = field_types[idx] if idx < len(field_types) else "int"
-                    record_ssa_decl(out_ssa, msl_ty=ft)
+                    ctx.record_ssa_decl(out_ssa, msl_ty=ft)
                     continue
 
                 m = _RE_INSERTVALUE.match(line) if _opc == "insertvalue" else None
                 if m:
                     out_ssa, agg_type, _, _, _, _ = m.groups()
-                    struct_name, _ = get_aggregate_struct_name(agg_type)
-                    record_ssa_decl(out_ssa, msl_ty=struct_name)
+                    struct_name, _ = ctx.get_aggregate_struct_name(agg_type)
+                    ctx.record_ssa_decl(out_ssa, msl_ty=struct_name)
                     continue
 
                 m = _RE_ATOMICRMW.match(line) if _opc == "atomicrmw" else None
                 if m:
                     out_ssa = m.group(1)
                     val_type = m.group(5)
-                    record_ssa_decl(out_ssa, llvm_ty=val_type.strip())
+                    ctx.record_ssa_decl(out_ssa, llvm_ty=val_type.strip())
                     continue
 
                 m = _RE_CMPXCHG.match(line) if _opc == "cmpxchg" else None
@@ -1889,30 +1354,30 @@ class MetalBackend(BaseBackend):
                     out_ssa = m.group(1)
                     val_type = m.group(4)
                     agg_type = "{" + val_type.strip() + ", i1}"
-                    struct_name, _ = get_aggregate_struct_name(agg_type)
-                    record_ssa_decl(out_ssa, msl_ty=struct_name)
+                    struct_name, _ = ctx.get_aggregate_struct_name(agg_type)
+                    ctx.record_ssa_decl(out_ssa, msl_ty=struct_name)
                     continue
 
                 m = _RE_ALLOCA.match(line) if _opc == "alloca" else None
                 if m:
                     out_ssa, elem_type = m.groups()
-                    msl_ty = llvm_scalar_to_msl(elem_type.strip())
-                    record_ssa_decl(out_ssa, msl_ty=f"thread {msl_ty}*")
-                    storage_name = f"{msl_id(out_ssa)}_storage"
-                    if storage_name not in ssa_decl_types:
-                        ssa_decl_types[storage_name] = msl_ty
+                    msl_ty = ctx.llvm_scalar_to_msl(elem_type.strip())
+                    ctx.record_ssa_decl(out_ssa, msl_ty=f"thread {msl_ty}*")
+                    storage_name = f"{ctx.msl_id(out_ssa)}_storage"
+                    if storage_name not in ctx.ssa_decl_types:
+                        ctx.ssa_decl_types[storage_name] = msl_ty
                     continue
 
-        body_lines = [
+        ctx.body_lines = [
             "  int __triton_pred_block = -1;",
-            f"  int __pc = {block_ids['entry']};",
+            f"  int __pc = {ctx.block_ids['entry']};",
         ]
         if uses_shared_smem:
-            body_lines.insert(0, f"  threadgroup char __triton_shared[{shared_bytes}];")
-        body_lines.extend(
-            [f"  {msl_ty} {name};" for name, msl_ty in ssa_decl_types.items()]
+            ctx.body_lines.insert(0, f"  threadgroup char __triton_shared[{shared_bytes}];")
+        ctx.body_lines.extend(
+            [f"  {msl_ty} {name};" for name, msl_ty in ctx.ssa_decl_types.items()]
         )
-        body_lines.extend(
+        ctx.body_lines.extend(
             [
                 "  while (true) {",
                 "    switch (__pc) {",
@@ -1922,13 +1387,13 @@ class MetalBackend(BaseBackend):
         best_effort = getattr(opt, "best_effort", False) if opt is not None else False
         unsupported_lines: list[UnsupportedIREntry] = []
         all_codegen_lines: list[str] = []
-        for blk in block_order:
-            all_codegen_lines.extend(blocks.get(blk, []))
+        for blk in ctx.block_order:
+            all_codegen_lines.extend(ctx.blocks.get(blk, []))
 
-        for block in block_order:
-            block_id = block_ids[block]
-            instrs = blocks.get(block, [])
-            body_lines.append(f"    case {block_id}: {{")
+        for block in ctx.block_order:
+            block_id = ctx.block_ids[block]
+            instrs = ctx.blocks.get(block, [])
+            ctx.body_lines.append(f"    case {block_id}: {{")
 
             # Shared-memory dot/staging loops lowered from TTGIR can arrive
             # without explicit barrier ops in LLIR. Detect the canonical
@@ -1950,15 +1415,15 @@ class MetalBackend(BaseBackend):
                     scan_br = _RE_BR.match(scan_line)
                     if scan_br is not None:
                         target = normalize_label(scan_br.group(1))
-                        target_id = block_ids.get(target)
+                        target_id = ctx.block_ids.get(target)
                         if target_id is not None and target_id <= block_id:
                             has_backedge = True
                     scan_cond = _RE_BR_COND.match(scan_line)
                     if scan_cond is not None:
                         t_lbl = normalize_label(scan_cond.group(2))
                         f_lbl = normalize_label(scan_cond.group(3))
-                        t_id = block_ids.get(t_lbl)
-                        f_id = block_ids.get(f_lbl)
+                        t_id = ctx.block_ids.get(t_lbl)
+                        f_id = ctx.block_ids.get(f_lbl)
                         if (t_id is not None and t_id <= block_id) or (
                             f_id is not None and f_id <= block_id
                         ):
@@ -1966,18 +1431,10 @@ class MetalBackend(BaseBackend):
             needs_tg_loop_sync = has_tg_store and has_tg_load and has_backedge
             inserted_tg_sync_before_load = False
 
-            def emit(stmt: str):
-                body_lines.append(f"      {stmt}")
-
-            def simdgroup_elem_for_msl_value(msl_value: str) -> str:
-                msl_ty = ssa_decl_types.get(msl_value)
-                elem_ty = simdgroup_elem_from_decl(msl_ty)
-                return elem_ty if elem_ty is not None else "float"
-
             terminated = False
             for line in instrs:
                 if line == "ret void":
-                    emit("return;")
+                    ctx.emit("return;")
                     terminated = True
                     break
 
@@ -1995,24 +1452,21 @@ class MetalBackend(BaseBackend):
                         raise RuntimeError(
                             f"Unsupported binary operand form in Metal lowering: '{line}'"
                         )
-                    llvm_ty_binop, lhs = split_typed_value(parts[0])
-                    _, rhs = split_typed_value(parts[1])
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    lhs_expr = to_expr(lhs)
-                    rhs_expr = to_expr(rhs)
+                    llvm_ty_binop, lhs = ctx.split_typed_value(parts[0])
+                    _, rhs = ctx.split_typed_value(parts[1])
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    lhs_expr = ctx.to_expr(lhs)
+                    rhs_expr = ctx.to_expr(rhs)
                     if op in float_bin_map:
-                        emit(f"{out} = {lhs_expr} {float_bin_map[op]} {rhs_expr};")
+                        ctx.emit(f"{out} = {lhs_expr} {float_bin_map[op]} {rhs_expr};")
                     elif op == "frem":
-                        emit(f"{out} = fmod({lhs_expr}, {rhs_expr});")
+                        ctx.emit(f"{out} = fmod({lhs_expr}, {rhs_expr});")
                     elif op in ("lshr", "udiv", "urem"):
-                        # These LLVM IR ops have unsigned semantics but MSL
-                        # integer types are signed.  Cast to unsigned before
-                        # the operation to preserve correctness.
                         vec_ty = _RE_VEC_TYPE.match(llvm_ty_binop.strip())
                         if vec_ty:
                             lanes = int(vec_ty.group(1))
-                            scalar_ty = llvm_scalar_to_msl(vec_ty.group(2))
+                            scalar_ty = ctx.llvm_scalar_to_msl(vec_ty.group(2))
                             msl_ty = (
                                 vector_alias_msl(scalar_ty, lanes)
                                 if lanes > 1
@@ -2025,160 +1479,160 @@ class MetalBackend(BaseBackend):
                                 else u_scalar
                             )
                         else:
-                            msl_ty = llvm_scalar_to_msl(llvm_ty_binop)
+                            msl_ty = ctx.llvm_scalar_to_msl(llvm_ty_binop)
                             u_ty = unsigned_msl(msl_ty)
-                        emit(
+                        ctx.emit(
                             f"{out} = ({msl_ty})(({u_ty}){lhs_expr} "
                             f"{bin_map[op]} ({u_ty}){rhs_expr});"
                         )
                     else:
-                        emit(f"{out} = {lhs_expr} {bin_map[op]} {rhs_expr};")
+                        ctx.emit(f"{out} = {lhs_expr} {bin_map[op]} {rhs_expr};")
                     continue
 
                 m = _RE_LOAD.match(line) if _opc == "load" else None
                 if m:
                     out_ssa, llvm_ty, addr_space, ptr = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
                     llvm_ty = llvm_ty.strip()
                     if (
                         needs_tg_loop_sync
                         and addr_space == "3"
                         and not inserted_tg_sync_before_load
                     ):
-                        emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
+                        ctx.emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
                         inserted_tg_sync_before_load = True
-                    ptr_expr = to_expr(strip_operand_attrs(ptr))
-                    msl_ty = llvm_type_to_msl(llvm_ty)
-                    emit(
-                        f"{out} = *(({msl_addr_space(addr_space)} {msl_ty}*)({ptr_expr}));"
+                    ptr_expr = ctx.to_expr(strip_operand_attrs(ptr))
+                    msl_ty = ctx.llvm_type_to_msl(llvm_ty)
+                    ctx.emit(
+                        f"{out} = *(({ctx.msl_addr_space(addr_space)} {msl_ty}*)({ptr_expr}));"
                     )
                     continue
 
                 m = _RE_STORE.match(line) if _opc == "store" else None
                 if m:
                     val_spec, addr_space, ptr = m.groups()
-                    llvm_ty, val_token = split_typed_value(val_spec)
-                    msl_ty = llvm_type_to_msl(llvm_ty)
-                    ptr_expr = to_expr(strip_operand_attrs(ptr))
-                    emit(
-                        f"*(({msl_addr_space(addr_space)} {msl_ty}*)({ptr_expr})) = {to_expr(val_token)};"
+                    llvm_ty, val_token = ctx.split_typed_value(val_spec)
+                    msl_ty = ctx.llvm_type_to_msl(llvm_ty)
+                    ptr_expr = ctx.to_expr(strip_operand_attrs(ptr))
+                    ctx.emit(
+                        f"*(({ctx.msl_addr_space(addr_space)} {msl_ty}*)({ptr_expr})) = {ctx.to_expr(val_token)};"
                     )
                     continue
 
                 m = _RE_GEP.match(line) if _opc == "getelementptr" else None
                 if m:
                     out_ssa, elem_ty, addr_space, base, idx = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    ptr_msl_ty = ptr_type_to_msl(elem_ty, addr_space=addr_space)
-                    emit(f"{out} = ({ptr_msl_ty})({to_expr(base)}) + {to_expr(idx)};")
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    ptr_msl_ty = ctx.ptr_type_to_msl(elem_ty, addr_space=addr_space)
+                    ctx.emit(f"{out} = ({ptr_msl_ty})({ctx.to_expr(base)}) + {ctx.to_expr(idx)};")
                     continue
 
                 parsed_gep = (
-                    parse_gep_instruction(line) if _opc == "getelementptr" else None
+                    ctx.parse_gep_instruction(line) if _opc == "getelementptr" else None
                 )
                 if parsed_gep is not None:
                     out_ssa, elem_ty, addr_space, base, idx = parsed_gep
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    ptr_msl_ty = ptr_type_to_msl(elem_ty, addr_space=addr_space)
-                    emit(f"{out} = ({ptr_msl_ty})({to_expr(base)}) + {to_expr(idx)};")
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    ptr_msl_ty = ctx.ptr_type_to_msl(elem_ty, addr_space=addr_space)
+                    ctx.emit(f"{out} = ({ptr_msl_ty})({ctx.to_expr(base)}) + {ctx.to_expr(idx)};")
                     continue
 
                 m = _RE_CAST.match(line) if _opc in _CAST_OPCODES else None
                 if m:
                     out_ssa, op, src_spec, dst_ty = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
                     dst_ty = dst_ty.strip()
                     val = extract_value_token(src_spec)
                     if op in ("bitcast", "addrspacecast"):
                         if dst_ty.startswith("ptr"):
-                            emit(f"{out} = {to_expr(val)};")
+                            ctx.emit(f"{out} = {ctx.to_expr(val)};")
                         else:
-                            emit(
-                                f"{out} = as_type<{llvm_type_to_msl(dst_ty)}>({to_expr(val)});"
+                            ctx.emit(
+                                f"{out} = as_type<{ctx.llvm_type_to_msl(dst_ty)}>({ctx.to_expr(val)});"
                             )
                     elif op in ("ptrtoint", "inttoptr"):
-                        emit(f"{out} = {to_expr(val)};")
+                        ctx.emit(f"{out} = {ctx.to_expr(val)};")
                     else:
-                        emit(f"{out} = ({llvm_type_to_msl(dst_ty)})({to_expr(val)});")
+                        ctx.emit(f"{out} = ({ctx.llvm_type_to_msl(dst_ty)})({ctx.to_expr(val)});")
                     continue
 
                 m = _RE_CALL_OUT.match(line) if _opc == "call" else None
                 if m:
                     out_ssa, _, fn, args_raw = m.groups()
-                    args = [to_expr(v) for v in parse_call_args(args_raw)]
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
+                    args = [ctx.to_expr(v) for v in ctx.parse_call_args(args_raw)]
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
                     if fn.startswith("llvm.sadd.with.overflow.") and len(args) == 2:
-                        emit(f"{out}.field0 = {args[0]} + {args[1]};")
-                        emit(
+                        ctx.emit(f"{out}.field0 = {args[0]} + {args[1]};")
+                        ctx.emit(
                             f"{out}.field1 = (({args[0]} ^ {out}.field0) & ({args[1]} ^ {out}.field0)) < 0;"
                         )
                         continue
                     if fn.startswith("llvm.uadd.with.overflow.") and len(args) == 2:
-                        emit(f"{out}.field0 = {args[0]} + {args[1]};")
-                        emit(f"{out}.field1 = {out}.field0 < {args[0]};")
+                        ctx.emit(f"{out}.field0 = {args[0]} + {args[1]};")
+                        ctx.emit(f"{out}.field1 = {out}.field0 < {args[0]};")
                         continue
                     if fn.startswith("llvm.ssub.with.overflow.") and len(args) == 2:
-                        emit(f"{out}.field0 = {args[0]} - {args[1]};")
-                        emit(
+                        ctx.emit(f"{out}.field0 = {args[0]} - {args[1]};")
+                        ctx.emit(
                             f"{out}.field1 = (({args[0]} ^ {args[1]}) & ({args[0]} ^ {out}.field0)) < 0;"
                         )
                         continue
                     if fn.startswith("llvm.usub.with.overflow.") and len(args) == 2:
-                        emit(f"{out}.field0 = {args[0]} - {args[1]};")
-                        emit(f"{out}.field1 = {args[0]} < {args[1]};")
+                        ctx.emit(f"{out}.field0 = {args[0]} - {args[1]};")
+                        ctx.emit(f"{out}.field1 = {args[0]} < {args[1]};")
                         continue
-                    lowered_intrinsic = lower_intrinsic(fn, args)
+                    lowered_intrinsic = ctx.lower_intrinsic(fn, args)
                     if lowered_intrinsic is not None:
-                        emit(f"{out} = {lowered_intrinsic};")
+                        ctx.emit(f"{out} = {lowered_intrinsic};")
                     elif fn in axis_helper_map:
-                        emit(f"{out} = {axis_helper_map[fn]};")
+                        ctx.emit(f"{out} = {axis_helper_map[fn]};")
                     elif (
                         fn.startswith("__metal_predicated_ld_global_")
                         and len(args) == 3
                     ):
-                        out_ty = ssa_decl_types.get(out)
+                        out_ty = ctx.ssa_decl_types.get(out)
                         if out_ty is None:
-                            emit(f"{out} = ({args[2]} ? *{args[1]} : {args[0]});")
+                            ctx.emit(f"{out} = ({args[2]} ? *{args[1]} : {args[0]});")
                         else:
-                            emit(
+                            ctx.emit(
                                 f"{out} = ({args[2]} ? ({out_ty})(*{args[1]}) : ({out_ty})({args[0]}));"
                             )
                     elif fn == "__metal_simd_shuffle_xor" and len(args) == 2:
-                        emit(f"{out} = simd_shuffle_xor({args[0]}, {args[1]});")
+                        ctx.emit(f"{out} = simd_shuffle_xor({args[0]}, {args[1]});")
                     elif fn == "__metal_simd_shuffle_up" and len(args) == 2:
-                        emit(f"{out} = simd_shuffle_up({args[0]}, {args[1]});")
+                        ctx.emit(f"{out} = simd_shuffle_up({args[0]}, {args[1]});")
                     elif fn == "__metal_simd_shuffle" and len(args) == 2:
-                        emit(f"{out} = simd_shuffle({args[0]}, {args[1]});")
+                        ctx.emit(f"{out} = simd_shuffle({args[0]}, {args[1]});")
                     elif fn == "__metal_simdgroup_load" and len(args) == 2:
-                        elem_ty = simdgroup_elem_for_msl_value(out)
-                        if use_native_simdgroup:
-                            emit(
+                        elem_ty = ctx.simdgroup_elem_for_msl_value(out)
+                        if ctx.use_native_simdgroup:
+                            ctx.emit(
                                 f"simdgroup_load({out}, "
                                 f"(const device {elem_ty}*){args[0]}, {args[1]});"
                             )
                         else:
                             fn_tag = elem_ty.replace(" ", "_")
-                            emit(
+                            ctx.emit(
                                 f"{out} = __metal_sg_load_{fn_tag}("
                                 f"(const device {elem_ty}*){args[0]}, {args[1]});"
                             )
                     elif (
                         fn == "__metal_simdgroup_multiply_accumulate" and len(args) == 3
                     ):
-                        elem_ty = simdgroup_elem_for_msl_value(out)
-                        if use_native_simdgroup:
-                            emit(
+                        elem_ty = ctx.simdgroup_elem_for_msl_value(out)
+                        if ctx.use_native_simdgroup:
+                            ctx.emit(
                                 f"simdgroup_multiply_accumulate("
                                 f"{out}, {args[0]}, {args[1]}, {args[2]});"
                             )
                         else:
                             fn_tag = elem_ty.replace(" ", "_")
-                            emit(
+                            ctx.emit(
                                 f"{out} = __metal_sg_mma_{fn_tag}("
                                 f"{args[0]}, {args[1]}, {args[2]});"
                             )
@@ -2187,49 +1641,49 @@ class MetalBackend(BaseBackend):
                             raise RuntimeError(
                                 f"Unsupported LLVM intrinsic in Metal lowering: '{fn}'"
                             )
-                        emit(f"{out} = {fn}({', '.join(args)});")
+                        ctx.emit(f"{out} = {fn}({', '.join(args)});")
                     continue
 
                 m = _RE_ICMP.match(line) if _opc == "icmp" else None
                 if m:
                     out_ssa, pred, llvm_ty_icmp, lhs, rhs = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
                     cmp_op = cmp_map.get(pred)
                     if cmp_op is None:
                         raise RuntimeError(f"Unsupported icmp predicate '{pred}'")
-                    lhs_expr = to_expr(lhs)
-                    rhs_expr = to_expr(rhs)
+                    lhs_expr = ctx.to_expr(lhs)
+                    rhs_expr = ctx.to_expr(rhs)
                     if pred.startswith("u") and pred not in ("eq", "ne"):
-                        u_ty = unsigned_msl(llvm_scalar_to_msl(llvm_ty_icmp))
+                        u_ty = unsigned_msl(ctx.llvm_scalar_to_msl(llvm_ty_icmp))
                         lhs_expr = f"({u_ty}){lhs_expr}"
                         rhs_expr = f"({u_ty}){rhs_expr}"
-                    emit(f"{out} = ({lhs_expr} {cmp_op} {rhs_expr});")
+                    ctx.emit(f"{out} = ({lhs_expr} {cmp_op} {rhs_expr});")
                     continue
 
                 m = _RE_FCMP.match(line) if _opc == "fcmp" else None
                 if m:
                     out_ssa, pred, lhs, rhs = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    lhs_expr = to_expr(lhs)
-                    rhs_expr = to_expr(rhs)
-                    emit(f"{out} = {fcmp_expr(pred, lhs_expr, rhs_expr)};")
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    lhs_expr = ctx.to_expr(lhs)
+                    rhs_expr = ctx.to_expr(rhs)
+                    ctx.emit(f"{out} = {ctx.fcmp_expr(pred, lhs_expr, rhs_expr)};")
                     continue
 
                 m = _RE_BR.match(line) if _opc == "br" else None
                 if m:
                     target = normalize_label(m.group(1))
-                    target_id = block_ids.get(target)
+                    target_id = ctx.block_ids.get(target)
                     if target_id is None:
                         raise RuntimeError(
                             f"Unknown branch target '{target}' in Metal lowering"
                         )
                     if needs_tg_loop_sync and target_id <= block_id:
-                        emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
-                    emit(f"__triton_pred_block = {block_id};")
-                    emit(f"__pc = {target_id};")
-                    emit("continue;")
+                        ctx.emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
+                    ctx.emit(f"__triton_pred_block = {block_id};")
+                    ctx.emit(f"__pc = {target_id};")
+                    ctx.emit("continue;")
                     terminated = True
                     break
 
@@ -2238,27 +1692,27 @@ class MetalBackend(BaseBackend):
                     cond, t_lbl, f_lbl = m.groups()
                     t_lbl = normalize_label(t_lbl)
                     f_lbl = normalize_label(f_lbl)
-                    t_id = block_ids.get(t_lbl)
-                    f_id = block_ids.get(f_lbl)
+                    t_id = ctx.block_ids.get(t_lbl)
+                    f_id = ctx.block_ids.get(f_lbl)
                     if t_id is None or f_id is None:
                         raise RuntimeError(
                             f"Unknown branch targets '{t_lbl}'/'{f_lbl}' in Metal lowering"
                         )
                     if needs_tg_loop_sync and (t_id <= block_id or f_id <= block_id):
-                        emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
-                    emit(
-                        f"if ({to_expr(cond)}) {{ __triton_pred_block = {block_id}; __pc = {t_id}; }} "
+                        ctx.emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
+                    ctx.emit(
+                        f"if ({ctx.to_expr(cond)}) {{ __triton_pred_block = {block_id}; __pc = {t_id}; }} "
                         f"else {{ __triton_pred_block = {block_id}; __pc = {f_id}; }}"
                     )
-                    emit("continue;")
+                    ctx.emit("continue;")
                     terminated = True
                     break
 
                 m = _RE_PHI.match(line) if _opc == "phi" else None
                 if m:
                     out_ssa, incoming_raw = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
                     incoming_pairs = []
                     for incoming in split_top_level(incoming_raw):
                         pair = incoming.strip()
@@ -2272,22 +1726,22 @@ class MetalBackend(BaseBackend):
                         )
                     if not incoming_pairs:
                         raise RuntimeError("Malformed phi node with no incoming values")
-                    phi_expr = to_expr(incoming_pairs[-1][0])
+                    phi_expr = ctx.to_expr(incoming_pairs[-1][0])
                     for val, pred in reversed(incoming_pairs[:-1]):
-                        pred_id = block_ids.get(pred, -1)
-                        phi_expr = f"(__triton_pred_block == {pred_id} ? {to_expr(val)} : {phi_expr})"
-                    emit(f"{out} = {phi_expr};")
+                        pred_id = ctx.block_ids.get(pred, -1)
+                        phi_expr = f"(__triton_pred_block == {pred_id} ? {ctx.to_expr(val)} : {phi_expr})"
+                    ctx.emit(f"{out} = {phi_expr};")
                     continue
 
                 m = _RE_VOID_CALL.match(line) if _opc == "call" else None
                 if m:
                     fn, args_raw = m.groups()
-                    args = [to_expr(v) for v in parse_call_args(args_raw)]
+                    args = [ctx.to_expr(v) for v in ctx.parse_call_args(args_raw)]
                     if (
                         fn.startswith("__metal_predicated_st_global_")
                         and len(args) == 3
                     ):
-                        emit(f"if ({args[2]}) {{ *{args[1]} = {args[0]}; }}")
+                        ctx.emit(f"if ({args[2]}) {{ *{args[1]} = {args[0]}; }}")
                     elif fn == "__metal_simdgroup_barrier":
                         barrier_flags = "mem_flags::mem_none"
                         if len(args) >= 1:
@@ -2309,109 +1763,109 @@ class MetalBackend(BaseBackend):
                                 # Conservative fallback when flag folding is
                                 # not possible.
                                 barrier_flags = "mem_flags::mem_threadgroup"
-                        emit(f"threadgroup_barrier({barrier_flags});")
+                        ctx.emit(f"threadgroup_barrier({barrier_flags});")
                     elif fn == "__metal_simdgroup_store" and len(args) == 3:
-                        elem_ty = simdgroup_elem_for_msl_value(args[0])
-                        if use_native_simdgroup:
-                            emit(
+                        elem_ty = ctx.simdgroup_elem_for_msl_value(args[0])
+                        if ctx.use_native_simdgroup:
+                            ctx.emit(
                                 f"simdgroup_store({args[0]}, "
                                 f"(device {elem_ty}*){args[1]}, {args[2]});"
                             )
                         else:
                             fn_tag = elem_ty.replace(" ", "_")
-                            emit(
+                            ctx.emit(
                                 f"__metal_sg_store_{fn_tag}({args[0]}, "
                                 f"(device {elem_ty}*){args[1]}, {args[2]});"
                             )
                     elif fn.startswith("llvm.nvvm.barrier0"):
-                        emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
+                        ctx.emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
                     elif fn.startswith("llvm.assume"):
-                        emit("(void)0;")
+                        ctx.emit("(void)0;")
                     elif fn.startswith("llvm.lifetime.start") or fn.startswith(
                         "llvm.lifetime.end"
                     ):
-                        emit("(void)0;")
+                        ctx.emit("(void)0;")
                     elif fn.startswith("llvm.memcpy") and len(args) >= 3:
-                        emit(
+                        ctx.emit(
                             f"for (int __i = 0; __i < {args[2]}; __i++) "
                             f"((device char*){args[0]})[__i] = ((device char*){args[1]})[__i];"
                         )
                     elif fn.startswith("llvm.memset") and len(args) >= 3:
-                        emit(
+                        ctx.emit(
                             f"for (int __i = 0; __i < {args[2]}; __i++) "
                             f"((device char*){args[0]})[__i] = (char){args[1]};"
                         )
                     elif fn.startswith("llvm.memmove") and len(args) >= 3:
                         # Correct memmove semantics: copy backward when
                         # dst > src to handle overlapping regions safely.
-                        emit(f"if ((uintptr_t){args[0]} > (uintptr_t){args[1]}) {{")
-                        emit(
+                        ctx.emit(f"if ((uintptr_t){args[0]} > (uintptr_t){args[1]}) {{")
+                        ctx.emit(
                             f"  for (int __i = {args[2]} - 1; __i >= 0; __i--) "
                             f"((device char*){args[0]})[__i] = ((device char*){args[1]})[__i];"
                         )
-                        emit(f"}} else {{")
-                        emit(
+                        ctx.emit(f"}} else {{")
+                        ctx.emit(
                             f"  for (int __i = 0; __i < {args[2]}; __i++) "
                             f"((device char*){args[0]})[__i] = ((device char*){args[1]})[__i];"
                         )
-                        emit(f"}}")
+                        ctx.emit(f"}}")
                     else:
                         if fn.startswith("llvm."):
                             raise RuntimeError(
                                 f"Unsupported LLVM intrinsic in Metal lowering: '{fn}'"
                             )
-                        emit(f"{fn}({', '.join(args)});")
+                        ctx.emit(f"{fn}({', '.join(args)});")
                     continue
 
                 m = _RE_SELECT.match(line) if _opc == "select" else None
                 if m:
                     out_ssa, cond, lhs, rhs = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    emit(
-                        f"{out} = ({to_expr(cond)} ? {to_expr(lhs)} : {to_expr(rhs)});"
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    ctx.emit(
+                        f"{out} = ({ctx.to_expr(cond)} ? {ctx.to_expr(lhs)} : {ctx.to_expr(rhs)});"
                     )
                     continue
 
                 m = _RE_FNEG.match(line) if _opc == "fneg" else None
                 if m:
                     out_ssa, val = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    emit(f"{out} = -({to_expr(val)});")
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    ctx.emit(f"{out} = -({ctx.to_expr(val)});")
                     continue
 
                 m = _RE_FREEZE.match(line) if _opc == "freeze" else None
                 if m:
                     out_ssa, val = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    emit(f"{out} = {to_expr(val)};")
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    ctx.emit(f"{out} = {ctx.to_expr(val)};")
                     continue
 
                 m = _RE_EXTRACTELEM.match(line) if _opc == "extractelement" else None
                 if m:
                     out_ssa, width_s, vec, idx = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
                     width = int(width_s)
                     if width == 1:
-                        emit(f"{out} = {to_expr(vec)};")
+                        ctx.emit(f"{out} = {ctx.to_expr(vec)};")
                     else:
-                        emit(f"{out} = {to_expr(vec)}[{to_expr(idx)}];")
+                        ctx.emit(f"{out} = {ctx.to_expr(vec)}[{ctx.to_expr(idx)}];")
                     continue
 
                 m = _RE_INSERTELEM.match(line) if _opc == "insertelement" else None
                 if m:
                     out_ssa, width_s, vec, val, idx = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
                     width = int(width_s)
                     if width == 1:
-                        emit(f"{out} = {to_expr(val)};")
+                        ctx.emit(f"{out} = {ctx.to_expr(val)};")
                     else:
-                        emit(f"{out} = {to_expr(vec)};")
-                        emit(f"{out}[{to_expr(idx)}] = {to_expr(val)};")
+                        ctx.emit(f"{out} = {ctx.to_expr(vec)};")
+                        ctx.emit(f"{out}[{ctx.to_expr(idx)}] = {ctx.to_expr(val)};")
                     continue
 
                 m = _RE_SHUFFLEVECTOR.match(line) if _opc == "shufflevector" else None
@@ -2426,14 +1880,14 @@ class MetalBackend(BaseBackend):
                         out_width_s,
                         mask_spec,
                     ) = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
                     lhs_width = int(lhs_width_s)
                     rhs_width = int(rhs_width_s)
                     out_width = int(out_width_s)
-                    lhs_expr = to_expr(extract_value_token(lhs_vec))
-                    rhs_expr = to_expr(extract_value_token(rhs_vec))
-                    scalar_ty = llvm_scalar_to_msl(elem_ty.strip())
+                    lhs_expr = ctx.to_expr(extract_value_token(lhs_vec))
+                    rhs_expr = ctx.to_expr(extract_value_token(rhs_vec))
+                    scalar_ty = ctx.llvm_scalar_to_msl(elem_ty.strip())
 
                     mask = mask_spec.strip()
                     if mask == "zeroinitializer":
@@ -2452,7 +1906,7 @@ class MetalBackend(BaseBackend):
 
                     shuffled: list[str] = []
                     for mask_elem in mask_elems:
-                        _, lane_tok = split_typed_value(mask_elem)
+                        _, lane_tok = ctx.split_typed_value(mask_elem)
                         lane_tok = lane_tok.strip()
                         if lane_tok in ("undef", "poison"):
                             shuffled.append("0")
@@ -2477,9 +1931,9 @@ class MetalBackend(BaseBackend):
                         shuffled.extend(["0"] * (out_width - len(shuffled)))
 
                     if out_width <= 1:
-                        emit(f"{out} = {shuffled[0] if shuffled else '0'};")
+                        ctx.emit(f"{out} = {shuffled[0] if shuffled else '0'};")
                     else:
-                        emit(
+                        ctx.emit(
                             f"{out} = {scalar_ty}{out_width}({', '.join(shuffled[:out_width])});"
                         )
                     continue
@@ -2487,32 +1941,32 @@ class MetalBackend(BaseBackend):
                 m = _RE_EXTRACTVALUE.match(line) if _opc == "extractvalue" else None
                 if m:
                     out_ssa, _, src_val, idx_str = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    emit(f"{out} = {to_expr(src_val)}.field{idx_str};")
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    ctx.emit(f"{out} = {ctx.to_expr(src_val)}.field{idx_str};")
                     continue
 
                 m = _RE_INSERTVALUE.match(line) if _opc == "insertvalue" else None
                 if m:
                     out_ssa, _, agg_val, _, elem_val, idx_str = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    emit(f"{out} = {to_expr(agg_val)};")
-                    emit(f"{out}.field{idx_str} = {to_expr(elem_val)};")
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    ctx.emit(f"{out} = {ctx.to_expr(agg_val)};")
+                    ctx.emit(f"{out}.field{idx_str} = {ctx.to_expr(elem_val)};")
                     continue
 
                 m = _RE_ATOMICRMW.match(line) if _opc == "atomicrmw" else None
                 if m:
                     out_ssa, op, addr_space, ptr, val_type, val, ordering = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    msl_ty = llvm_scalar_to_msl(val_type.strip())
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    msl_ty = ctx.llvm_scalar_to_msl(val_type.strip())
                     atomic_func = _ATOMIC_OP_MAP.get(op, "atomic_fetch_add_explicit")
                     msl_order = _MEMORY_ORDER_MAP.get(ordering, "memory_order_relaxed")
-                    emit(
+                    ctx.emit(
                         f"{out} = {atomic_func}("
-                        f"reinterpret_cast<{msl_addr_space(addr_space)} atomic_{msl_ty}*>({to_expr(ptr)}), "
-                        f"{to_expr(val)}, {msl_order});"
+                        f"reinterpret_cast<{ctx.msl_addr_space(addr_space)} atomic_{msl_ty}*>({ctx.to_expr(ptr)}), "
+                        f"{ctx.to_expr(val)}, {msl_order});"
                     )
                     continue
 
@@ -2528,46 +1982,46 @@ class MetalBackend(BaseBackend):
                         success_order,
                         fail_order,
                     ) = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    msl_ty = llvm_scalar_to_msl(val_type.strip())
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    msl_ty = ctx.llvm_scalar_to_msl(val_type.strip())
                     msl_success = _MEMORY_ORDER_MAP.get(
                         success_order, "memory_order_relaxed"
                     )
                     msl_fail = _MEMORY_ORDER_MAP.get(fail_order, "memory_order_relaxed")
-                    emit(f"{out}.field0 = {to_expr(expected)};")
-                    emit(
+                    ctx.emit(f"{out}.field0 = {ctx.to_expr(expected)};")
+                    ctx.emit(
                         f"{out}.field1 = atomic_compare_exchange_weak_explicit("
-                        f"reinterpret_cast<{msl_addr_space(addr_space)} atomic_{msl_ty}*>({to_expr(ptr)}), "
-                        f"&{out}.field0, {to_expr(desired)}, {msl_success}, {msl_fail});"
+                        f"reinterpret_cast<{ctx.msl_addr_space(addr_space)} atomic_{msl_ty}*>({ctx.to_expr(ptr)}), "
+                        f"&{out}.field0, {ctx.to_expr(desired)}, {msl_success}, {msl_fail});"
                     )
                     continue
 
                 m = _RE_ALLOCA.match(line) if _opc == "alloca" else None
                 if m:
                     out_ssa, elem_type = m.groups()
-                    out = msl_id(out_ssa)
-                    ssa[out_ssa] = out
-                    emit(f"{out} = &{out}_storage;")
+                    out = ctx.msl_id(out_ssa)
+                    ctx.ssa[out_ssa] = out
+                    ctx.emit(f"{out} = &{out}_storage;")
                     continue
 
                 m = _RE_SWITCH.match(line) if _opc == "switch" else None
                 if m:
                     val_type, val, default_label, cases_str = m.groups()
                     default_label = normalize_label(default_label)
-                    default_id = block_ids.get(default_label)
-                    emit(f"__triton_pred_block = {block_id};")
-                    emit(f"switch ({to_expr(val)}) {{")
+                    default_id = ctx.block_ids.get(default_label)
+                    ctx.emit(f"__triton_pred_block = {block_id};")
+                    ctx.emit(f"switch ({ctx.to_expr(val)}) {{")
                     for cm in _RE_SWITCH_CASE.finditer(cases_str):
                         case_val = cm.group(2)
                         case_label = normalize_label(cm.group(3))
-                        case_id = block_ids.get(case_label)
+                        case_id = ctx.block_ids.get(case_label)
                         if case_id is not None:
-                            emit(f"  case {case_val}: __pc = {case_id}; break;")
+                            ctx.emit(f"  case {case_val}: __pc = {case_id}; break;")
                     if default_id is not None:
-                        emit(f"  default: __pc = {default_id}; break;")
-                    emit("}")
-                    emit("continue;")
+                        ctx.emit(f"  default: __pc = {default_id}; break;")
+                    ctx.emit("}")
+                    ctx.emit("continue;")
                     terminated = True
                     break
 
@@ -2575,15 +2029,15 @@ class MetalBackend(BaseBackend):
                 if m:
                     syncscope, ordering = m.groups()
                     if syncscope in ("workgroup", "threadgroup"):
-                        emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
+                        ctx.emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
                     elif syncscope in ("subgroup", "wavefront"):
-                        emit("simdgroup_barrier(mem_flags::mem_threadgroup);")
+                        ctx.emit("simdgroup_barrier(mem_flags::mem_threadgroup);")
                     else:
-                        emit("threadgroup_barrier(mem_flags::mem_device);")
+                        ctx.emit("threadgroup_barrier(mem_flags::mem_device);")
                     continue
 
                 if line.startswith("unreachable"):
-                    emit("return;")
+                    ctx.emit("return;")
                     terminated = True
                     break
 
@@ -2617,16 +2071,16 @@ class MetalBackend(BaseBackend):
                         f"[TRITON_METAL_DEBUG] Failure signature: UNSUPPORTED_IR_{category}_{opcode}"
                     )
                 if best_effort:
-                    emit(f"// UNSUPPORTED: {line}")
+                    ctx.emit(f"// UNSUPPORTED: {line}")
                     continue
 
             if not terminated:
-                emit("return;")
-            body_lines.append("    }")
+                ctx.emit("return;")
+            ctx.body_lines.append("    }")
 
-        body_lines.append("    default: return;")
-        body_lines.append("    }")
-        body_lines.append("  }")
+        ctx.body_lines.append("    default: return;")
+        ctx.body_lines.append("    }")
+        ctx.body_lines.append("  }")
 
         if unsupported_lines:
             from collections import Counter
@@ -2737,11 +2191,11 @@ class MetalBackend(BaseBackend):
                     "",
                 ]
             )
-        msl_lines.extend(struct_defs)
-        if not use_native_simdgroup and fallback_simdgroup_elem_types:
-            if struct_defs:
+        msl_lines.extend(ctx.struct_defs)
+        if not use_native_simdgroup and ctx.fallback_simdgroup_elem_types:
+            if ctx.struct_defs:
                 msl_lines.append("")
-            for elem_ty in sorted(fallback_simdgroup_elem_types):
+            for elem_ty in sorted(ctx.fallback_simdgroup_elem_types):
                 tag = elem_ty.replace(" ", "_")
                 acc_ty = "float" if elem_ty in ("half", "float", "bfloat") else elem_ty
                 msl_lines.extend(
@@ -2791,7 +2245,7 @@ class MetalBackend(BaseBackend):
                         "",
                     ]
                 )
-        if struct_defs:
+        if ctx.struct_defs:
             msl_lines.append("")
         msl_lines.extend(
             [
@@ -2800,7 +2254,7 @@ class MetalBackend(BaseBackend):
                 ") {",
             ]
         )
-        msl_lines.extend(body_lines)
+        msl_lines.extend(ctx.body_lines)
         msl_lines.append("}")
         msl_lines.append("")
         msl_source = "\n".join(msl_lines)
