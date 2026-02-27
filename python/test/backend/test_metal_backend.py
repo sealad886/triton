@@ -8730,3 +8730,635 @@ class TestMetalAOTRuntime:
             f"stdout: {result.stdout[:500]}\n"
             f"stderr: {result.stderr[:500]}"
         )
+
+
+# ── Training Loop Pattern Compile Tests ──────────────────────────────
+
+
+class TestMetalTrainingLoopPatterns:
+    """Test training-related kernel patterns compile to valid MSL via IR→MSL."""
+
+    def test_sgd_parameter_update(self):
+        """SGD update: param -= lr * grad compiles to valid MSL."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @sgd_update_kernel(ptr %param, ptr %grad, float %lr, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %p_ptr = getelementptr float, ptr %param, i64 %idx
+  %g_ptr = getelementptr float, ptr %grad, i64 %idx
+  %p_val = load float, ptr %p_ptr
+  %g_val = load float, ptr %g_ptr
+  %step = fmul float %lr, %g_val
+  %updated = fsub float %p_val, %step
+  store float %updated, ptr %p_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+        assert " - " in msl
+
+    def test_loss_gradient_pattern(self):
+        """MSE loss gradient: grad = 2.0*(pred - target)/n compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @mse_grad_kernel(ptr %pred, ptr %target, ptr %grad, float %inv_n, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %p_ptr = getelementptr float, ptr %pred, i64 %idx
+  %t_ptr = getelementptr float, ptr %target, i64 %idx
+  %p_val = load float, ptr %p_ptr
+  %t_val = load float, ptr %t_ptr
+  %diff = fsub float %p_val, %t_val
+  %scaled = fmul float 2.0, %diff
+  %g = fmul float %scaled, %inv_n
+  %g_ptr = getelementptr float, ptr %grad, i64 %idx
+  store float %g, ptr %g_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " - " in msl
+        assert " * " in msl
+
+    def test_weight_decay_pattern(self):
+        """L2 regularization: param -= lr*grad + wd*param compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @weight_decay_kernel(ptr %param, ptr %grad, float %lr, float %wd, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %p_ptr = getelementptr float, ptr %param, i64 %idx
+  %g_ptr = getelementptr float, ptr %grad, i64 %idx
+  %p_val = load float, ptr %p_ptr
+  %g_val = load float, ptr %g_ptr
+  %lr_grad = fmul float %lr, %g_val
+  %wd_param = fmul float %wd, %p_val
+  %total_step = fadd float %lr_grad, %wd_param
+  %updated = fsub float %p_val, %total_step
+  store float %updated, ptr %p_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+        assert " + " in msl
+        assert " - " in msl
+
+    def test_momentum_update_pattern(self):
+        """Momentum SGD: velocity = momentum*velocity + grad; param -= lr*velocity compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @momentum_sgd_kernel(ptr %param, ptr %grad, ptr %velocity, float %lr, float %momentum, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %p_ptr = getelementptr float, ptr %param, i64 %idx
+  %g_ptr = getelementptr float, ptr %grad, i64 %idx
+  %v_ptr = getelementptr float, ptr %velocity, i64 %idx
+  %p_val = load float, ptr %p_ptr
+  %g_val = load float, ptr %g_ptr
+  %v_val = load float, ptr %v_ptr
+  %mv = fmul float %momentum, %v_val
+  %v_new = fadd float %mv, %g_val
+  store float %v_new, ptr %v_ptr
+  %step = fmul float %lr, %v_new
+  %p_new = fsub float %p_val, %step
+  store float %p_new, ptr %p_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+        assert " + " in msl
+        assert " - " in msl
+
+    def test_adam_update_pattern(self):
+        """Adam-like update with running mean/variance compiles to valid MSL."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @adam_update_kernel(ptr %param, ptr %grad, ptr %m, ptr %v, float %lr, float %beta1, float %beta2, float %eps, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %p_ptr = getelementptr float, ptr %param, i64 %idx
+  %g_ptr = getelementptr float, ptr %grad, i64 %idx
+  %m_ptr = getelementptr float, ptr %m, i64 %idx
+  %v_ptr = getelementptr float, ptr %v, i64 %idx
+  %p_val = load float, ptr %p_ptr
+  %g_val = load float, ptr %g_ptr
+  %m_val = load float, ptr %m_ptr
+  %v_val = load float, ptr %v_ptr
+  ; m = beta1 * m + (1 - beta1) * grad
+  %b1m = fmul float %beta1, %m_val
+  %one_minus_b1 = fsub float 1.0, %beta1
+  %omb1_g = fmul float %one_minus_b1, %g_val
+  %m_new = fadd float %b1m, %omb1_g
+  store float %m_new, ptr %m_ptr
+  ; v = beta2 * v + (1 - beta2) * grad^2
+  %b2v = fmul float %beta2, %v_val
+  %g_sq = fmul float %g_val, %g_val
+  %one_minus_b2 = fsub float 1.0, %beta2
+  %omb2_gsq = fmul float %one_minus_b2, %g_sq
+  %v_new = fadd float %b2v, %omb2_gsq
+  store float %v_new, ptr %v_ptr
+  ; param -= lr * m / (sqrt(v) + eps)
+  %sqrt_v = call float @__nv_sqrtf(float %v_new)
+  %denom = fadd float %sqrt_v, %eps
+  %ratio = fdiv float %m_new, %denom
+  %step = fmul float %lr, %ratio
+  %p_new = fsub float %p_val, %step
+  store float %p_new, ptr %p_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+        assert " + " in msl
+        assert " - " in msl
+        assert " / " in msl
+        assert "sqrt(" in msl
+
+
+# ── Convolution Pattern Compile Tests ────────────────────────────────
+
+
+class TestMetalConvolutionPatterns:
+    """Test convolution-related kernel patterns compile to valid MSL via IR→MSL."""
+
+    def test_conv1d_sliding_window(self):
+        """1D sliding window accumulation with inner loop compiles to MSL."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @conv1d_kernel(ptr %input, ptr %weight, ptr %output, i32 %in_len, i32 %out_len, i32 %ksize) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %out_len
+  br i1 %cmp, label %loop_init, label %exit
+
+loop_init:
+  br label %loop_header
+
+loop_header:
+  %ki = phi i32 [0, %loop_init], [%ki_next, %loop_body]
+  %acc = phi float [0.0, %loop_init], [%acc_next, %loop_body]
+  %ki_cmp = icmp slt i32 %ki, %ksize
+  br i1 %ki_cmp, label %loop_body, label %store_out
+
+loop_body:
+  %x_idx = add i32 %tid, %ki
+  %x_idx64 = sext i32 %x_idx to i64
+  %x_ptr = getelementptr float, ptr %input, i64 %x_idx64
+  %x_val = load float, ptr %x_ptr
+  %ki64 = sext i32 %ki to i64
+  %w_ptr = getelementptr float, ptr %weight, i64 %ki64
+  %w_val = load float, ptr %w_ptr
+  %prod = fmul float %x_val, %w_val
+  %acc_next = fadd float %acc, %prod
+  %ki_next = add i32 %ki, 1
+  br label %loop_header
+
+store_out:
+  %out_idx = sext i32 %tid to i64
+  %out_ptr = getelementptr float, ptr %output, i64 %out_idx
+  store float %acc, ptr %out_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+        assert " + " in msl
+        assert "__triton_pred_block" in msl
+
+    def test_depthwise_conv_pattern(self):
+        """Depthwise conv: per-channel conv with channel indexing compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @depthwise_conv_kernel(ptr %input, ptr %weight, ptr %output, i32 %spatial_len, i32 %channels, i32 %ksize) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %ch = call i32 @__metal_get_thread_position_in_threadgroup_y()
+  %cmp_s = icmp slt i32 %tid, %spatial_len
+  %cmp_c = icmp slt i32 %ch, %channels
+  %cmp = and i1 %cmp_s, %cmp_c
+  br i1 %cmp, label %loop_init, label %exit
+
+loop_init:
+  br label %loop_header
+
+loop_header:
+  %ki = phi i32 [0, %loop_init], [%ki_next, %loop_body]
+  %acc = phi float [0.0, %loop_init], [%acc_next, %loop_body]
+  %ki_cmp = icmp slt i32 %ki, %ksize
+  br i1 %ki_cmp, label %loop_body, label %store_out
+
+loop_body:
+  %x_pos = add i32 %tid, %ki
+  %x_linear = mul i32 %ch, %spatial_len
+  %x_idx = add i32 %x_linear, %x_pos
+  %x_idx64 = sext i32 %x_idx to i64
+  %x_ptr = getelementptr float, ptr %input, i64 %x_idx64
+  %x_val = load float, ptr %x_ptr
+  %w_linear = mul i32 %ch, %ksize
+  %w_idx = add i32 %w_linear, %ki
+  %w_idx64 = sext i32 %w_idx to i64
+  %w_ptr = getelementptr float, ptr %weight, i64 %w_idx64
+  %w_val = load float, ptr %w_ptr
+  %prod = fmul float %x_val, %w_val
+  %acc_next = fadd float %acc, %prod
+  %ki_next = add i32 %ki, 1
+  br label %loop_header
+
+store_out:
+  %out_linear = mul i32 %ch, %spatial_len
+  %out_idx = add i32 %out_linear, %tid
+  %out_idx64 = sext i32 %out_idx to i64
+  %out_ptr = getelementptr float, ptr %output, i64 %out_idx64
+  store float %acc, ptr %out_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+        assert " + " in msl
+
+    def test_strided_access_pattern(self):
+        """Strided memory access (stride > 1) pattern common in convolutions compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @strided_access_kernel(ptr %input, ptr %output, i32 %n, i32 %stride) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %src_idx = mul i32 %tid, %stride
+  %src_idx64 = sext i32 %src_idx to i64
+  %src_ptr = getelementptr float, ptr %input, i64 %src_idx64
+  %val = load float, ptr %src_ptr
+  %doubled = fmul float %val, 2.0
+  %dst_idx = sext i32 %tid to i64
+  %dst_ptr = getelementptr float, ptr %output, i64 %dst_idx
+  store float %doubled, ptr %dst_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+
+    def test_im2col_pattern(self):
+        """Im2col-style gather: 2D index → linearized offset compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @im2col_kernel(ptr %input, ptr %col_buf, i32 %height, i32 %width, i32 %kh, i32 %kw, i32 %out_h, i32 %out_w) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %total = mul i32 %out_h, %out_w
+  %cmp = icmp slt i32 %tid, %total
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %oh = sdiv i32 %tid, %out_w
+  %ow = srem i32 %tid, %out_w
+  ; Gather from a single kernel position (0,0) as representative pattern
+  %in_row = add i32 %oh, 0
+  %in_col = add i32 %ow, 0
+  %in_linear = mul i32 %in_row, %width
+  %in_idx = add i32 %in_linear, %in_col
+  %in_idx64 = sext i32 %in_idx to i64
+  %in_ptr = getelementptr float, ptr %input, i64 %in_idx64
+  %val = load float, ptr %in_ptr
+  %out_idx = sext i32 %tid to i64
+  %col_ptr = getelementptr float, ptr %col_buf, i64 %out_idx
+  store float %val, ptr %col_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+        assert " + " in msl
+
+
+# ── Advanced Attention Pattern Compile Tests ─────────────────────────
+
+
+class TestMetalAdvancedAttentionPatterns:
+    """Test attention variant kernel patterns compile to valid MSL via IR→MSL."""
+
+    def test_multi_head_attention_scores(self):
+        """Multi-head attention score: Q*K^T / sqrt(d_k) with head offset compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @mha_score_kernel(ptr %Q, ptr %K, ptr %scores, i32 %seq_len, i32 %d_k, i32 %head_idx, i32 %head_dim) {
+entry:
+  %row = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %col = call i32 @__metal_get_thread_position_in_threadgroup_y()
+  %cmp_r = icmp slt i32 %row, %seq_len
+  %cmp_c = icmp slt i32 %col, %seq_len
+  %cmp = and i1 %cmp_r, %cmp_c
+  br i1 %cmp, label %dot_init, label %exit
+
+dot_init:
+  %head_off = mul i32 %head_idx, %head_dim
+  br label %dot_loop
+
+dot_loop:
+  %k = phi i32 [0, %dot_init], [%k_next, %dot_body]
+  %acc = phi float [0.0, %dot_init], [%acc_next, %dot_body]
+  %k_cmp = icmp slt i32 %k, %d_k
+  br i1 %k_cmp, label %dot_body, label %scale_store
+
+dot_body:
+  %q_off = mul i32 %row, %d_k
+  %q_idx = add i32 %q_off, %k
+  %q_idx_h = add i32 %q_idx, %head_off
+  %q_idx64 = sext i32 %q_idx_h to i64
+  %q_ptr = getelementptr float, ptr %Q, i64 %q_idx64
+  %q_val = load float, ptr %q_ptr
+  %k_off = mul i32 %col, %d_k
+  %k_idx = add i32 %k_off, %k
+  %k_idx_h = add i32 %k_idx, %head_off
+  %k_idx64 = sext i32 %k_idx_h to i64
+  %k_ptr = getelementptr float, ptr %K, i64 %k_idx64
+  %k_val = load float, ptr %k_ptr
+  %prod = fmul float %q_val, %k_val
+  %acc_next = fadd float %acc, %prod
+  %k_next = add i32 %k, 1
+  br label %dot_loop
+
+scale_store:
+  %dk_f = sitofp i32 %d_k to float
+  %sqrt_dk = call float @__nv_sqrtf(float %dk_f)
+  %scaled = fdiv float %acc, %sqrt_dk
+  %s_off = mul i32 %row, %seq_len
+  %s_idx = add i32 %s_off, %col
+  %s_idx64 = sext i32 %s_idx to i64
+  %s_ptr = getelementptr float, ptr %scores, i64 %s_idx64
+  store float %scaled, ptr %s_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+        assert " + " in msl
+        assert " / " in msl
+        assert "sqrt(" in msl
+
+    def test_grouped_query_attention(self):
+        """GQA: KV sharing across query groups via integer division compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @gqa_kernel(ptr %Q, ptr %K, ptr %V, ptr %out, i32 %seq_len, i32 %d_k, i32 %n_heads, i32 %n_kv_heads) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %head_id = call i32 @__metal_get_thread_position_in_threadgroup_y()
+  %cmp_s = icmp slt i32 %tid, %seq_len
+  %cmp_h = icmp slt i32 %head_id, %n_heads
+  %cmp = and i1 %cmp_s, %cmp_h
+  br i1 %cmp, label %body, label %exit
+
+body:
+  ; Map query head to KV head: kv_head = head_id / (n_heads / n_kv_heads)
+  %heads_per_kv = sdiv i32 %n_heads, %n_kv_heads
+  %kv_head = sdiv i32 %head_id, %heads_per_kv
+  ; Load Q element (simplified: single element per thread)
+  %q_off = mul i32 %head_id, %d_k
+  %q_idx = add i32 %q_off, %tid
+  %q_idx64 = sext i32 %q_idx to i64
+  %q_ptr = getelementptr float, ptr %Q, i64 %q_idx64
+  %q_val = load float, ptr %q_ptr
+  ; Load K element from shared KV head
+  %k_off = mul i32 %kv_head, %d_k
+  %k_idx = add i32 %k_off, %tid
+  %k_idx64 = sext i32 %k_idx to i64
+  %k_ptr = getelementptr float, ptr %K, i64 %k_idx64
+  %k_val = load float, ptr %k_ptr
+  ; Simple dot product element
+  %prod = fmul float %q_val, %k_val
+  ; Store result
+  %out_off = mul i32 %head_id, %seq_len
+  %out_idx = add i32 %out_off, %tid
+  %out_idx64 = sext i32 %out_idx to i64
+  %out_ptr = getelementptr float, ptr %out, i64 %out_idx64
+  store float %prod, ptr %out_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+        assert " / " in msl
+
+    def test_causal_mask_attention(self):
+        """Attention with causal masking (select/conditional store) compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @causal_attn_kernel(ptr %scores, ptr %out, i32 %seq_len) {
+entry:
+  %row = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %col = call i32 @__metal_get_thread_position_in_threadgroup_y()
+  %cmp_r = icmp slt i32 %row, %seq_len
+  %cmp_c = icmp slt i32 %col, %seq_len
+  %cmp_bounds = and i1 %cmp_r, %cmp_c
+  br i1 %cmp_bounds, label %body, label %exit
+
+body:
+  %idx = mul i32 %row, %seq_len
+  %linear = add i32 %idx, %col
+  %linear64 = sext i32 %linear to i64
+  %s_ptr = getelementptr float, ptr %scores, i64 %linear64
+  %s_val = load float, ptr %s_ptr
+  ; Causal mask: keep only col <= row, else -inf
+  %is_causal = icmp sle i32 %col, %row
+  %neg_inf = bitcast i32 -8388608 to float
+  %masked = select i1 %is_causal, float %s_val, float %neg_inf
+  %o_ptr = getelementptr float, ptr %out, i64 %linear64
+  store float %masked, ptr %o_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " ? " in msl
+        assert " * " in msl
+
+    def test_flash_attention_block(self):
+        """Flash-attention-style blocked dot product with running max compiles."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @flash_attn_block_kernel(ptr %Q, ptr %K, ptr %out, i32 %seq_len, i32 %d_k, i32 %block_size) {
+entry:
+  %row = call i32 @__metal_get_thread_position_in_threadgroup_x()
+  %cmp = icmp slt i32 %row, %seq_len
+  br i1 %cmp, label %block_init, label %exit
+
+block_init:
+  br label %block_loop
+
+block_loop:
+  %bk = phi i32 [0, %block_init], [%bk_next, %block_end]
+  %running_max = phi float [0xFFF0000000000000, %block_init], [%new_max, %block_end]
+  %running_sum = phi float [0.0, %block_init], [%new_sum, %block_end]
+  %bk_cmp = icmp slt i32 %bk, %seq_len
+  br i1 %bk_cmp, label %dot_init, label %store_out
+
+dot_init:
+  br label %dot_loop
+
+dot_loop:
+  %d = phi i32 [0, %dot_init], [%d_next, %dot_body]
+  %dot_acc = phi float [0.0, %dot_init], [%dot_next, %dot_body]
+  %d_cmp = icmp slt i32 %d, %d_k
+  br i1 %d_cmp, label %dot_body, label %dot_done
+
+dot_body:
+  %q_off = mul i32 %row, %d_k
+  %q_idx = add i32 %q_off, %d
+  %q_idx64 = sext i32 %q_idx to i64
+  %q_ptr = getelementptr float, ptr %Q, i64 %q_idx64
+  %q_val = load float, ptr %q_ptr
+  %k_off = mul i32 %bk, %d_k
+  %k_idx = add i32 %k_off, %d
+  %k_idx64 = sext i32 %k_idx to i64
+  %k_ptr = getelementptr float, ptr %K, i64 %k_idx64
+  %k_val = load float, ptr %k_ptr
+  %prod = fmul float %q_val, %k_val
+  %dot_next = fadd float %dot_acc, %prod
+  %d_next = add i32 %d, 1
+  br label %dot_loop
+
+dot_done:
+  ; Scale by 1/sqrt(d_k)
+  %dk_f = sitofp i32 %d_k to float
+  %sqrt_dk = call float @__nv_sqrtf(float %dk_f)
+  %score = fdiv float %dot_acc, %sqrt_dk
+  ; Update running max
+  %is_new_max = fcmp ogt float %score, %running_max
+  %new_max = select i1 %is_new_max, float %score, float %running_max
+  ; Accumulate exp(score - max) for softmax denominator
+  %shifted = fsub float %score, %new_max
+  %exp_s = call float @__nv_expf(float %shifted)
+  %new_sum = fadd float %running_sum, %exp_s
+  br label %block_end
+
+block_end:
+  %bk_next = add i32 %bk, %block_size
+  br label %block_loop
+
+store_out:
+  ; Store final normalized sum (simplified)
+  %result = fdiv float %running_sum, %running_sum
+  %out_idx = sext i32 %row to i64
+  %out_ptr = getelementptr float, ptr %out, i64 %out_idx
+  store float %result, ptr %out_ptr
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        msl = MetalBackend.make_metal_ir(ir, {}, None)
+        assert "UNSUPPORTED" not in msl
+        assert "kernel void" in msl
+        assert " * " in msl
+        assert " + " in msl
+        assert " / " in msl
+        assert "sqrt(" in msl
+        assert "exp(" in msl
+        assert " ? " in msl
