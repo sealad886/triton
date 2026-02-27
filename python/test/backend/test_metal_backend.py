@@ -1203,6 +1203,7 @@ class TestMetalRealWorldCompileCases:
     @skip_no_xcrun
     def test_compile_triton_fp8_blocked_matmul_pipeline(self):
         import torch
+
         import triton
         import triton.language as tl
         from triton.backends.compiler import GPUTarget
@@ -1281,6 +1282,7 @@ class TestMetalRealWorldCompileCases:
     @skip_no_xcrun
     def test_compile_triton_fp8_roundtrip_convert_pipeline(self):
         import torch
+
         import triton
         import triton.language as tl
         from triton.backends.compiler import GPUTarget
@@ -4700,6 +4702,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_vector_add_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -4732,6 +4735,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_int8_vector_add_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -4765,6 +4769,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_int8_blocked_matmul_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -4847,6 +4852,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_small_blocked_matmul_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -4931,6 +4937,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_row_softmax_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -4965,6 +4972,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_row_layernorm_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -5020,6 +5028,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_fp16_blocked_matmul_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -5105,6 +5114,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_batched_blocked_matmul_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -5201,6 +5211,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_embedding_gather_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -5245,6 +5256,7 @@ class TestMetalRuntimeMLCorrectness:
         import math
 
         import torch
+
         import triton
         import triton.language as tl
 
@@ -5348,6 +5360,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_mlp_block_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -5464,6 +5477,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_bf16_blocked_matmul_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -5554,6 +5568,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_grouped_batched_matmul_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -5665,6 +5680,7 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_depthwise_conv1d_like_matches_cpu(self):
         import torch
+
         import triton
         import triton.language as tl
 
@@ -6323,6 +6339,7 @@ class TestMetalAudit2Pass2ArgPack:
 
     def test_i8_packs_to_1_byte(self):
         import struct
+
         from third_party.metal.backend.driver import _ARG_PACK_FORMAT
 
         packed = struct.pack(_ARG_PACK_FORMAT["i8"], -1)
@@ -6331,6 +6348,7 @@ class TestMetalAudit2Pass2ArgPack:
 
     def test_u8_packs_to_1_byte(self):
         import struct
+
         from third_party.metal.backend.driver import _ARG_PACK_FORMAT
 
         packed = struct.pack(_ARG_PACK_FORMAT["u8"], 255)
@@ -6339,6 +6357,7 @@ class TestMetalAudit2Pass2ArgPack:
 
     def test_i16_packs_to_2_bytes(self):
         import struct
+
         from third_party.metal.backend.driver import _ARG_PACK_FORMAT
 
         packed = struct.pack(_ARG_PACK_FORMAT["i16"], -32768)
@@ -6346,6 +6365,7 @@ class TestMetalAudit2Pass2ArgPack:
 
     def test_u16_packs_to_2_bytes(self):
         import struct
+
         from third_party.metal.backend.driver import _ARG_PACK_FORMAT
 
         packed = struct.pack(_ARG_PACK_FORMAT["u16"], 65535)
@@ -6353,6 +6373,7 @@ class TestMetalAudit2Pass2ArgPack:
 
     def test_i1_packs_to_1_byte(self):
         import struct
+
         from third_party.metal.backend.driver import _ARG_PACK_FORMAT
 
         packed = struct.pack(_ARG_PACK_FORMAT["i1"], True)
@@ -6360,6 +6381,7 @@ class TestMetalAudit2Pass2ArgPack:
 
     def test_bf16_packs_to_2_bytes(self):
         import struct
+
         from third_party.metal.backend.driver import _ARG_PACK_FORMAT
 
         packed = struct.pack(_ARG_PACK_FORMAT["bf16"], 0x3F80)
