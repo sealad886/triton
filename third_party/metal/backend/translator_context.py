@@ -34,18 +34,83 @@ _SSA_NAME_RE = r"%[-A-Za-z0-9._]+"
 
 _MSL_RESERVED_IDENTIFIERS = frozenset(
     {
-        "kernel", "vertex", "fragment", "compute", "thread", "threadgroup",
-        "device", "constant",
-        "bool", "char", "short", "int", "long", "half", "float", "double", "void",
-        "uint", "uchar", "ushort", "ulong",
-        "if", "else", "switch", "case", "default", "return", "continue", "break",
-        "while", "for", "do", "goto",
-        "struct", "class", "union", "enum", "auto", "const", "volatile", "static",
-        "extern", "inline", "sizeof", "namespace", "using", "template", "typename",
-        "typedef", "new", "delete",
-        "fma", "fabs", "sqrt", "floor", "ceil", "trunc", "rint", "exp", "exp2",
-        "log", "log2", "sin", "cos", "tanh", "pow", "copysign", "max", "min",
-        "isnan", "popcount", "select", "clamp", "abs", "sign", "saturate", "step",
+        "kernel",
+        "vertex",
+        "fragment",
+        "compute",
+        "thread",
+        "threadgroup",
+        "device",
+        "constant",
+        "bool",
+        "char",
+        "short",
+        "int",
+        "long",
+        "half",
+        "float",
+        "double",
+        "void",
+        "uint",
+        "uchar",
+        "ushort",
+        "ulong",
+        "if",
+        "else",
+        "switch",
+        "case",
+        "default",
+        "return",
+        "continue",
+        "break",
+        "while",
+        "for",
+        "do",
+        "goto",
+        "struct",
+        "class",
+        "union",
+        "enum",
+        "auto",
+        "const",
+        "volatile",
+        "static",
+        "extern",
+        "inline",
+        "sizeof",
+        "namespace",
+        "using",
+        "template",
+        "typename",
+        "typedef",
+        "new",
+        "delete",
+        "fma",
+        "fabs",
+        "sqrt",
+        "floor",
+        "ceil",
+        "trunc",
+        "rint",
+        "exp",
+        "exp2",
+        "log",
+        "log2",
+        "sin",
+        "cos",
+        "tanh",
+        "pow",
+        "copysign",
+        "max",
+        "min",
+        "isnan",
+        "popcount",
+        "select",
+        "clamp",
+        "abs",
+        "sign",
+        "saturate",
+        "step",
         "mix",
     }
 )
@@ -394,10 +459,7 @@ class TranslatorContext:
                         break
                     elem_vals.append(self.constant_to_msl(val))
                 if vector_ok and elem_msl_ty is not None:
-                    return (
-                        f"{elem_msl_ty}{len(elem_vals)}"
-                        f"({', '.join(elem_vals)})"
-                    )
+                    return f"{elem_msl_ty}{len(elem_vals)}" f"({', '.join(elem_vals)})"
         if _RE_CONST_INT.match(token):
             return token
         hex_m = _RE_CONST_HEX_FLOAT.match(token)
@@ -485,9 +547,7 @@ class TranslatorContext:
         if not msl_decl_ty:
             return None
         msl_decl_ty = msl_decl_ty.strip()
-        if msl_decl_ty.startswith("simdgroup_matrix<") and msl_decl_ty.endswith(
-            ">"
-        ):
+        if msl_decl_ty.startswith("simdgroup_matrix<") and msl_decl_ty.endswith(">"):
             inner = msl_decl_ty[len("simdgroup_matrix<") : -1]
             return inner.split(",", 1)[0].strip()
         if msl_decl_ty.startswith("__metal_sgmat_"):
@@ -629,9 +689,7 @@ class TranslatorContext:
             raise RuntimeError(f"Unsupported fcmp predicate '{pred}'")
         return table[pred]
 
-    def get_aggregate_struct_name(
-        self, agg_type_str: str
-    ) -> tuple[str, list[str]]:
+    def get_aggregate_struct_name(self, agg_type_str: str) -> tuple[str, list[str]]:
         """Get or create a struct definition for an LLVM aggregate type."""
         agg_type_str = agg_type_str.strip()
         if agg_type_str in self.aggregate_type_structs:
@@ -641,9 +699,7 @@ class TranslatorContext:
         inner = agg_type_str.strip("{ }")
         field_types = [self.llvm_type_to_msl(t.strip()) for t in inner.split(",")]
         self.aggregate_type_structs[agg_type_str] = (name, field_types)
-        fields = "".join(
-            f"  {ft} field{i};\n" for i, ft in enumerate(field_types)
-        )
+        fields = "".join(f"  {ft} field{i};\n" for i, ft in enumerate(field_types))
         self.struct_defs.append(f"struct {name} {{\n{fields}}};")
         return name, field_types
 
@@ -704,7 +760,13 @@ class TranslatorContext:
                     init = f"(({u_ty})({init}))"
 
             if reduce_op in (
-                "or", "and", "xor", "add", "mul", "fadd", "fmul",
+                "or",
+                "and",
+                "xor",
+                "add",
+                "mul",
+                "fadd",
+                "fmul",
             ):
                 op_map = {
                     "or": "|",
@@ -717,9 +779,7 @@ class TranslatorContext:
                 }
                 expr = fold_infix(terms, op_map[reduce_op])
                 if init is not None:
-                    expr = fold_infix(
-                        [f"({init})", f"({expr})"], op_map[reduce_op]
-                    )
+                    expr = fold_infix([f"({init})", f"({expr})"], op_map[reduce_op])
                 return expr
 
             if reduce_op in ("smax", "umax", "fmax", "fmaximum"):

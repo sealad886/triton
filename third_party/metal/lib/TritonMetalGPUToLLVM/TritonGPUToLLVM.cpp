@@ -141,7 +141,6 @@ struct ConvertTritonMetalGPUToLLVM
     mlir::triton::populateControlFlowOpToLLVMPattern(typeConverter, patterns, targetInfo, benefit);
     mlir::triton::populateSPMDOpToLLVMPattern(typeConverter, patterns, targetInfo, benefit);
     mlir::triton::populatePrintOpToLLVMPattern(typeConverter, patterns, targetInfo, benefit);
-    mlir::triton::populateInstrumentationToLLVMPatterns(typeConverter, patterns);
 
     // Add standard MLIR to LLVM patterns
     mlir::arith::populateCeilFloorDivExpandOpsPatterns(patterns);
