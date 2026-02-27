@@ -53,7 +53,6 @@ from triton.backends.metal.compiler import (
     _SSA_NAME_RE,
 )
 
-
 # ── Base class ──────────────────────────────────────────────────────
 
 
@@ -300,9 +299,7 @@ _RE_GEP_FULL = re.compile(
 )
 
 # Phi with type capture
-_RE_PHI_FULL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+(.+?)\s+(\[.+)$"
-)
+_RE_PHI_FULL = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+(.+?)\s+(\[.+)$")
 
 # Select with result type
 _RE_SELECT_FULL = re.compile(
@@ -312,9 +309,7 @@ _RE_SELECT_FULL = re.compile(
 
 # FNeg with type capture
 _RE_FNEG_FULL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*fneg"
-    + _LLVM_FLAGS
-    + r"\s+(\S+)\s+(.+)$"
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*fneg" + _LLVM_FLAGS + r"\s+(\S+)\s+(.+)$"
 )
 
 # BinOp with type+operand split
@@ -338,10 +333,10 @@ def _extract_opcode(line: str) -> str:
     Mirrors ``_extract_ir_opcode`` in compiler.py.
     """
     eq_pos = line.find(" = ")
-    rest = line[eq_pos + 3:] if eq_pos >= 0 else line
+    rest = line[eq_pos + 3 :] if eq_pos >= 0 else line
     for prefix in ("tail ", "musttail ", "notail "):
         if rest.startswith(prefix):
-            rest = rest[len(prefix):]
+            rest = rest[len(prefix) :]
             break
     sp = rest.find(" ")
     return rest[:sp] if sp >= 0 else rest
@@ -357,13 +352,25 @@ def _extract_flags(line: str, opcode: str) -> str:
     eq_pos = line.find(" = ")
     if eq_pos < 0:
         return ""
-    after_eq = line[eq_pos + 3:]
+    after_eq = line[eq_pos + 3 :]
     op_pos = after_eq.find(opcode)
     if op_pos < 0:
         return ""
-    after_op = after_eq[op_pos + len(opcode):]
-    known_flags = {"nsw", "nuw", "nsz", "nnan", "ninf", "arcp", "contract",
-                   "reassoc", "afn", "fast", "exact", "disjoint"}
+    after_op = after_eq[op_pos + len(opcode) :]
+    known_flags = {
+        "nsw",
+        "nuw",
+        "nsz",
+        "nnan",
+        "ninf",
+        "arcp",
+        "contract",
+        "reassoc",
+        "afn",
+        "fast",
+        "exact",
+        "disjoint",
+    }
     flags = []
     rest = after_op.lstrip()
     while True:
@@ -373,7 +380,7 @@ def _extract_flags(line: str, opcode: str) -> str:
         token = rest[:sp]
         if token in known_flags:
             flags.append(token)
-            rest = rest[sp + 1:]
+            rest = rest[sp + 1 :]
         else:
             break
     return " ".join(flags)
@@ -599,7 +606,9 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 opcode="extractelement",
                 out_ssa=m.group(1),
                 vector_op="extractelement",
-                operands_raw=cleaned[cleaned.find("extractelement") + len("extractelement"):].strip(),
+                operands_raw=cleaned[
+                    cleaned.find("extractelement") + len("extractelement") :
+                ].strip(),
             )
 
     if opcode == "insertelement":
@@ -610,7 +619,9 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 opcode="insertelement",
                 out_ssa=m.group(1),
                 vector_op="insertelement",
-                operands_raw=cleaned[cleaned.find("insertelement") + len("insertelement"):].strip(),
+                operands_raw=cleaned[
+                    cleaned.find("insertelement") + len("insertelement") :
+                ].strip(),
             )
 
     if opcode == "shufflevector":
@@ -621,7 +632,9 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 opcode="shufflevector",
                 out_ssa=m.group(1),
                 vector_op="shufflevector",
-                operands_raw=cleaned[cleaned.find("shufflevector") + len("shufflevector"):].strip(),
+                operands_raw=cleaned[
+                    cleaned.find("shufflevector") + len("shufflevector") :
+                ].strip(),
             )
 
     # ── Aggregate operations ────────────────────────────────────────
@@ -633,7 +646,9 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 opcode="extractvalue",
                 out_ssa=m.group(1),
                 agg_op="extractvalue",
-                operands_raw=cleaned[cleaned.find("extractvalue") + len("extractvalue"):].strip(),
+                operands_raw=cleaned[
+                    cleaned.find("extractvalue") + len("extractvalue") :
+                ].strip(),
             )
 
     if opcode == "insertvalue":
@@ -644,7 +659,9 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 opcode="insertvalue",
                 out_ssa=m.group(1),
                 agg_op="insertvalue",
-                operands_raw=cleaned[cleaned.find("insertvalue") + len("insertvalue"):].strip(),
+                operands_raw=cleaned[
+                    cleaned.find("insertvalue") + len("insertvalue") :
+                ].strip(),
             )
 
     # ── Atomic operations ───────────────────────────────────────────
@@ -657,7 +674,9 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 out_ssa=m.group(1),
                 atomic_op=m.group(2),
                 ordering=m.group(7),
-                operands_raw=cleaned[cleaned.find("atomicrmw") + len("atomicrmw"):].strip(),
+                operands_raw=cleaned[
+                    cleaned.find("atomicrmw") + len("atomicrmw") :
+                ].strip(),
             )
 
     if opcode == "cmpxchg":
@@ -669,7 +688,9 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 out_ssa=m.group(1),
                 atomic_op="cmpxchg",
                 ordering=m.group(7),
-                operands_raw=cleaned[cleaned.find("cmpxchg") + len("cmpxchg"):].strip(),
+                operands_raw=cleaned[
+                    cleaned.find("cmpxchg") + len("cmpxchg") :
+                ].strip(),
             )
 
     # ── Alloca ──────────────────────────────────────────────────────

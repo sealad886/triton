@@ -9,9 +9,8 @@ import sys
 
 import pytest
 
-# ── Import under test ───────────────────────────────────────────────
-
 from triton.backends.metal.ir_types import (
+    GEP,
     AggregateOp,
     Alloca,
     AtomicOp,
@@ -21,7 +20,6 @@ from triton.backends.metal.ir_types import (
     FCmp,
     FNeg,
     Freeze,
-    GEP,
     ICmp,
     Instruction,
     LLVMInstruction,
@@ -35,6 +33,9 @@ from triton.backends.metal.ir_types import (
     parse_block,
     parse_instruction,
 )
+
+# ── Import under test ───────────────────────────────────────────────
+
 
 skip_non_darwin = pytest.mark.skipif(
     sys.platform != "darwin",
@@ -74,7 +75,9 @@ class TestBinOp:
         ],
         ids=lambda x: x if isinstance(x, str) and x.startswith("%") else "",
     )
-    def test_binop_variants(self, line, expected_op, expected_ty, expected_lhs, expected_rhs):
+    def test_binop_variants(
+        self, line, expected_op, expected_ty, expected_lhs, expected_rhs
+    ):
         inst = parse_instruction(line)
         assert isinstance(inst, BinOp)
         assert inst.op == expected_op
@@ -603,7 +606,7 @@ class TestUnknownInstruction:
         assert isinstance(inst, UnknownInstruction)
 
     def test_fallback_for_attribute_group(self):
-        line = 'attributes #0 = { nounwind }'
+        line = "attributes #0 = { nounwind }"
         inst = parse_instruction(line)
         assert isinstance(inst, UnknownInstruction)
 
@@ -694,9 +697,9 @@ class TestRoundTrip:
     @pytest.mark.parametrize("line", ALL_SAMPLE_LINES)
     def test_not_unknown_for_known_lines(self, line):
         inst = parse_instruction(line)
-        assert not isinstance(inst, UnknownInstruction), (
-            f"Expected typed instruction for: {line!r}, got UnknownInstruction"
-        )
+        assert not isinstance(
+            inst, UnknownInstruction
+        ), f"Expected typed instruction for: {line!r}, got UnknownInstruction"
 
 
 # =====================================================================
@@ -707,9 +710,24 @@ class TestRoundTrip:
 class TestTypeAlias:
     def test_instruction_union_covers_all_types(self):
         all_types = {
-            BinOp, Load, Store, Cast, ICmp, FCmp, Call, GEP, Phi, Select,
-            FNeg, Freeze, VectorOp, AggregateOp, AtomicOp, Alloca,
-            Terminator, UnknownInstruction,
+            BinOp,
+            Load,
+            Store,
+            Cast,
+            ICmp,
+            FCmp,
+            Call,
+            GEP,
+            Phi,
+            Select,
+            FNeg,
+            Freeze,
+            VectorOp,
+            AggregateOp,
+            AtomicOp,
+            Alloca,
+            Terminator,
+            UnknownInstruction,
         }
         # Instruction is a Union type — verify all concrete types are included
         # by checking that instances of each type are assignable
