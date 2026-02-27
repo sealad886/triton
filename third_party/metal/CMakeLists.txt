@@ -32,4 +32,6 @@ if(TRITON_BUILD_PYTHON_MODULE AND APPLE)
   endif()
 endif()
 
-
+if(TRITON_BUILD_UT)
+  add_subdirectory(unittest)
+endif()
