@@ -46,7 +46,7 @@ Last updated: 2026-02-24
 Validated on branch `feat/metal-support` (2026-02-24):
 
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
-  - `240 passed`
+  - `258 passed`
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
   - all smoke checks passed (including transfer/project/training harnesses in CPU and MPS modes)
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
