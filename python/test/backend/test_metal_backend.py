@@ -253,14 +253,17 @@ class TestMetalBackend:
         # load_dialects should not raise
         backend.load_dialects(None)
 
-    def test_get_module_map_empty(self):
+    def test_get_module_map_has_libdevice(self):
         from third_party.metal.backend.compiler import MetalBackend
 
         from triton.backends.compiler import GPUTarget
 
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
-        assert backend.get_module_map() == {}
+        module_map = backend.get_module_map()
+        assert "triton.language.extra.libdevice" in module_map
+        from third_party.metal.language import libdevice
+        assert module_map["triton.language.extra.libdevice"] is libdevice
 
 
 # ── Compiler xcrun integration ──────────────────────────────────────
@@ -7932,3 +7935,287 @@ class TestMetalMatmulAcceleration:
         model = get_matmul_performance_model("apple99")
         assert model.simdgroup_gflops == 0.0
         assert model.fma_gflops > 0.0
+
+
+# ── Gluon Language Support ──────────────────────────────────────────────
+
+
+class TestMetalGluonSupport:
+    """Verify Gluon language support in the Metal backend."""
+
+    def test_gluon_to_ttgir_method_exists(self):
+        """MetalBackend exposes gluon_to_ttgir as a method."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        assert hasattr(MetalBackend, "gluon_to_ttgir")
+        assert callable(getattr(MetalBackend, "gluon_to_ttgir"))
+
+    def test_add_stages_handles_gluon(self):
+        """add_stages() registers a ttgir stage when Language is GLUON."""
+        from unittest.mock import MagicMock
+        from triton.backends.compiler import GPUTarget, Language
+        from third_party.metal.backend.compiler import MetalBackend
+
+        target = GPUTarget(backend="metal", arch="apple8", warp_size=32)
+        backend = MetalBackend(target)
+        stages: dict = {}
+        options = MagicMock()
+        options.arch = "apple8"
+        options.num_warps = 4
+        options.num_ctas = 1
+        options.num_stages = 0
+        backend.add_stages(stages, options, Language.GLUON)
+
+        assert "ttgir" in stages, "Gluon language must register ttgir stage"
+        # GLUON skips ttir — goes straight to ttgir
+        assert "ttir" not in stages
+        # Downstream stages must still be present
+        assert "llir" in stages
+        assert "metal" in stages
+        assert "metallib" in stages
+
+    def test_add_stages_triton_still_works(self):
+        """add_stages() with Language.TRITON still produces ttir + ttgir."""
+        from unittest.mock import MagicMock
+        from triton.backends.compiler import GPUTarget, Language
+        from third_party.metal.backend.compiler import MetalBackend
+
+        target = GPUTarget(backend="metal", arch="apple8", warp_size=32)
+        backend = MetalBackend(target)
+        stages: dict = {}
+        options = MagicMock()
+        options.arch = "apple8"
+        backend.add_stages(stages, options, Language.TRITON)
+        assert "ttir" in stages
+        assert "ttgir" in stages
+
+    def test_gluon_graceful_when_unavailable(self):
+        """gluon_to_ttgir raises RuntimeError when passes.gluon is absent."""
+        from unittest.mock import MagicMock, patch
+        from triton.backends.compiler import GPUTarget
+        from third_party.metal.backend.compiler import MetalBackend
+
+        target = GPUTarget(backend="metal", arch="apple8", warp_size=32)
+        backend = MetalBackend(target)
+
+        mock_passes = MagicMock(spec=[])  # no 'gluon' attribute
+        mod = MagicMock()
+        metadata: dict = {}
+        options = MagicMock()
+        options.arch = "apple8"
+
+        with patch("third_party.metal.backend.compiler.passes", mock_passes):
+            with pytest.raises(RuntimeError, match="Gluon support requires"):
+                backend.gluon_to_ttgir(mod, metadata, options)
+
+
+# ── Metal libdevice ─────────────────────────────────────────────────────
+
+
+class TestMetalLibdevice:
+    """Verify Metal libdevice math function mappings."""
+
+    def test_libdevice_map_completeness(self):
+        """METAL_LIBDEVICE_MAP covers all standard math operations."""
+        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+
+        required_ops = {
+            "clz", "popc", "fma", "rsqrt", "exp2", "log2",
+            "sin", "cos", "ceil", "floor", "trunc", "round", "saturate",
+        }
+        assert required_ops.issubset(set(METAL_LIBDEVICE_MAP.keys())), (
+            f"Missing: {required_ops - set(METAL_LIBDEVICE_MAP.keys())}"
+        )
+
+    def test_clz_mapping(self):
+        """clz maps to MSL clz()."""
+        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+
+        extern_name, msl_fn = METAL_LIBDEVICE_MAP["clz"]
+        assert extern_name == "__metal_clz"
+        assert msl_fn == "clz"
+
+    def test_popc_mapping(self):
+        """popc maps to MSL popcount()."""
+        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+
+        extern_name, msl_fn = METAL_LIBDEVICE_MAP["popc"]
+        assert extern_name == "__metal_popcount"
+        assert msl_fn == "popcount"
+
+    def test_trig_mappings(self):
+        """sin/cos/exp2/log2 are all present with correct MSL names."""
+        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+
+        for op in ("sin", "cos", "exp2", "log2"):
+            assert op in METAL_LIBDEVICE_MAP, f"{op} missing"
+            _, msl_fn = METAL_LIBDEVICE_MAP[op]
+            assert msl_fn == op, f"{op} should map to MSL {op}"
+
+    def test_rounding_mappings(self):
+        """ceil/floor/trunc/round are present."""
+        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+
+        for op in ("ceil", "floor", "trunc", "round"):
+            assert op in METAL_LIBDEVICE_MAP, f"{op} missing"
+
+    def test_saturate_is_metal_specific(self):
+        """saturate is a Metal-specific operation not found in NVIDIA libdevice."""
+        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+
+        assert "saturate" in METAL_LIBDEVICE_MAP
+        _, msl_fn = METAL_LIBDEVICE_MAP["saturate"]
+        assert msl_fn == "saturate"
+
+    def test_libdevice_extern_functions_importable(self):
+        """All @core.extern libdevice functions are importable."""
+        from third_party.metal.language import libdevice
+
+        func_names = [
+            "clz", "popc", "abs", "floor", "ceil", "trunc", "round",
+            "rsqrt", "sqrt", "exp2", "log2", "sin", "cos",
+            "min", "max", "fma", "saturate",
+        ]
+        for name in func_names:
+            assert hasattr(libdevice, name), f"libdevice.{name} not found"
+            assert callable(getattr(libdevice, name)), f"libdevice.{name} not callable"
+
+    def test_map_entries_are_string_pairs(self):
+        """Every METAL_LIBDEVICE_MAP entry is a (str, str) tuple."""
+        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+
+        for key, (extern_name, msl_fn) in METAL_LIBDEVICE_MAP.items():
+            assert isinstance(key, str)
+            assert isinstance(extern_name, str)
+            assert isinstance(msl_fn, str)
+
+
+# ── FP8 Converters ──────────────────────────────────────────────────────
+
+
+class TestMetalFP8Converters:
+    """Verify FP8 <-> FP16/FP32 software conversion utilities."""
+
+    def test_fp8e5m2_to_fp16_roundtrip(self):
+        """E5M2 encode → decode round-trips for representable values."""
+        from third_party.metal.language.fp8_utils import (
+            convert_fp8e5m2_to_fp16,
+            convert_fp16_to_fp8e5m2,
+        )
+
+        test_values = [0.0, 1.0, -1.0, 0.5, 2.0, -0.5, 0.25]
+        for v in test_values:
+            encoded = convert_fp16_to_fp8e5m2(v)
+            decoded = convert_fp8e5m2_to_fp16(encoded)
+            assert abs(decoded - v) <= abs(v) * 0.26 + 1e-7, (
+                f"E5M2 round-trip failed for {v}: got {decoded}"
+            )
+
+    def test_fp8e4b15_to_fp16_roundtrip(self):
+        """E4B15 encode → decode round-trips for small representable values."""
+        from third_party.metal.language.fp8_utils import (
+            convert_fp8e4b15_to_fp16,
+            convert_fp16_to_fp8e4b15,
+        )
+
+        # E4B15 with bias=15 only represents very small values
+        # Smallest normal: 2^(1-15) = 2^-14 ≈ 6.1e-5
+        test_values = [0.0, -0.0]
+        for v in test_values:
+            encoded = convert_fp16_to_fp8e4b15(v)
+            decoded = convert_fp8e4b15_to_fp16(encoded)
+            assert decoded == v or (v == 0.0 and decoded == 0.0), (
+                f"E4B15 round-trip failed for {v}: got {decoded}"
+            )
+
+    def test_fp8e5m2_special_values(self):
+        """E5M2 handles NaN and Inf correctly."""
+        import math
+        from third_party.metal.language.fp8_utils import (
+            convert_fp8e5m2_to_fp16,
+            convert_fp16_to_fp8e5m2,
+        )
+
+        # NaN
+        nan_bits = convert_fp16_to_fp8e5m2(float("nan"))
+        assert math.isnan(convert_fp8e5m2_to_fp16(nan_bits))
+
+        # +Inf
+        pinf_bits = convert_fp16_to_fp8e5m2(float("inf"))
+        assert convert_fp8e5m2_to_fp16(pinf_bits) == float("inf")
+
+        # -Inf
+        ninf_bits = convert_fp16_to_fp8e5m2(float("-inf"))
+        assert convert_fp8e5m2_to_fp16(ninf_bits) == float("-inf")
+
+    def test_fp8e5m2_denormals(self):
+        """E5M2 denormal (subnormal) values decode correctly."""
+        from third_party.metal.language.fp8_utils import convert_fp8e5m2_to_fp16
+
+        # Smallest E5M2 denormal: 0 00000 01 = 2^(1-15) * 0.25 = 2^-16
+        smallest_denorm = convert_fp8e5m2_to_fp16(0x01)
+        assert smallest_denorm > 0
+        assert smallest_denorm < 1e-4
+
+        # Largest E5M2 denormal: 0 00000 11 = 2^(1-15) * 0.75
+        largest_denorm = convert_fp8e5m2_to_fp16(0x03)
+        assert largest_denorm > smallest_denorm
+
+        # Zero
+        assert convert_fp8e5m2_to_fp16(0x00) == 0.0
+
+    def test_fp8_conversion_table(self):
+        """Known E5M2 encodings produce expected values."""
+        from third_party.metal.language.fp8_utils import convert_fp8e5m2_to_fp16
+        import math
+
+        known = {
+            0x00: 0.0,          # +0
+            0x80: -0.0,         # -0 (compare as 0.0)
+            0x3C: 1.0,          # 0 01111 00 = 2^0 * 1.0 = 1.0
+            0x40: 2.0,          # 0 10000 00 = 2^1 * 1.0 = 2.0
+            0x38: 0.5,          # 0 01110 00 = 2^-1 * 1.0 = 0.5
+            0x7C: float("inf"), # 0 11111 00 = +Inf
+            0xFC: float("-inf"),# 1 11111 00 = -Inf
+        }
+        for bits, expected in known.items():
+            result = convert_fp8e5m2_to_fp16(bits)
+            if math.isnan(expected):
+                assert math.isnan(result), f"bits=0x{bits:02X}: expected NaN"
+            elif math.isinf(expected):
+                assert result == expected, f"bits=0x{bits:02X}: expected {expected}"
+            else:
+                assert abs(result - expected) < 1e-9, (
+                    f"bits=0x{bits:02X}: expected {expected}, got {result}"
+                )
+
+    def test_fp8e4b15_special_values(self):
+        """E4B15 has no Inf — overflows to NaN."""
+        import math
+        from third_party.metal.language.fp8_utils import (
+            convert_fp8e4b15_to_fp16,
+            convert_fp16_to_fp8e4b15,
+        )
+
+        # E4B15 has no Inf: all-ones exponent is always NaN
+        inf_bits = convert_fp16_to_fp8e4b15(float("inf"))
+        result = convert_fp8e4b15_to_fp16(inf_bits)
+        assert math.isnan(result), "E4B15 Inf should map to NaN"
+
+        nan_bits = convert_fp16_to_fp8e4b15(float("nan"))
+        assert math.isnan(convert_fp8e4b15_to_fp16(nan_bits))
+
+    def test_fp8_helper_functions(self):
+        """fp16_bits_to_float and float_to_fp16_bits round-trip."""
+        from third_party.metal.language.fp8_utils import (
+            fp16_bits_to_float,
+            float_to_fp16_bits,
+        )
+
+        test_values = [0.0, 1.0, -1.0, 0.5, 65504.0]
+        for v in test_values:
+            bits = float_to_fp16_bits(v)
+            assert isinstance(bits, int)
+            assert 0 <= bits <= 0xFFFF
+            result = fp16_bits_to_float(bits)
+            assert abs(result - v) < 1e-3, f"fp16 round-trip failed for {v}: {result}"

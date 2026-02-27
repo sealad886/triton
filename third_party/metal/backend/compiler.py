@@ -792,7 +792,8 @@ class MetalBackend(BaseBackend):
         return {"min_dot_size": lambda lhs_type, rhs_type: (1, 1, 1)}
 
     def get_module_map(self) -> Dict[str, ModuleType]:
-        return {}
+        from third_party.metal.language import libdevice
+        return {"triton.language.extra.libdevice": libdevice}
 
     def load_dialects(self, ctx):
         import triton._C.libtriton.metal as metal
@@ -816,10 +817,36 @@ class MetalBackend(BaseBackend):
         pm.run(mod, "make_ttir")
         return mod
 
+    def gluon_to_ttgir(self, src, metadata, opt):
+        """Lower Gluon dialect to TTGIR for Metal, mirroring NVIDIA's pipeline."""
+        if not hasattr(passes, "gluon"):
+            raise RuntimeError(
+                "Gluon support requires passes.gluon (not available in this build)"
+            )
+
+        mod = src
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+
+        passes.gluon.add_inliner(pm)
+        if hasattr(passes.gluon, "add_infer_coalesced_encodings"):
+            passes.gluon.add_infer_coalesced_encodings(pm)
+        if hasattr(passes.gluon, "add_resolve_auto_encodings"):
+            passes.gluon.add_resolve_auto_encodings(pm)
+        passes.gluon.add_canonicalizer(pm)
+        passes.common.add_sccp(pm)
+        passes.ttir.add_loop_aware_cse(pm)
+        passes.gluon.add_canonicalizer(pm)
+        if hasattr(passes.ttgpuir, "add_combine_tensor_select_and_if"):
+            passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+
+        pm.run(mod, "gluon_to_ttgir")
+        if hasattr(mod, "get_tensordesc_metadata"):
+            metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
+        return mod
+
     @staticmethod
     def make_ttgir(mod, metadata, opt):
-        # Metal GPU family arch string -> numeric for pass config
-        # Apple Silicon uses SIMD width 32
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.ttir.add_convert_to_ttgpuir(
@@ -2861,6 +2888,10 @@ class MetalBackend(BaseBackend):
                 src, metadata, options
             )
             stages["ttgir"] = lambda src, metadata: self.make_ttgir(
+                src, metadata, options
+            )
+        elif language == Language.GLUON:
+            stages["ttgir"] = lambda src, metadata: self.gluon_to_ttgir(
                 src, metadata, options
             )
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
