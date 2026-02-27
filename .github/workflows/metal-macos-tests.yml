@@ -8,6 +8,7 @@ on:
       - "python/test/backend/test_metal_backend.py"
       - "python/test/backend/metal_*"
       - "scripts/test_metal_*"
+      - "scripts/metal_ci_compat_matrix.py"
       - "setup.py"
       - ".github/workflows/metal-macos-tests.yml"
   pull_request:
@@ -17,11 +18,15 @@ on:
       - "python/test/backend/test_metal_backend.py"
       - "python/test/backend/metal_*"
       - "scripts/test_metal_*"
+      - "scripts/metal_ci_compat_matrix.py"
       - "setup.py"
   schedule:
     - cron: '0 6 * * *'  # Daily at 6 AM UTC
 
 jobs:
+  # ────────────────────────────────────────────────────────────────────
+  # Compile-only unit tests — runs on standard GitHub-hosted macOS runner
+  # ────────────────────────────────────────────────────────────────────
   metal-unit-tests:
     name: Metal Backend Unit Tests
     runs-on: macos-14  # Apple Silicon runner
@@ -57,6 +62,9 @@ jobs:
           python -m pytest python/test/backend/test_metal_backend.py \
             -v --tb=short -x
 
+  # ────────────────────────────────────────────────────────────────────
+  # Smoke tests & harness artifact collection
+  # ────────────────────────────────────────────────────────────────────
   metal-smoke-and-harness:
     name: Metal Smoke Tests & Harness Artifacts
     runs-on: macos-14  # Apple Silicon for Metal GPU access
@@ -99,6 +107,9 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # ────────────────────────────────────────────────────────────────────
+  # Cross-platform import check (Linux)
+  # ────────────────────────────────────────────────────────────────────
   metal-import-check:
     name: Metal Backend Import Check
     runs-on: ubuntu-latest
@@ -131,3 +142,218 @@ jobs:
           print('MetalOptions hash:', opts.hash())
           print('MetalDriver.is_active():', MetalDriver.is_active())
           "
+
+  # ────────────────────────────────────────────────────────────────────
+  # Compatibility matrix — Python 3.11/3.12 × torch 2.4/2.5/nightly
+  # Compile-only (no GPU required), runs on standard macOS runners
+  # ────────────────────────────────────────────────────────────────────
+  metal-compat-matrix:
+    name: "Compat: py${{ matrix.python-version }} / torch ${{ matrix.torch-version }}"
+    runs-on: macos-14
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+        torch-version: ["2.4", "2.5", "nightly"]
+        exclude:
+          # torch nightly may not support all Python versions
+          - python-version: "3.11"
+            torch-version: "nightly"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install torch ${{ matrix.torch-version }}
+        run: |
+          python -m pip install --upgrade pip
+          if [ "${{ matrix.torch-version }}" = "nightly" ]; then
+            python -m pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
+          else
+            python -m pip install "torch~=${{ matrix.torch-version }}.0"
+          fi
+          python -m pip install numpy loguru pytest \
+            pyobjc-framework-Metal pyobjc-framework-Foundation
+
+      - name: Run compatibility matrix validation
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          python scripts/metal_ci_compat_matrix.py --json -o compat-report.json
+          cat compat-report.json
+
+      - name: Run compile-only tests
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          python -m pytest python/test/backend/test_metal_backend.py \
+            -v --tb=short -x \
+            -k "TestMetalCICompatibility" \
+            --junitxml=compat-results.xml
+
+      - name: Upload compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-report-py${{ matrix.python-version }}-torch${{ matrix.torch-version }}-${{ github.sha }}
+          path: |
+            compat-report.json
+            compat-results.xml
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────
+  # GPU integration tests — requires self-hosted macOS runner with Metal GPU
+  # Activate by: 1) provisioning a runner with labels [self-hosted, macOS, metal-gpu]
+  #              2) adding the 'metal-gpu-ci' label to the PR
+  # ────────────────────────────────────────────────────────────────────
+  metal-gpu-tests:
+    name: Metal GPU Integration Tests
+    runs-on: [self-hosted, macOS, metal-gpu]
+    if: contains(github.event.pull_request.labels.*.name, 'metal-gpu-ci')
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest numpy loguru torch \
+            pyobjc-framework-Metal pyobjc-framework-Foundation
+
+      - name: Run full Metal backend test suite
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          python -m pytest python/test/backend/test_metal_backend.py \
+            -v --tb=short -x \
+            --junitxml=gpu-test-results.xml
+
+      - name: Run AOT runtime integration test
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          python scripts/test_metal_aot_runtime.py --json -o aot-report.json
+
+      - name: Upload GPU test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal-gpu-results-${{ github.sha }}
+          path: |
+            gpu-test-results.xml
+            aot-report.json
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────
+  # Throughput regression detection — self-hosted only
+  # Runs matmul throughput guardrails against stored baselines
+  # ────────────────────────────────────────────────────────────────────
+  metal-throughput-guard:
+    name: Metal Throughput Guardrails
+    needs: metal-gpu-tests
+    runs-on: [self-hosted, macOS, metal-gpu]
+    if: contains(github.event.pull_request.labels.*.name, 'metal-gpu-ci')
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch numpy loguru triton \
+            pyobjc-framework-Metal pyobjc-framework-Foundation
+
+      - name: Run throughput guardrails
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          python scripts/metal_matmul_throughput_guard.py \
+            --baseline docs/metal/matmul-throughput-baselines.json
+
+      - name: Upload throughput artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal-throughput-${{ github.sha }}
+          path: artifacts/metal-throughput-guard/
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────
+  # Sustained soak test — self-hosted, schedule or label-triggered
+  # Runs extended stress tests to detect memory leaks, resource
+  # exhaustion, and sustained-load regressions
+  # ────────────────────────────────────────────────────────────────────
+  metal-soak-tests:
+    name: Metal Sustained Soak Tests
+    needs: metal-gpu-tests
+    runs-on: [self-hosted, macOS, metal-gpu]
+    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'metal-soak')
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest torch numpy loguru \
+            pyobjc-framework-Metal pyobjc-framework-Foundation
+
+      - name: Run MPS transfer stress test
+        continue-on-error: true
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          python -m pytest python/test/backend/metal_mps_transfer_stress.py \
+            -v --tb=short -x \
+            --junitxml=soak-transfer-results.xml
+
+      - name: Run MPS project flow stress test
+        continue-on-error: true
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          python -m pytest python/test/backend/metal_mps_project_flow_stress.py \
+            -v --tb=short -x \
+            --junitxml=soak-flow-results.xml
+
+      - name: Run release checks (soak mode)
+        continue-on-error: true
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          python scripts/metal_release_checks.py --soak \
+            --artifact-root artifacts/metal-soak-runs
+
+      - name: Upload soak test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal-soak-${{ github.sha }}
+          path: |
+            soak-transfer-results.xml
+            soak-flow-results.xml
+            artifacts/metal-soak-runs/
+          retention-days: 30

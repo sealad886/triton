@@ -8219,3 +8219,181 @@ class TestMetalFP8Converters:
             assert 0 <= bits <= 0xFFFF
             result = fp16_bits_to_float(bits)
             assert abs(result - v) < 1e-3, f"fp16 round-trip failed for {v}: {result}"
+
+
+# ── CI Compatibility Matrix Tests ────────────────────────────────────
+
+
+class TestMetalCICompatibility:
+    """Validate the CI compatibility matrix validation script."""
+
+    SCRIPT_PATH = os.path.join(
+        os.path.dirname(__file__), "..", "..", "..", "scripts", "metal_ci_compat_matrix.py"
+    )
+
+    @staticmethod
+    def _load_compat_module():
+        import importlib.util
+
+        path = os.path.normpath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..", "..", "..",
+                "scripts", "metal_ci_compat_matrix.py",
+            )
+        )
+        spec = importlib.util.spec_from_file_location(
+            "metal_ci_compat_matrix", path,
+        )
+        assert spec is not None, "Cannot find metal_ci_compat_matrix.py"
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_compat_matrix_script_loads(self):
+        """The compat matrix script can be imported and run_all_checks exists."""
+        mod = self._load_compat_module()
+        assert hasattr(mod, "run_all_checks")
+        assert callable(mod.run_all_checks)
+
+    def test_compat_check_python_version(self):
+        """check_python_version reports correct Python version."""
+        mod = self._load_compat_module()
+        result = mod.check_python_version()
+        expected_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        assert result.value == expected_ver
+        assert result.name == "python_version"
+
+    def test_compat_check_torch_available(self):
+        """check_torch_available reports torch availability without error."""
+        mod = self._load_compat_module()
+        result = mod.check_torch_available()
+        assert result.passed is True
+        assert result.name == "torch"
+        try:
+            import torch
+            assert result.value is not None
+            assert "version" in result.value
+        except ImportError:
+            assert result.value is None
+
+    @skip_non_darwin
+    def test_compat_check_xcrun_available(self):
+        """check_xcrun_available detects xcrun on macOS."""
+        mod = self._load_compat_module()
+        result = mod.check_xcrun_available()
+        assert result.name == "xcrun"
+        if shutil.which("xcrun") is not None:
+            assert result.passed is True
+            assert result.value is not None
+            assert "path" in result.value
+
+    def test_compat_json_output(self):
+        """run_all_checks produces a valid JSON-serializable report."""
+        import json as _json
+
+        mod = self._load_compat_module()
+        report = mod.run_all_checks()
+        text = _json.dumps(report)
+        parsed = _json.loads(text)
+        assert "overall_passed" in parsed
+        assert "checks" in parsed
+        assert isinstance(parsed["checks"], list)
+        assert len(parsed["checks"]) >= 5
+        for check in parsed["checks"]:
+            assert "name" in check
+            assert "passed" in check
+            assert "detail" in check
+
+
+# ── AOT Runtime Tests ────────────────────────────────────────────────
+
+
+class TestMetalAOTRuntime:
+    """Validate the Metal AOT runtime harness and integration script."""
+
+    HARNESS_PATH = os.path.normpath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..", "..", "..",
+            "third_party", "metal", "tools", "test_aot_runtime.m",
+        )
+    )
+    RUNTIME_SCRIPT_PATH = os.path.normpath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..", "..", "..",
+            "scripts", "test_metal_aot_runtime.py",
+        )
+    )
+
+    def test_aot_harness_exists(self):
+        """The ObjC AOT runtime harness file exists."""
+        assert os.path.isfile(self.HARNESS_PATH), (
+            f"AOT harness not found at {self.HARNESS_PATH}"
+        )
+        content = open(self.HARNESS_PATH, "r").read()
+        assert "MTLDevice" in content
+        assert "MTLComputePipelineState" in content
+        assert "RESULT: PASS" in content
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    def test_aot_harness_compiles(self):
+        """The ObjC harness compiles with clang on macOS."""
+        with tempfile.TemporaryDirectory(prefix="metal-aot-compile-") as tmpdir:
+            output_bin = os.path.join(tmpdir, "test_aot_runtime")
+            result = subprocess.run(
+                [
+                    "clang",
+                    "-framework", "Metal",
+                    "-framework", "Foundation",
+                    "-framework", "CoreGraphics",
+                    "-o", output_bin,
+                    self.HARNESS_PATH,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert result.returncode == 0, (
+                f"clang compilation failed:\n{result.stderr}"
+            )
+            assert os.path.isfile(output_bin)
+
+    def test_aot_runtime_script_exists(self):
+        """The Python AOT runtime integration script exists."""
+        assert os.path.isfile(self.RUNTIME_SCRIPT_PATH), (
+            f"AOT runtime script not found at {self.RUNTIME_SCRIPT_PATH}"
+        )
+        content = open(self.RUNTIME_SCRIPT_PATH, "r").read()
+        assert "def main" in content
+        assert "_compile_triton_kernel_to_metallib" in content
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_aot_compile_and_run_flow(self):
+        """Full compile -> load -> dispatch -> verify flow (MPS required)."""
+        result = subprocess.run(
+            [
+                sys.executable,
+                self.RUNTIME_SCRIPT_PATH,
+                "--num-elements", "256",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={
+                **os.environ,
+                "PYTHONPATH": os.path.join(
+                    os.path.dirname(__file__), "..", "..", ".."
+                ) + ":" + os.environ.get("PYTHONPATH", ""),
+            },
+        )
+        assert result.returncode == 0, (
+            f"AOT runtime flow failed (rc={result.returncode}):\n"
+            f"stdout: {result.stdout[:500]}\n"
+            f"stderr: {result.stderr[:500]}"
+        )
