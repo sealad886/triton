@@ -1,0 +1,16 @@
+set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
+
+set(LLVM_TARGET_DEFINITIONS MetalGPUOps.td)
+mlir_tablegen(Dialect.h.inc -gen-dialect-decls -dialect=mtlg)
+mlir_tablegen(Dialect.cpp.inc -gen-dialect-defs -dialect=mtlg)
+mlir_tablegen(OpsConversions.inc -gen-llvmir-conversions)
+mlir_tablegen(Ops.h.inc -gen-op-decls)
+mlir_tablegen(Ops.cpp.inc -gen-op-defs)
+add_mlir_doc(MetalGPUDialect MetalGPUDialect dialects/ -gen-dialect-doc)
+add_mlir_doc(MetalGPUOps MetalGPUOps dialects/ -gen-op-doc)
+add_public_tablegen_target(MetalGPUTableGen)
+
+set(LLVM_TARGET_DEFINITIONS MetalGPUAttrDefs.td)
+mlir_tablegen(MetalGPUAttrDefs.h.inc -gen-attrdef-decls)
+mlir_tablegen(MetalGPUAttrDefs.cpp.inc -gen-attrdef-defs)
+add_public_tablegen_target(MetalGPUAttrDefsIncGen)

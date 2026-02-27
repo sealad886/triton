@@ -1,4 +1,5 @@
 #include <pybind11/pybind11.h>
+#include "Dialect/MetalGPU/IR/Dialect.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/GPU/GPUToLLVMIRTranslation.h"
@@ -24,7 +25,7 @@ void init_triton_metal(py::module &&m) {
 
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
-    registry.insert<mlir::gpu::GPUDialect>();
+    registry.insert<mlir::triton::metalgpu::MetalGPUDialect, mlir::gpu::GPUDialect>();
     mlir::registerGPUDialectTranslation(registry);
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
