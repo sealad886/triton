@@ -7514,3 +7514,218 @@ class TestMetalDriverFeatures:
         assert "thread_position_in_grid" in metal_ext.METAL_BUILTINS
         assert "simdgroup_index_in_threadgroup" in metal_ext.METAL_BUILTINS
         assert len(metal_ext.METAL_BUILTINS) >= 6
+
+
+# ── Barrier insertion pass tests ────────────────────────────────────
+
+
+class TestMetalBarrierInsertion:
+    """Tests for the dedicated Metal shared-memory barrier insertion pass."""
+
+    _NO_SHARED_MEM_IR = """\
+; ModuleID = 'no_shared'
+target triple = "aarch64-apple-macosx14.0.0"
+
+define void @kernel(ptr addrspace(1) %out, ptr addrspace(1) %in) {
+entry:
+  %v = load float, ptr addrspace(1) %in
+  store float %v, ptr addrspace(1) %out
+  ret void
+}
+"""
+
+    _SIMPLE_STORE_LOAD_IR = """\
+; ModuleID = 'simple'
+target triple = "aarch64-apple-macosx14.0.0"
+
+@global_smem = external addrspace(3) global [0 x i8]
+
+define void @kernel(ptr addrspace(1) %out) {
+entry:
+  %smem = getelementptr inbounds [0 x i8], ptr addrspace(3) @global_smem, i32 0, i32 0
+  store float 1.0, ptr addrspace(3) %smem
+  %v = load float, ptr addrspace(3) %smem
+  store float %v, ptr addrspace(1) %out
+  ret void
+}
+"""
+
+    _LOOP_CARRIED_IR = """\
+; ModuleID = 'loop_carried'
+target triple = "aarch64-apple-macosx14.0.0"
+
+@global_smem = external addrspace(3) global [0 x i8]
+
+define void @kernel(ptr addrspace(1) %out, i32 %n) {
+entry:
+  br label %loop
+
+loop:
+  %i = phi i32 [ 0, %entry ], [ %i_next, %loop ]
+  %smem = getelementptr inbounds [0 x i8], ptr addrspace(3) @global_smem, i32 0, i32 %i
+  store float 1.0, ptr addrspace(3) %smem
+  %v = load float, ptr addrspace(3) %smem
+  store float %v, ptr addrspace(1) %out
+  %i_next = add i32 %i, 1
+  %cmp = icmp slt i32 %i_next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret void
+}
+"""
+
+    _MATMUL_PATTERN_IR = """\
+; ModuleID = 'matmul'
+target triple = "aarch64-apple-macosx14.0.0"
+
+@global_smem = external addrspace(3) global [0 x i8]
+
+define void @kernel(ptr addrspace(1) %A, ptr addrspace(1) %B, ptr addrspace(1) %C, i32 %K) {
+entry:
+  br label %k_loop
+
+k_loop:
+  %k = phi i32 [ 0, %entry ], [ %k_next, %k_loop_end ]
+  %smem_a = getelementptr inbounds [0 x i8], ptr addrspace(3) @global_smem, i32 0, i32 0
+  %smem_b = getelementptr inbounds [0 x i8], ptr addrspace(3) @global_smem, i32 0, i32 512
+  %a_val = load float, ptr addrspace(1) %A
+  store float %a_val, ptr addrspace(3) %smem_a
+  %b_val = load float, ptr addrspace(1) %B
+  store float %b_val, ptr addrspace(3) %smem_b
+  br label %compute
+
+compute:
+  %a_shared = load float, ptr addrspace(3) %smem_a
+  %b_shared = load float, ptr addrspace(3) %smem_b
+  %dot = fmul float %a_shared, %b_shared
+  store float %dot, ptr addrspace(1) %C
+  br label %k_loop_end
+
+k_loop_end:
+  %k_next = add i32 %k, 1
+  %done = icmp slt i32 %k_next, %K
+  br i1 %done, label %k_loop, label %exit
+
+exit:
+  ret void
+}
+"""
+
+    @skip_non_darwin
+    def test_barrier_pass_no_shared_mem(self):
+        """Pass should be no-op for kernels without shared memory."""
+        from third_party.metal.backend.barrier_pass import MetalBarrierInsertionPass
+
+        pass_ = MetalBarrierInsertionPass()
+        result = pass_.run(self._NO_SHARED_MEM_IR)
+        assert result == self._NO_SHARED_MEM_IR
+        assert len(pass_.decisions) == 0
+
+    @skip_non_darwin
+    def test_barrier_pass_simple_shared_store_load(self):
+        """Barrier inserted between shared mem store and subsequent load."""
+        from third_party.metal.backend.barrier_pass import MetalBarrierInsertionPass
+
+        pass_ = MetalBarrierInsertionPass()
+        result = pass_.run(self._SIMPLE_STORE_LOAD_IR)
+        assert "call void @llvm.nvvm.barrier0()" in result
+        assert len(pass_.decisions) >= 1
+
+        lines = result.split("\n")
+        store_idx = next(
+            i for i, l in enumerate(lines) if "store float 1.0, ptr addrspace(3)" in l
+        )
+        barrier_idx = next(
+            i for i, l in enumerate(lines) if "llvm.nvvm.barrier0" in l
+        )
+        load_idx = next(
+            i
+            for i, l in enumerate(lines)
+            if "= load float, ptr addrspace(3)" in l
+        )
+        assert store_idx < barrier_idx < load_idx
+
+    @skip_non_darwin
+    def test_barrier_pass_loop_carried_dependency(self):
+        """Barrier inserted for loop-carried shared memory dependencies."""
+        from third_party.metal.backend.barrier_pass import MetalBarrierInsertionPass
+
+        pass_ = MetalBarrierInsertionPass()
+        result = pass_.run(self._LOOP_CARRIED_IR)
+        assert "call void @llvm.nvvm.barrier0()" in result
+        has_loop_reason = any(
+            "loop" in d.reason.lower() or "backedge" in d.reason.lower()
+            for d in pass_.decisions
+        )
+        assert has_loop_reason or len(pass_.decisions) >= 1
+
+    @skip_non_darwin
+    def test_barrier_pass_idempotent(self):
+        """Running pass twice produces same result."""
+        from third_party.metal.backend.barrier_pass import MetalBarrierInsertionPass
+
+        pass1 = MetalBarrierInsertionPass()
+        result1 = pass1.run(self._LOOP_CARRIED_IR)
+        count1 = result1.count("call void @llvm.nvvm.barrier0()")
+
+        pass2 = MetalBarrierInsertionPass()
+        result2 = pass2.run(result1)
+        count2 = result2.count("call void @llvm.nvvm.barrier0()")
+
+        assert result1 == result2, "Pass is not idempotent"
+        assert count1 == count2
+
+    @skip_non_darwin
+    def test_barrier_pass_matmul_pattern(self):
+        """Correct barrier placement for blocked matmul shared memory access."""
+        from third_party.metal.backend.barrier_pass import MetalBarrierInsertionPass
+
+        pass_ = MetalBarrierInsertionPass()
+        result = pass_.run(self._MATMUL_PATTERN_IR)
+        assert "call void @llvm.nvvm.barrier0()" in result
+        assert len(pass_.decisions) >= 1
+        barrier_count = result.count("call void @llvm.nvvm.barrier0()")
+        assert barrier_count >= 1
+
+    @skip_non_darwin
+    def test_barrier_pass_debug_report(self):
+        """Pass reports barrier decisions when debug mode is active."""
+        from third_party.metal.backend.barrier_pass import MetalBarrierInsertionPass
+
+        import io
+        import contextlib
+
+        pass_ = MetalBarrierInsertionPass(debug=True)
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f):
+            pass_.run(self._SIMPLE_STORE_LOAD_IR)
+
+        output = f.getvalue()
+        assert "[BARRIER_PASS]" in output
+        assert len(pass_.decisions) >= 1
+
+    @skip_non_darwin
+    def test_barrier_pass_declaration_added(self):
+        """ensure_barrier_declaration adds declaration when barriers present."""
+        from third_party.metal.backend.barrier_pass import run_barrier_pass
+
+        result = run_barrier_pass(self._SIMPLE_STORE_LOAD_IR)
+        assert "declare void @llvm.nvvm.barrier0()" in result
+
+    @skip_non_darwin
+    def test_barrier_pass_no_declaration_when_unused(self):
+        """No barrier declaration added when no barriers inserted."""
+        from third_party.metal.backend.barrier_pass import ensure_barrier_declaration
+
+        result = ensure_barrier_declaration(self._NO_SHARED_MEM_IR)
+        assert "declare void @llvm.nvvm.barrier0()" not in result
+
+    @skip_non_darwin
+    def test_barrier_pass_run_convenience(self):
+        """run_barrier_pass convenience function works end-to-end."""
+        from third_party.metal.backend.barrier_pass import run_barrier_pass
+
+        result = run_barrier_pass(self._LOOP_CARRIED_IR)
+        assert "call void @llvm.nvvm.barrier0()" in result
+        assert "declare void @llvm.nvvm.barrier0()" in result

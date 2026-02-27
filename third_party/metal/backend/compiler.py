@@ -944,6 +944,15 @@ class MetalBackend(BaseBackend):
         ret = str(llvm_mod)
         del llvm_mod
         del context
+
+        # Run the dedicated barrier insertion pass on the LLVM IR text.
+        # This analyzes shared-memory access patterns (addrspace(3)) and
+        # inserts barrier intrinsics at synchronization points before the
+        # MSL translator sees the IR.
+        from third_party.metal.backend.barrier_pass import run_barrier_pass
+
+        ret = run_barrier_pass(ret, debug=_METAL_DEBUG)
+
         return ret
 
     @staticmethod
@@ -2286,6 +2295,8 @@ class MetalBackend(BaseBackend):
                                 f"__metal_sg_store_{fn_tag}({args[0]}, "
                                 f"(device {elem_ty}*){args[1]}, {args[2]});"
                             )
+                    elif fn.startswith("llvm.nvvm.barrier0"):
+                        emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
                     elif fn.startswith("llvm.assume"):
                         emit("(void)0;")
                     elif fn.startswith("llvm.lifetime.start") or fn.startswith(
