@@ -1,4 +1,8 @@
 add_triton_library(TritonMetalGPUToLLVM
+  DotOpToLLVM.cpp
+  FpToFpOpToLLVM.cpp
+  LoadStoreOpToLLVM.cpp
+  NvidiaArtifactLowering.cpp
   TargetInfo.cpp
   TritonGPUToLLVM.cpp
   Utility.cpp
