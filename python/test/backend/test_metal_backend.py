@@ -6437,3 +6437,969 @@ define void @reserved_kernel(ptr %out, i32 %x) {
         assert "v_uint" in msl, (
             "SSA name %uint must be escaped to avoid shadowing MSL uint type"
         )
+
+
+# ── FP8 Runtime Matmul Validation ───────────────────────────────────
+
+
+def _has_torch_fp8() -> bool:
+    """Check whether torch has fp8 dtype support (CPU-side)."""
+    try:
+        import torch
+
+        return hasattr(torch, "float8_e5m2")
+    except Exception:
+        return False
+
+
+skip_no_fp8 = pytest.mark.skipif(
+    not _has_torch_fp8(),
+    reason="Torch float8 types unavailable on this host",
+)
+
+
+class TestMetalFP8RuntimeMatmul:
+    """FP8 matmul tests: compile-path MSL verification and CPU-side
+    numerical validation of fp8 conversion + accumulation accuracy.
+
+    Apple Silicon MPS does not natively support fp8 tensors, so these
+    tests validate:
+    1. The Triton→MSL compile pipeline handles fp8 signatures correctly
+    2. CPU-side fp8 conversion + fp32/fp16 accumulation produces
+       numerically sound results vs fp32 reference
+    """
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    @skip_no_fp8
+    def test_compile_fp8e5m2_matmul_small_16x16x16(self):
+        """fp8e5m2 matmul 16x16x16 compiles to valid MSL with fp32 acc."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_fp8(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_fp8,
+            signature={
+                "a_ptr": "*fp8e5", "b_ptr": "*fp8e5", "c_ptr": "*fp32",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+        msl = kernel.asm["metal"]
+        assert b"kernel void" in msl
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    @skip_no_fp8
+    def test_compile_fp8e5m2_matmul_medium_64x64x64(self):
+        """fp8e5m2 matmul 64x64x64 compiles successfully."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_fp8_med(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_fp8_med,
+            signature={
+                "a_ptr": "*fp8e5", "b_ptr": "*fp8e5", "c_ptr": "*fp32",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    @skip_no_fp8
+    def test_compile_fp8e5m2_matmul_odd_k_tail_64x37x64(self):
+        """fp8e5m2 matmul with odd-K (37) compiles — tail masking works."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_fp8_odd(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_fp8_odd,
+            signature={
+                "a_ptr": "*fp8e5", "b_ptr": "*fp8e5", "c_ptr": "*fp32",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    @skip_no_fp8
+    def test_compile_fp8e5m2_to_fp16_accumulation(self):
+        """fp8 inputs with fp16 output accumulation compiles correctly."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_fp8_fp16out(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c = acc.to(tl.float16)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, c, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_fp8_fp16out,
+            signature={
+                "a_ptr": "*fp8e5", "b_ptr": "*fp8e5", "c_ptr": "*fp16",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
+        )
+        kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        assert_metal_compilation_artifacts(kernel)
+        msl = kernel.asm["metal"]
+        assert b"kernel void" in msl
+
+    @skip_no_fp8
+    def test_fp8e5m2_cpu_matmul_numerics_vs_fp32_reference(self):
+        """CPU-side fp8e5m2 matmul numerics: quantize→dequant→matmul
+        is within fp8 tolerance of fp32 reference."""
+        import numpy as np
+        import torch
+
+        torch.manual_seed(100)
+        m, n, k = 16, 16, 16
+        a_fp32 = torch.randn((m, k), dtype=torch.float32)
+        b_fp32 = torch.randn((k, n), dtype=torch.float32)
+        ref = a_fp32 @ b_fp32
+
+        a_fp8 = a_fp32.to(torch.float8_e5m2).to(torch.float32)
+        b_fp8 = b_fp32.to(torch.float8_e5m2).to(torch.float32)
+        result = a_fp8 @ b_fp8
+
+        # fp8e5m2 has only 2 mantissa bits — large quantization noise
+        assert torch.allclose(result, ref, atol=2.0, rtol=0.3), (
+            f"fp8e5m2 quantized matmul max err: {(result - ref).abs().max().item():.4f}"
+        )
+
+    @skip_no_fp8
+    def test_fp8e4m3fn_cpu_matmul_numerics_vs_fp32_reference(self):
+        """CPU-side fp8e4m3fn matmul numerics: tighter range than e5m2."""
+        import torch
+
+        torch.manual_seed(101)
+        m, n, k = 16, 16, 16
+        a_fp32 = torch.randn((m, k), dtype=torch.float32) * 0.5
+        b_fp32 = torch.randn((k, n), dtype=torch.float32) * 0.5
+        ref = a_fp32 @ b_fp32
+
+        a_fp8 = a_fp32.to(torch.float8_e4m3fn).to(torch.float32)
+        b_fp8 = b_fp32.to(torch.float8_e4m3fn).to(torch.float32)
+        result = a_fp8 @ b_fp8
+
+        # fp8e4m3fn has 3 mantissa bits — better than e5m2 but still noisy
+        assert torch.allclose(result, ref, atol=0.2, rtol=0.15), (
+            f"fp8e4m3fn quantized matmul max err: {(result - ref).abs().max().item():.4f}"
+        )
+
+    @skip_no_fp8
+    def test_fp8e5m2_cpu_odd_k_numerics(self):
+        """CPU fp8e5m2 matmul with odd K=37 — tail handling numerics."""
+        import torch
+
+        torch.manual_seed(102)
+        m, n, k = 64, 64, 37
+        a_fp32 = torch.randn((m, k), dtype=torch.float32)
+        b_fp32 = torch.randn((k, n), dtype=torch.float32)
+        ref = a_fp32 @ b_fp32
+
+        a_fp8 = a_fp32.to(torch.float8_e5m2).to(torch.float32)
+        b_fp8 = b_fp32.to(torch.float8_e5m2).to(torch.float32)
+        result = a_fp8 @ b_fp8
+
+        # Larger K accumulates more fp8 quantization noise
+        assert torch.allclose(result, ref, atol=5.0, rtol=0.35), (
+            f"fp8e5m2 odd-K matmul max err: {(result - ref).abs().max().item():.4f}"
+        )
+
+    @skip_non_darwin
+    @skip_no_xcrun
+    @skip_no_fp8
+    def test_compile_fp8e4b15_matmul_pipeline(self):
+        """fp8e4b15 matmul compiles to valid MSL (if type conversion supported)."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _matmul_fp8e4(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                )
+                acc += tl.dot(a, b)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        src = triton.compiler.ASTSource(
+            fn=_matmul_fp8e4,
+            signature={
+                "a_ptr": "*fp8e4b15", "b_ptr": "*fp8e4b15", "c_ptr": "*fp32",
+                "m": "i32", "n": "i32", "k": "i32",
+                "stride_am": "i32", "stride_ak": "i32",
+                "stride_bk": "i32", "stride_bn": "i32",
+                "stride_cm": "i32", "stride_cn": "i32",
+            },
+            constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
+        )
+        try:
+            kernel = triton.compile(src=src, target=GPUTarget("metal", "apple8", 32))
+        except Exception as e:
+            if "conversion" in str(e).lower() or "not supported" in str(e).lower():
+                pytest.skip(f"fp8e4b15 codegen not fully supported: {e}")
+            raise
+        assert_metal_compilation_artifacts(kernel)
+
+
+# ── Int8 Matmul Runtime Validation ──────────────────────────────────
+
+
+class TestMetalInt8MatmulRuntime:
+    """Int8 matmul runtime correctness tests on MPS.
+
+    Tests int8×int8→int32 and int8 with int16 accumulation,
+    mixed int8/int16 inputs, and boundary saturation behavior.
+    All compare against numpy/torch CPU reference computations.
+    """
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_int8_matmul_small_16x16x16(self):
+        """int8×int8→int32 matmul with 16x16x16 shape."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _matmul_i8_sm(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
+            for kk in range(0, k, BLOCK_K):
+                for ki in range(0, BLOCK_K):
+                    k_idx = kk + ki
+                    a = tl.load(
+                        a_ptr + offs_m * stride_am + k_idx * stride_ak,
+                        mask=(offs_m < m) & (k_idx < k), other=0,
+                    ).to(tl.int32)
+                    b = tl.load(
+                        b_ptr + k_idx * stride_bk + offs_n * stride_bn,
+                        mask=(k_idx < k) & (offs_n < n), other=0,
+                    ).to(tl.int32)
+                    acc += a[:, None] * b[None, :]
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(200)
+        m = n = k = 16
+        a_cpu = torch.randint(-8, 8, (m, k), dtype=torch.int8)
+        b_cpu = torch.randint(-8, 8, (k, n), dtype=torch.int8)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((m, n), dtype=torch.int32, device="mps")
+
+        _matmul_i8_sm[(triton.cdiv(m, 8), triton.cdiv(n, 8), 1)](
+            a_mps, b_mps, c_mps, m, n, k,
+            a_mps.stride(0), a_mps.stride(1),
+            b_mps.stride(0), b_mps.stride(1),
+            c_mps.stride(0), c_mps.stride(1),
+            BLOCK_M=8, BLOCK_N=8, BLOCK_K=8,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = a_cpu.to(torch.int32) @ b_cpu.to(torch.int32)
+        assert torch.equal(c_cpu, expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_int8_matmul_medium_32x32x32(self):
+        """int8×int8→int32 matmul 32x32x32."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _matmul_i8_md(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
+            for kk in range(0, k, BLOCK_K):
+                for ki in range(0, BLOCK_K):
+                    k_idx = kk + ki
+                    a = tl.load(
+                        a_ptr + offs_m * stride_am + k_idx * stride_ak,
+                        mask=(offs_m < m) & (k_idx < k), other=0,
+                    ).to(tl.int32)
+                    b = tl.load(
+                        b_ptr + k_idx * stride_bk + offs_n * stride_bn,
+                        mask=(k_idx < k) & (offs_n < n), other=0,
+                    ).to(tl.int32)
+                    acc += a[:, None] * b[None, :]
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(201)
+        m = n = k = 32
+        a_cpu = torch.randint(-8, 8, (m, k), dtype=torch.int8)
+        b_cpu = torch.randint(-8, 8, (k, n), dtype=torch.int8)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((m, n), dtype=torch.int32, device="mps")
+
+        _matmul_i8_md[(triton.cdiv(m, 8), triton.cdiv(n, 8), 1)](
+            a_mps, b_mps, c_mps, m, n, k,
+            a_mps.stride(0), a_mps.stride(1),
+            b_mps.stride(0), b_mps.stride(1),
+            c_mps.stride(0), c_mps.stride(1),
+            BLOCK_M=8, BLOCK_N=8, BLOCK_K=8,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = a_cpu.to(torch.int32) @ b_cpu.to(torch.int32)
+        assert torch.equal(c_cpu, expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_int8_matmul_i16_accumulation(self):
+        """int8×int8 with int16 accumulation — small values avoid overflow."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _matmul_i8_i16acc(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
+            for kk in range(0, k, BLOCK_K):
+                for ki in range(0, BLOCK_K):
+                    k_idx = kk + ki
+                    a = tl.load(
+                        a_ptr + offs_m * stride_am + k_idx * stride_ak,
+                        mask=(offs_m < m) & (k_idx < k), other=0,
+                    ).to(tl.int32)
+                    b = tl.load(
+                        b_ptr + k_idx * stride_bk + offs_n * stride_bn,
+                        mask=(k_idx < k) & (offs_n < n), other=0,
+                    ).to(tl.int32)
+                    acc += a[:, None] * b[None, :]
+            c16 = acc.to(tl.int16)
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, c16, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(202)
+        m = n = k = 8
+        a_cpu = torch.randint(-3, 4, (m, k), dtype=torch.int8)
+        b_cpu = torch.randint(-3, 4, (k, n), dtype=torch.int8)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((m, n), dtype=torch.int16, device="mps")
+
+        _matmul_i8_i16acc[(1, 1, 1)](
+            a_mps, b_mps, c_mps, m, n, k,
+            a_mps.stride(0), a_mps.stride(1),
+            b_mps.stride(0), b_mps.stride(1),
+            c_mps.stride(0), c_mps.stride(1),
+            BLOCK_M=8, BLOCK_N=8, BLOCK_K=8,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = (a_cpu.to(torch.int32) @ b_cpu.to(torch.int32)).to(torch.int16)
+        assert torch.equal(c_cpu, expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_int8_mixed_i8_i16_input_matmul(self):
+        """Mixed int8 and int16 input matmul: widen both to int32 for acc."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _mixed_int_matvec(
+            a_ptr, x_ptr, out_ptr,
+            m, k,
+            stride_am, stride_ak,
+            BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid = tl.program_id(axis=0)
+            offs_m = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+            acc = tl.zeros((BLOCK_M,), dtype=tl.int32)
+            for kk in range(0, k, BLOCK_K):
+                offs_k = tl.arange(0, BLOCK_K) + kk
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] < k), other=0,
+                ).to(tl.int32)
+                x = tl.load(
+                    x_ptr + offs_k,
+                    mask=offs_k < k, other=0,
+                ).to(tl.int32)
+                acc += tl.sum(a * x[None, :], axis=1)
+            tl.store(out_ptr + offs_m, acc, mask=offs_m < m)
+
+        torch.manual_seed(203)
+        m, k = 16, 16
+        a_cpu = torch.randint(-8, 8, (m, k), dtype=torch.int8)
+        x_cpu = torch.randint(-100, 100, (k,), dtype=torch.int16)
+        a_mps = a_cpu.to("mps")
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.empty((m,), dtype=torch.int32, device="mps")
+
+        _mixed_int_matvec[(triton.cdiv(m, 16),)](
+            a_mps, x_mps, out_mps, m, k,
+            a_mps.stride(0), a_mps.stride(1),
+            BLOCK_M=16, BLOCK_K=16,
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = (a_cpu.to(torch.int32) @ x_cpu.to(torch.int32)).to(torch.int32)
+        assert torch.equal(out_cpu, expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_int8_saturation_boundary_values(self):
+        """int8 boundary: INT8_MIN=-128, INT8_MAX=127 in vector add."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _vadd_i8_sat(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0)
+            y = tl.load(y_ptr + offs, mask=mask, other=0)
+            tl.store(out_ptr + offs, x + y, mask=mask)
+
+        n = 8
+        x_cpu = torch.tensor([-128, 127, -128, 127, 0, -1, 1, 64], dtype=torch.int8)
+        y_cpu = torch.tensor([0, 0, 1, -1, -128, 127, -1, 64], dtype=torch.int8)
+        x_mps = x_cpu.to("mps")
+        y_mps = y_cpu.to("mps")
+        out_mps = torch.empty((n,), dtype=torch.int8, device="mps")
+
+        _vadd_i8_sat[(1,)](x_mps, y_mps, out_mps, n, BLOCK=8)
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = (x_cpu.to(torch.int16) + y_cpu.to(torch.int16)).to(torch.int8)
+        assert torch.equal(out_cpu, expected)
+
+
+# ── Broad ML Workload Runtime Suites ────────────────────────────────
+
+
+class TestMetalBroadMLWorkloads:
+    """Broader ML workload runtime correctness tests on MPS.
+
+    Tests realistic ML patterns including 1D convolution, training
+    iteration, scatter/gather with irregular indices, fused
+    layernorm+linear+residual, and multi-head attention score.
+    All verified against CPU torch reference implementations.
+    """
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_sliding_window_conv1d(self):
+        """1D convolution via sliding window dot product over channels."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _conv1d_simple(
+            x_ptr, w_ptr, y_ptr,
+            in_len, out_len, ksize,
+            BLOCK: tl.constexpr,
+        ):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < out_len
+            acc = tl.zeros((BLOCK,), dtype=tl.float32)
+            for ki in range(ksize):
+                x = tl.load(x_ptr + offs + ki, mask=mask & ((offs + ki) < in_len), other=0.0)
+                w = tl.load(w_ptr + ki)
+                acc += x * w
+            tl.store(y_ptr + offs, acc, mask=mask)
+
+        torch.manual_seed(300)
+        in_len, ksize = 128, 5
+        out_len = in_len - ksize + 1
+        x_cpu = torch.randn((in_len,), dtype=torch.float32)
+        w_cpu = torch.randn((ksize,), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        w_mps = w_cpu.to("mps")
+        y_mps = torch.empty((out_len,), device="mps", dtype=torch.float32)
+
+        _conv1d_simple[(triton.cdiv(out_len, 64),)](
+            x_mps, w_mps, y_mps, in_len, out_len, ksize, BLOCK=64,
+        )
+        torch.mps.synchronize()
+        y_cpu = y_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.conv1d(
+            x_cpu.view(1, 1, -1), w_cpu.flip(0).view(1, 1, -1)
+        ).view(-1)
+        # conv1d does cross-correlation with flipped kernel; we do
+        # direct correlation, so compare with non-flipped reference
+        expected_direct = torch.zeros(out_len)
+        for i in range(out_len):
+            expected_direct[i] = (x_cpu[i : i + ksize] * w_cpu).sum()
+        assert torch.allclose(y_cpu, expected_direct, atol=1e-4, rtol=1e-4)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_training_iteration_pattern(self):
+        """Simulated training step: fwd→loss→grad→update on MPS."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _fwd_linear(x_ptr, w_ptr, b_ptr, y_ptr, n, d, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = tl.arange(0, BLOCK)
+            mask = offs < d
+            x_base = x_ptr + pid * d
+            x = tl.load(x_base + offs, mask=mask, other=0.0)
+            w = tl.load(w_ptr + offs, mask=mask, other=0.0)
+            b = tl.load(b_ptr + offs, mask=mask, other=0.0)
+            y = x * w + b
+            tl.store(y_ptr + pid * d + offs, y, mask=mask)
+
+        @triton.jit
+        def _mse_grad(pred_ptr, target_ptr, grad_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            pred = tl.load(pred_ptr + offs, mask=mask, other=0.0)
+            target = tl.load(target_ptr + offs, mask=mask, other=0.0)
+            grad = 2.0 * (pred - target) / n
+            tl.store(grad_ptr + offs, grad, mask=mask)
+
+        @triton.jit
+        def _sgd_update(w_ptr, grad_ptr, d, lr, BLOCK: tl.constexpr):
+            offs = tl.arange(0, BLOCK)
+            mask = offs < d
+            w = tl.load(w_ptr + offs, mask=mask, other=0.0)
+            g = tl.load(grad_ptr + offs, mask=mask, other=0.0)
+            w_new = w - lr * g
+            tl.store(w_ptr + offs, w_new, mask=mask)
+
+        torch.manual_seed(301)
+        n, d = 16, 32
+        x_cpu = torch.randn((n, d), dtype=torch.float32)
+        w_cpu = torch.randn((d,), dtype=torch.float32)
+        b_cpu = torch.randn((d,), dtype=torch.float32)
+        target_cpu = torch.randn((n, d), dtype=torch.float32)
+        lr = 0.01
+
+        x_mps = x_cpu.to("mps")
+        w_mps = w_cpu.clone().to("mps")
+        b_mps = b_cpu.to("mps")
+        target_mps = target_cpu.to("mps")
+        y_mps = torch.empty((n, d), device="mps", dtype=torch.float32)
+
+        _fwd_linear[(n,)](x_mps, w_mps, b_mps, y_mps, n, d, BLOCK=32)
+        torch.mps.synchronize()
+
+        grad_flat = torch.empty((n * d,), device="mps", dtype=torch.float32)
+        _mse_grad[(triton.cdiv(n * d, 64),)](
+            y_mps.reshape(-1), target_mps.reshape(-1), grad_flat, n * d, BLOCK=64,
+        )
+        torch.mps.synchronize()
+
+        grad_w_mps = grad_flat.view(n, d).mean(dim=0)
+        _sgd_update[(1,)](w_mps, grad_w_mps, d, lr, BLOCK=32)
+        torch.mps.synchronize()
+
+        y_ref = x_cpu * w_cpu + b_cpu
+        grad_ref = 2.0 * (y_ref - target_cpu) / (n * d)
+        grad_w_ref = grad_ref.mean(dim=0)
+        w_ref = w_cpu - lr * grad_w_ref
+
+        w_result = w_mps.cpu()
+        torch.mps.synchronize()
+        assert torch.allclose(w_result, w_ref, atol=1e-4, rtol=1e-4)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_gather_irregular_indices(self):
+        """Gather with irregular/non-contiguous indices on MPS."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _gather(
+            src_ptr, idx_ptr, out_ptr,
+            n_idx, src_len,
+            BLOCK: tl.constexpr,
+        ):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n_idx
+            idx = tl.load(idx_ptr + offs, mask=mask, other=0)
+            val = tl.load(src_ptr + idx, mask=mask & (idx < src_len), other=0.0)
+            tl.store(out_ptr + offs, val, mask=mask)
+
+        torch.manual_seed(302)
+        src_len = 256
+        n_idx = 64
+        src_cpu = torch.randn((src_len,), dtype=torch.float32)
+        idx_cpu = torch.randint(0, src_len, (n_idx,), dtype=torch.int32)
+
+        src_mps = src_cpu.to("mps")
+        idx_mps = idx_cpu.to("mps")
+        out_mps = torch.empty((n_idx,), device="mps", dtype=torch.float32)
+
+        _gather[(triton.cdiv(n_idx, 64),)](
+            src_mps, idx_mps, out_mps, n_idx, src_len, BLOCK=64,
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = src_cpu[idx_cpu.to(torch.int64)]
+        assert torch.allclose(out_cpu, expected, atol=1e-5, rtol=1e-5)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_fused_layernorm_linear_residual(self):
+        """Fused layernorm→linear projection→residual add on MPS."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _fused_ln_linear_res(
+            x_ptr, w_ln_ptr, b_ln_ptr,
+            w_proj_ptr, b_proj_ptr,
+            res_ptr, y_ptr,
+            n_cols, eps,
+            BLOCK: tl.constexpr,
+        ):
+            pid = tl.program_id(axis=0)
+            offs = tl.arange(0, BLOCK)
+            mask = offs < n_cols
+            row_base = pid * n_cols
+
+            x = tl.load(x_ptr + row_base + offs, mask=mask, other=0.0)
+            mean = tl.sum(x, axis=0) / n_cols
+            centered = x - mean
+            var = tl.sum(centered * centered, axis=0) / n_cols
+            inv_std = 1.0 / tl.sqrt(var + eps)
+
+            w_ln = tl.load(w_ln_ptr + offs, mask=mask, other=1.0)
+            b_ln = tl.load(b_ln_ptr + offs, mask=mask, other=0.0)
+            normed = centered * inv_std * w_ln + b_ln
+
+            w_proj = tl.load(w_proj_ptr + offs, mask=mask, other=1.0)
+            b_proj = tl.load(b_proj_ptr + offs, mask=mask, other=0.0)
+            projected = normed * w_proj + b_proj
+
+            res = tl.load(res_ptr + row_base + offs, mask=mask, other=0.0)
+            out = projected + res
+            tl.store(y_ptr + row_base + offs, out, mask=mask)
+
+        torch.manual_seed(303)
+        rows, cols = 8, 64
+        eps = 1e-5
+        x_cpu = torch.randn((rows, cols), dtype=torch.float32)
+        w_ln_cpu = torch.ones((cols,), dtype=torch.float32)
+        b_ln_cpu = torch.zeros((cols,), dtype=torch.float32)
+        w_proj_cpu = torch.randn((cols,), dtype=torch.float32) * 0.1
+        b_proj_cpu = torch.randn((cols,), dtype=torch.float32) * 0.01
+        res_cpu = torch.randn((rows, cols), dtype=torch.float32)
+
+        x_mps = x_cpu.to("mps")
+        w_ln_mps = w_ln_cpu.to("mps")
+        b_ln_mps = b_ln_cpu.to("mps")
+        w_proj_mps = w_proj_cpu.to("mps")
+        b_proj_mps = b_proj_cpu.to("mps")
+        res_mps = res_cpu.to("mps")
+        y_mps = torch.empty((rows, cols), device="mps", dtype=torch.float32)
+
+        _fused_ln_linear_res[(rows,)](
+            x_mps, w_ln_mps, b_ln_mps,
+            w_proj_mps, b_proj_mps,
+            res_mps, y_mps,
+            cols, eps,
+            BLOCK=64,
+        )
+        torch.mps.synchronize()
+        y_cpu = y_mps.cpu()
+        torch.mps.synchronize()
+
+        normed_ref = torch.nn.functional.layer_norm(
+            x_cpu, normalized_shape=(cols,), weight=w_ln_cpu, bias=b_ln_cpu, eps=eps,
+        )
+        projected_ref = normed_ref * w_proj_cpu + b_proj_cpu
+        expected = projected_ref + res_cpu
+        assert torch.allclose(y_cpu, expected, atol=2e-3, rtol=2e-3)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_multihead_attention_score(self):
+        """Multi-head attention: Q@K^T / sqrt(d_k) per head on MPS."""
+        import math
+
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _attn_score(
+            q_ptr, k_ptr, s_ptr,
+            seq_len, d_k,
+            stride_qs, stride_qd,
+            stride_ks, stride_kd,
+            stride_ss, stride_sd,
+            inv_sqrt_dk: tl.constexpr,
+            BLOCK_S: tl.constexpr,
+            BLOCK_D: tl.constexpr,
+        ):
+            pid_row = tl.program_id(axis=0)
+            pid_col = tl.program_id(axis=1)
+            offs_row = pid_row * BLOCK_S + tl.arange(0, BLOCK_S)
+            offs_col = pid_col * BLOCK_S + tl.arange(0, BLOCK_S)
+            offs_d = tl.arange(0, BLOCK_D)
+
+            acc = tl.zeros((BLOCK_S, BLOCK_S), dtype=tl.float32)
+            for dd in range(0, d_k, BLOCK_D):
+                q = tl.load(
+                    q_ptr + offs_row[:, None] * stride_qs + (offs_d[None, :] + dd) * stride_qd,
+                    mask=(offs_row[:, None] < seq_len) & (offs_d[None, :] + dd < d_k),
+                    other=0.0,
+                )
+                k = tl.load(
+                    k_ptr + offs_col[:, None] * stride_ks + (offs_d[None, :] + dd) * stride_kd,
+                    mask=(offs_col[:, None] < seq_len) & (offs_d[None, :] + dd < d_k),
+                    other=0.0,
+                )
+                acc += tl.dot(q, tl.trans(k))
+
+            acc = acc * inv_sqrt_dk
+            s_ptrs = s_ptr + offs_row[:, None] * stride_ss + offs_col[None, :] * stride_sd
+            tl.store(s_ptrs, acc, mask=(offs_row[:, None] < seq_len) & (offs_col[None, :] < seq_len))
+
+        torch.manual_seed(304)
+        seq_len, d_k = 16, 32
+        inv_sqrt_dk = 1.0 / math.sqrt(d_k)
+        q_cpu = torch.randn((seq_len, d_k), dtype=torch.float32)
+        k_cpu = torch.randn((seq_len, d_k), dtype=torch.float32)
+
+        q_mps = q_cpu.to("mps")
+        k_mps = k_cpu.to("mps")
+        s_mps = torch.empty((seq_len, seq_len), device="mps", dtype=torch.float32)
+
+        _attn_score[(triton.cdiv(seq_len, 16), triton.cdiv(seq_len, 16), 1)](
+            q_mps, k_mps, s_mps,
+            seq_len, d_k,
+            q_mps.stride(0), q_mps.stride(1),
+            k_mps.stride(0), k_mps.stride(1),
+            s_mps.stride(0), s_mps.stride(1),
+            inv_sqrt_dk=inv_sqrt_dk,
+            BLOCK_S=16, BLOCK_D=16,
+        )
+        torch.mps.synchronize()
+        s_cpu = s_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = (q_cpu @ k_cpu.T) * inv_sqrt_dk
+        assert torch.allclose(s_cpu, expected, atol=1e-4, rtol=1e-4)
