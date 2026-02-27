@@ -25,7 +25,6 @@ from __future__ import annotations
 import math
 import struct
 
-
 # ── E5M2 (1-5-2) ─────────────────────────────────────────────────────
 
 _E5M2_EXP_BITS = 5
@@ -115,7 +114,7 @@ def convert_fp16_to_fp8e5m2(value: float) -> int:
         return (sign << 7) | man
 
     # Normal range
-    significand = value / (2.0 ** log_val) - 1.0
+    significand = value / (2.0**log_val) - 1.0
     man = _round_to_nearest_even(significand * (1 << _E5M2_MAN_BITS))
 
     if man >= (1 << _E5M2_MAN_BITS):
@@ -220,7 +219,7 @@ def convert_fp16_to_fp8e4b15(value: float) -> int:
         man = builtins_min(man, (1 << _E4B15_MAN_BITS) - 1)
         return (sign << 7) | man
 
-    significand = value / (2.0 ** log_val) - 1.0
+    significand = value / (2.0**log_val) - 1.0
     man = _round_to_nearest_even(significand * (1 << _E4B15_MAN_BITS))
 
     if man >= (1 << _E4B15_MAN_BITS):
@@ -238,6 +237,7 @@ def convert_fp16_to_fp8e4b15(value: float) -> int:
 
 # Avoid shadowing builtins used above
 import builtins as _builtins
+
 builtins_min = _builtins.min
 
 

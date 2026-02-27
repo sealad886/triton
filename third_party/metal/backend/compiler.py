@@ -793,6 +793,7 @@ class MetalBackend(BaseBackend):
 
     def get_module_map(self) -> Dict[str, ModuleType]:
         from third_party.metal.language import libdevice
+
         return {"triton.language.extra.libdevice": libdevice}
 
     def load_dialects(self, ctx):

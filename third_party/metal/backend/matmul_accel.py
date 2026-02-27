@@ -31,6 +31,7 @@ def _gpu_at_least(family: str, minimum: str) -> bool:
 
 # ── Strategy dataclass ───────────────────────────────────────────────
 
+
 @dataclass(frozen=True)
 class MetalMatmulStrategy:
     """Describes the chosen matmul execution strategy for a tile."""
@@ -165,6 +166,7 @@ def select_matmul_strategy(
 
 # ── Performance model ────────────────────────────────────────────────
 
+
 @dataclass(frozen=True)
 class MatmulPerfEstimate:
     """Throughput estimate for a matmul strategy on a specific GPU."""
@@ -297,9 +299,7 @@ def optimize_matmul_msl(
     if include_pos != -1:
         nl = msl_source.find("\n", include_pos)
         if nl != -1:
-            msl_source = (
-                msl_source[: nl + 1] + hint_line + "\n" + msl_source[nl + 1 :]
-            )
+            msl_source = msl_source[: nl + 1] + hint_line + "\n" + msl_source[nl + 1 :]
     else:
         msl_source = hint_line + "\n" + msl_source
 

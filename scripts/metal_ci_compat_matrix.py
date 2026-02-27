@@ -150,7 +150,11 @@ def check_metal_toolchain() -> CheckResult:
         return CheckResult(
             name="metal_toolchain",
             passed=ok,
-            detail=f"metal={metal_path}, metallib={metallib_path}" if ok else "Metal compiler not found",
+            detail=(
+                f"metal={metal_path}, metallib={metallib_path}"
+                if ok
+                else "Metal compiler not found"
+            ),
             value={"metal": metal_path, "metallib": metallib_path},
         )
     except Exception as exc:
@@ -217,8 +221,12 @@ def check_basic_compilation() -> CheckResult:
 
         try:
             compiled = triton.compile(src=src, target=target)
-            has_msl = "metal" in compiled.asm and b"kernel void" in compiled.asm.get("metal", b"")
-            has_metallib = "metallib" in compiled.asm and compiled.asm["metallib"][:4] == b"MTLB"
+            has_msl = "metal" in compiled.asm and b"kernel void" in compiled.asm.get(
+                "metal", b""
+            )
+            has_metallib = (
+                "metallib" in compiled.asm and compiled.asm["metallib"][:4] == b"MTLB"
+            )
             return CheckResult(
                 name="basic_compilation",
                 passed=has_msl and has_metallib,
@@ -268,7 +276,9 @@ def main() -> int:
         description="Metal backend CI compatibility matrix validation",
     )
     parser.add_argument("--json", action="store_true", help="Output JSON report")
-    parser.add_argument("-o", "--output", type=str, default=None, help="Write JSON to file")
+    parser.add_argument(
+        "-o", "--output", type=str, default=None, help="Write JSON to file"
+    )
     args = parser.parse_args()
 
     report = run_all_checks()
@@ -282,13 +292,17 @@ def main() -> int:
             print(text)
     else:
         print(f"Metal Backend Compatibility Check — {report['ts_utc']}")
-        print(f"Python {report['python_version']} on {report['platform']}/{report['arch']}")
+        print(
+            f"Python {report['python_version']} on {report['platform']}/{report['arch']}"
+        )
         print("-" * 60)
         for c in report["checks"]:
             icon = "PASS" if c["passed"] else "FAIL"
             print(f"  [{icon}] {c['name']}: {c['detail']}")
         print("-" * 60)
-        status = "ALL CHECKS PASSED" if report["overall_passed"] else "SOME CHECKS FAILED"
+        status = (
+            "ALL CHECKS PASSED" if report["overall_passed"] else "SOME CHECKS FAILED"
+        )
         print(f"  {status}")
 
     return 0 if report["overall_passed"] else 1

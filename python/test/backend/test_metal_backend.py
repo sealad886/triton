@@ -186,10 +186,11 @@ class TestMetalBackend:
         ), patch(
             "third_party.metal.backend.compiler._get_metal_backend_source_hash",
             return_value="backend-src-hash",
-        ), patch("triton.__version__", "triton-version", create=True):
+        ), patch(
+            "triton.__version__", "triton-version", create=True
+        ):
             assert (
-                backend.hash()
-                == "sdk-version-apple8-triton-version-backend-src-hash"
+                backend.hash() == "sdk-version-apple8-triton-version-backend-src-hash"
             )
 
     def test_parse_options(self):
@@ -263,6 +264,7 @@ class TestMetalBackend:
         module_map = backend.get_module_map()
         assert "triton.language.extra.libdevice" in module_map
         from third_party.metal.language import libdevice
+
         assert module_map["triton.language.extra.libdevice"] is libdevice
 
 
@@ -565,7 +567,10 @@ entry:
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
         assert "threadgroup_barrier(mem_flags::mem_threadgroup);" in msl
         assert "threadgroup_barrier(mem_flags::mem_device);" in msl
-        assert "threadgroup_barrier((mem_flags::mem_threadgroup | mem_flags::mem_device));" in msl
+        assert (
+            "threadgroup_barrier((mem_flags::mem_threadgroup | mem_flags::mem_device));"
+            in msl
+        )
 
     def test_make_metal_ir_translates_phi_nodes(self):
         from third_party.metal.backend.compiler import MetalBackend
@@ -3822,9 +3827,19 @@ class TestMetalRuntimeConformance:
         from third_party.metal.backend.driver import _ARG_PACK_FORMAT
 
         expected_keys = {
-            "i1", "i8", "u8", "i16", "u16",
-            "i32", "i64", "u32", "u64",
-            "f32", "f64", "f16", "bf16",
+            "i1",
+            "i8",
+            "u8",
+            "i16",
+            "u16",
+            "i32",
+            "i64",
+            "u32",
+            "u64",
+            "f32",
+            "f64",
+            "f16",
+            "bf16",
         }
         assert expected_keys == set(_ARG_PACK_FORMAT.keys())
 
@@ -6400,27 +6415,27 @@ class TestMetalAudit2Pass2ReservedIds:
         from third_party.metal.backend.compiler import _MSL_RESERVED_IDENTIFIERS
 
         for name in ("uint", "uchar", "ushort", "ulong"):
-            assert name in _MSL_RESERVED_IDENTIFIERS, (
-                f"{name} must be reserved — MSL uses it as unsigned type alias"
-            )
+            assert (
+                name in _MSL_RESERVED_IDENTIFIERS
+            ), f"{name} must be reserved — MSL uses it as unsigned type alias"
 
     def test_cpp_keywords_reserved(self):
         from third_party.metal.backend.compiler import _MSL_RESERVED_IDENTIFIERS
 
         cpp_keywords = {"void", "struct", "class", "const", "static", "sizeof"}
         for kw in cpp_keywords:
-            assert kw in _MSL_RESERVED_IDENTIFIERS, (
-                f"C++ keyword '{kw}' must be in reserved set"
-            )
+            assert (
+                kw in _MSL_RESERVED_IDENTIFIERS
+            ), f"C++ keyword '{kw}' must be in reserved set"
 
     def test_msl_builtins_reserved(self):
         from third_party.metal.backend.compiler import _MSL_RESERVED_IDENTIFIERS
 
         builtins = {"select", "clamp", "abs", "mix", "saturate", "step"}
         for b in builtins:
-            assert b in _MSL_RESERVED_IDENTIFIERS, (
-                f"MSL builtin '{b}' must be in reserved set"
-            )
+            assert (
+                b in _MSL_RESERVED_IDENTIFIERS
+            ), f"MSL builtin '{b}' must be in reserved set"
 
     def test_reserved_id_collision_avoided(self):
         """If an SSA name collides with a reserved word, msl_id prefixes it."""
@@ -6437,9 +6452,9 @@ define void @reserved_kernel(ptr %out, i32 %x) {
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
         # The name 'uint' must be escaped (e.g., v_uint) to avoid
         # shadowing the MSL unsigned int type alias
-        assert "v_uint" in msl, (
-            "SSA name %uint must be escaped to avoid shadowing MSL uint type"
-        )
+        assert (
+            "v_uint" in msl
+        ), "SSA name %uint must be escaped to avoid shadowing MSL uint type"
 
 
 # ── FP8 Runtime Matmul Validation ───────────────────────────────────
@@ -6483,12 +6498,21 @@ class TestMetalFP8RuntimeMatmul:
 
         @triton.jit
         def _matmul_fp8(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6498,12 +6522,18 @@ class TestMetalFP8RuntimeMatmul:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -6512,11 +6542,18 @@ class TestMetalFP8RuntimeMatmul:
         src = triton.compiler.ASTSource(
             fn=_matmul_fp8,
             signature={
-                "a_ptr": "*fp8e5", "b_ptr": "*fp8e5", "c_ptr": "*fp32",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp8e5",
+                "b_ptr": "*fp8e5",
+                "c_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
@@ -6536,12 +6573,21 @@ class TestMetalFP8RuntimeMatmul:
 
         @triton.jit
         def _matmul_fp8_med(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6551,12 +6597,18 @@ class TestMetalFP8RuntimeMatmul:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -6565,11 +6617,18 @@ class TestMetalFP8RuntimeMatmul:
         src = triton.compiler.ASTSource(
             fn=_matmul_fp8_med,
             signature={
-                "a_ptr": "*fp8e5", "b_ptr": "*fp8e5", "c_ptr": "*fp32",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp8e5",
+                "b_ptr": "*fp8e5",
+                "c_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
@@ -6587,12 +6646,21 @@ class TestMetalFP8RuntimeMatmul:
 
         @triton.jit
         def _matmul_fp8_odd(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6602,12 +6670,18 @@ class TestMetalFP8RuntimeMatmul:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -6616,11 +6690,18 @@ class TestMetalFP8RuntimeMatmul:
         src = triton.compiler.ASTSource(
             fn=_matmul_fp8_odd,
             signature={
-                "a_ptr": "*fp8e5", "b_ptr": "*fp8e5", "c_ptr": "*fp32",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp8e5",
+                "b_ptr": "*fp8e5",
+                "c_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
@@ -6638,12 +6719,21 @@ class TestMetalFP8RuntimeMatmul:
 
         @triton.jit
         def _matmul_fp8_fp16out(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6653,12 +6743,18 @@ class TestMetalFP8RuntimeMatmul:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c = acc.to(tl.float16)
@@ -6668,11 +6764,18 @@ class TestMetalFP8RuntimeMatmul:
         src = triton.compiler.ASTSource(
             fn=_matmul_fp8_fp16out,
             signature={
-                "a_ptr": "*fp8e5", "b_ptr": "*fp8e5", "c_ptr": "*fp16",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp8e5",
+                "b_ptr": "*fp8e5",
+                "c_ptr": "*fp16",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
@@ -6699,9 +6802,9 @@ class TestMetalFP8RuntimeMatmul:
         result = a_fp8 @ b_fp8
 
         # fp8e5m2 has only 2 mantissa bits — large quantization noise
-        assert torch.allclose(result, ref, atol=2.0, rtol=0.3), (
-            f"fp8e5m2 quantized matmul max err: {(result - ref).abs().max().item():.4f}"
-        )
+        assert torch.allclose(
+            result, ref, atol=2.0, rtol=0.3
+        ), f"fp8e5m2 quantized matmul max err: {(result - ref).abs().max().item():.4f}"
 
     @skip_no_fp8
     def test_fp8e4m3fn_cpu_matmul_numerics_vs_fp32_reference(self):
@@ -6719,9 +6822,9 @@ class TestMetalFP8RuntimeMatmul:
         result = a_fp8 @ b_fp8
 
         # fp8e4m3fn has 3 mantissa bits — better than e5m2 but still noisy
-        assert torch.allclose(result, ref, atol=0.2, rtol=0.15), (
-            f"fp8e4m3fn quantized matmul max err: {(result - ref).abs().max().item():.4f}"
-        )
+        assert torch.allclose(
+            result, ref, atol=0.2, rtol=0.15
+        ), f"fp8e4m3fn quantized matmul max err: {(result - ref).abs().max().item():.4f}"
 
     @skip_no_fp8
     def test_fp8e5m2_cpu_odd_k_numerics(self):
@@ -6739,9 +6842,9 @@ class TestMetalFP8RuntimeMatmul:
         result = a_fp8 @ b_fp8
 
         # Larger K accumulates more fp8 quantization noise
-        assert torch.allclose(result, ref, atol=5.0, rtol=0.35), (
-            f"fp8e5m2 odd-K matmul max err: {(result - ref).abs().max().item():.4f}"
-        )
+        assert torch.allclose(
+            result, ref, atol=5.0, rtol=0.35
+        ), f"fp8e5m2 odd-K matmul max err: {(result - ref).abs().max().item():.4f}"
 
     @skip_non_darwin
     @skip_no_xcrun
@@ -6754,12 +6857,21 @@ class TestMetalFP8RuntimeMatmul:
 
         @triton.jit
         def _matmul_fp8e4(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6769,12 +6881,18 @@ class TestMetalFP8RuntimeMatmul:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k), other=0.0,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
-                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n), other=0.0,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
                 )
                 acc += tl.dot(a, b)
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -6783,11 +6901,18 @@ class TestMetalFP8RuntimeMatmul:
         src = triton.compiler.ASTSource(
             fn=_matmul_fp8e4,
             signature={
-                "a_ptr": "*fp8e4b15", "b_ptr": "*fp8e4b15", "c_ptr": "*fp32",
-                "m": "i32", "n": "i32", "k": "i32",
-                "stride_am": "i32", "stride_ak": "i32",
-                "stride_bk": "i32", "stride_bn": "i32",
-                "stride_cm": "i32", "stride_cn": "i32",
+                "a_ptr": "*fp8e4b15",
+                "b_ptr": "*fp8e4b15",
+                "c_ptr": "*fp32",
+                "m": "i32",
+                "n": "i32",
+                "k": "i32",
+                "stride_am": "i32",
+                "stride_ak": "i32",
+                "stride_bk": "i32",
+                "stride_bn": "i32",
+                "stride_cm": "i32",
+                "stride_cn": "i32",
             },
             constexprs={"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 16},
         )
@@ -6822,12 +6947,21 @@ class TestMetalInt8MatmulRuntime:
 
         @triton.jit
         def _matmul_i8_sm(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6839,11 +6973,13 @@ class TestMetalInt8MatmulRuntime:
                     k_idx = kk + ki
                     a = tl.load(
                         a_ptr + offs_m * stride_am + k_idx * stride_ak,
-                        mask=(offs_m < m) & (k_idx < k), other=0,
+                        mask=(offs_m < m) & (k_idx < k),
+                        other=0,
                     ).to(tl.int32)
                     b = tl.load(
                         b_ptr + k_idx * stride_bk + offs_n * stride_bn,
-                        mask=(k_idx < k) & (offs_n < n), other=0,
+                        mask=(k_idx < k) & (offs_n < n),
+                        other=0,
                     ).to(tl.int32)
                     acc += a[:, None] * b[None, :]
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -6858,11 +6994,21 @@ class TestMetalInt8MatmulRuntime:
         c_mps = torch.empty((m, n), dtype=torch.int32, device="mps")
 
         _matmul_i8_sm[(triton.cdiv(m, 8), triton.cdiv(n, 8), 1)](
-            a_mps, b_mps, c_mps, m, n, k,
-            a_mps.stride(0), a_mps.stride(1),
-            b_mps.stride(0), b_mps.stride(1),
-            c_mps.stride(0), c_mps.stride(1),
-            BLOCK_M=8, BLOCK_N=8, BLOCK_K=8,
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            BLOCK_M=8,
+            BLOCK_N=8,
+            BLOCK_K=8,
         )
         torch.mps.synchronize()
         c_cpu = c_mps.cpu()
@@ -6882,12 +7028,21 @@ class TestMetalInt8MatmulRuntime:
 
         @triton.jit
         def _matmul_i8_md(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6899,11 +7054,13 @@ class TestMetalInt8MatmulRuntime:
                     k_idx = kk + ki
                     a = tl.load(
                         a_ptr + offs_m * stride_am + k_idx * stride_ak,
-                        mask=(offs_m < m) & (k_idx < k), other=0,
+                        mask=(offs_m < m) & (k_idx < k),
+                        other=0,
                     ).to(tl.int32)
                     b = tl.load(
                         b_ptr + k_idx * stride_bk + offs_n * stride_bn,
-                        mask=(k_idx < k) & (offs_n < n), other=0,
+                        mask=(k_idx < k) & (offs_n < n),
+                        other=0,
                     ).to(tl.int32)
                     acc += a[:, None] * b[None, :]
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -6918,11 +7075,21 @@ class TestMetalInt8MatmulRuntime:
         c_mps = torch.empty((m, n), dtype=torch.int32, device="mps")
 
         _matmul_i8_md[(triton.cdiv(m, 8), triton.cdiv(n, 8), 1)](
-            a_mps, b_mps, c_mps, m, n, k,
-            a_mps.stride(0), a_mps.stride(1),
-            b_mps.stride(0), b_mps.stride(1),
-            c_mps.stride(0), c_mps.stride(1),
-            BLOCK_M=8, BLOCK_N=8, BLOCK_K=8,
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            BLOCK_M=8,
+            BLOCK_N=8,
+            BLOCK_K=8,
         )
         torch.mps.synchronize()
         c_cpu = c_mps.cpu()
@@ -6942,12 +7109,21 @@ class TestMetalInt8MatmulRuntime:
 
         @triton.jit
         def _matmul_i8_i16acc(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6959,11 +7135,13 @@ class TestMetalInt8MatmulRuntime:
                     k_idx = kk + ki
                     a = tl.load(
                         a_ptr + offs_m * stride_am + k_idx * stride_ak,
-                        mask=(offs_m < m) & (k_idx < k), other=0,
+                        mask=(offs_m < m) & (k_idx < k),
+                        other=0,
                     ).to(tl.int32)
                     b = tl.load(
                         b_ptr + k_idx * stride_bk + offs_n * stride_bn,
-                        mask=(k_idx < k) & (offs_n < n), other=0,
+                        mask=(k_idx < k) & (offs_n < n),
+                        other=0,
                     ).to(tl.int32)
                     acc += a[:, None] * b[None, :]
             c16 = acc.to(tl.int16)
@@ -6979,11 +7157,21 @@ class TestMetalInt8MatmulRuntime:
         c_mps = torch.empty((m, n), dtype=torch.int16, device="mps")
 
         _matmul_i8_i16acc[(1, 1, 1)](
-            a_mps, b_mps, c_mps, m, n, k,
-            a_mps.stride(0), a_mps.stride(1),
-            b_mps.stride(0), b_mps.stride(1),
-            c_mps.stride(0), c_mps.stride(1),
-            BLOCK_M=8, BLOCK_N=8, BLOCK_K=8,
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            BLOCK_M=8,
+            BLOCK_N=8,
+            BLOCK_K=8,
         )
         torch.mps.synchronize()
         c_cpu = c_mps.cpu()
@@ -7003,10 +7191,15 @@ class TestMetalInt8MatmulRuntime:
 
         @triton.jit
         def _mixed_int_matvec(
-            a_ptr, x_ptr, out_ptr,
-            m, k,
-            stride_am, stride_ak,
-            BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            x_ptr,
+            out_ptr,
+            m,
+            k,
+            stride_am,
+            stride_ak,
+            BLOCK_M: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid = tl.program_id(axis=0)
             offs_m = pid * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -7015,11 +7208,13 @@ class TestMetalInt8MatmulRuntime:
                 offs_k = tl.arange(0, BLOCK_K) + kk
                 a = tl.load(
                     a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak,
-                    mask=(offs_m[:, None] < m) & (offs_k[None, :] < k), other=0,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] < k),
+                    other=0,
                 ).to(tl.int32)
                 x = tl.load(
                     x_ptr + offs_k,
-                    mask=offs_k < k, other=0,
+                    mask=offs_k < k,
+                    other=0,
                 ).to(tl.int32)
                 acc += tl.sum(a * x[None, :], axis=1)
             tl.store(out_ptr + offs_m, acc, mask=offs_m < m)
@@ -7033,9 +7228,15 @@ class TestMetalInt8MatmulRuntime:
         out_mps = torch.empty((m,), dtype=torch.int32, device="mps")
 
         _mixed_int_matvec[(triton.cdiv(m, 16),)](
-            a_mps, x_mps, out_mps, m, k,
-            a_mps.stride(0), a_mps.stride(1),
-            BLOCK_M=16, BLOCK_K=16,
+            a_mps,
+            x_mps,
+            out_mps,
+            m,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            BLOCK_M=16,
+            BLOCK_K=16,
         )
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
@@ -7101,8 +7302,12 @@ class TestMetalBroadMLWorkloads:
 
         @triton.jit
         def _conv1d_simple(
-            x_ptr, w_ptr, y_ptr,
-            in_len, out_len, ksize,
+            x_ptr,
+            w_ptr,
+            y_ptr,
+            in_len,
+            out_len,
+            ksize,
             BLOCK: tl.constexpr,
         ):
             pid = tl.program_id(axis=0)
@@ -7110,7 +7315,9 @@ class TestMetalBroadMLWorkloads:
             mask = offs < out_len
             acc = tl.zeros((BLOCK,), dtype=tl.float32)
             for ki in range(ksize):
-                x = tl.load(x_ptr + offs + ki, mask=mask & ((offs + ki) < in_len), other=0.0)
+                x = tl.load(
+                    x_ptr + offs + ki, mask=mask & ((offs + ki) < in_len), other=0.0
+                )
                 w = tl.load(w_ptr + ki)
                 acc += x * w
             tl.store(y_ptr + offs, acc, mask=mask)
@@ -7125,7 +7332,13 @@ class TestMetalBroadMLWorkloads:
         y_mps = torch.empty((out_len,), device="mps", dtype=torch.float32)
 
         _conv1d_simple[(triton.cdiv(out_len, 64),)](
-            x_mps, w_mps, y_mps, in_len, out_len, ksize, BLOCK=64,
+            x_mps,
+            w_mps,
+            y_mps,
+            in_len,
+            out_len,
+            ksize,
+            BLOCK=64,
         )
         torch.mps.synchronize()
         y_cpu = y_mps.cpu()
@@ -7200,7 +7413,11 @@ class TestMetalBroadMLWorkloads:
 
         grad_flat = torch.empty((n * d,), device="mps", dtype=torch.float32)
         _mse_grad[(triton.cdiv(n * d, 64),)](
-            y_mps.reshape(-1), target_mps.reshape(-1), grad_flat, n * d, BLOCK=64,
+            y_mps.reshape(-1),
+            target_mps.reshape(-1),
+            grad_flat,
+            n * d,
+            BLOCK=64,
         )
         torch.mps.synchronize()
 
@@ -7228,8 +7445,11 @@ class TestMetalBroadMLWorkloads:
 
         @triton.jit
         def _gather(
-            src_ptr, idx_ptr, out_ptr,
-            n_idx, src_len,
+            src_ptr,
+            idx_ptr,
+            out_ptr,
+            n_idx,
+            src_len,
             BLOCK: tl.constexpr,
         ):
             pid = tl.program_id(axis=0)
@@ -7250,7 +7470,12 @@ class TestMetalBroadMLWorkloads:
         out_mps = torch.empty((n_idx,), device="mps", dtype=torch.float32)
 
         _gather[(triton.cdiv(n_idx, 64),)](
-            src_mps, idx_mps, out_mps, n_idx, src_len, BLOCK=64,
+            src_mps,
+            idx_mps,
+            out_mps,
+            n_idx,
+            src_len,
+            BLOCK=64,
         )
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
@@ -7270,10 +7495,15 @@ class TestMetalBroadMLWorkloads:
 
         @triton.jit
         def _fused_ln_linear_res(
-            x_ptr, w_ln_ptr, b_ln_ptr,
-            w_proj_ptr, b_proj_ptr,
-            res_ptr, y_ptr,
-            n_cols, eps,
+            x_ptr,
+            w_ln_ptr,
+            b_ln_ptr,
+            w_proj_ptr,
+            b_proj_ptr,
+            res_ptr,
+            y_ptr,
+            n_cols,
+            eps,
             BLOCK: tl.constexpr,
         ):
             pid = tl.program_id(axis=0)
@@ -7318,10 +7548,15 @@ class TestMetalBroadMLWorkloads:
         y_mps = torch.empty((rows, cols), device="mps", dtype=torch.float32)
 
         _fused_ln_linear_res[(rows,)](
-            x_mps, w_ln_mps, b_ln_mps,
-            w_proj_mps, b_proj_mps,
-            res_mps, y_mps,
-            cols, eps,
+            x_mps,
+            w_ln_mps,
+            b_ln_mps,
+            w_proj_mps,
+            b_proj_mps,
+            res_mps,
+            y_mps,
+            cols,
+            eps,
             BLOCK=64,
         )
         torch.mps.synchronize()
@@ -7329,7 +7564,11 @@ class TestMetalBroadMLWorkloads:
         torch.mps.synchronize()
 
         normed_ref = torch.nn.functional.layer_norm(
-            x_cpu, normalized_shape=(cols,), weight=w_ln_cpu, bias=b_ln_cpu, eps=eps,
+            x_cpu,
+            normalized_shape=(cols,),
+            weight=w_ln_cpu,
+            bias=b_ln_cpu,
+            eps=eps,
         )
         projected_ref = normed_ref * w_proj_cpu + b_proj_cpu
         expected = projected_ref + res_cpu
@@ -7348,11 +7587,17 @@ class TestMetalBroadMLWorkloads:
 
         @triton.jit
         def _attn_score(
-            q_ptr, k_ptr, s_ptr,
-            seq_len, d_k,
-            stride_qs, stride_qd,
-            stride_ks, stride_kd,
-            stride_ss, stride_sd,
+            q_ptr,
+            k_ptr,
+            s_ptr,
+            seq_len,
+            d_k,
+            stride_qs,
+            stride_qd,
+            stride_ks,
+            stride_kd,
+            stride_ss,
+            stride_sd,
             inv_sqrt_dk: tl.constexpr,
             BLOCK_S: tl.constexpr,
             BLOCK_D: tl.constexpr,
@@ -7366,20 +7611,30 @@ class TestMetalBroadMLWorkloads:
             acc = tl.zeros((BLOCK_S, BLOCK_S), dtype=tl.float32)
             for dd in range(0, d_k, BLOCK_D):
                 q = tl.load(
-                    q_ptr + offs_row[:, None] * stride_qs + (offs_d[None, :] + dd) * stride_qd,
+                    q_ptr
+                    + offs_row[:, None] * stride_qs
+                    + (offs_d[None, :] + dd) * stride_qd,
                     mask=(offs_row[:, None] < seq_len) & (offs_d[None, :] + dd < d_k),
                     other=0.0,
                 )
                 k = tl.load(
-                    k_ptr + offs_col[:, None] * stride_ks + (offs_d[None, :] + dd) * stride_kd,
+                    k_ptr
+                    + offs_col[:, None] * stride_ks
+                    + (offs_d[None, :] + dd) * stride_kd,
                     mask=(offs_col[:, None] < seq_len) & (offs_d[None, :] + dd < d_k),
                     other=0.0,
                 )
                 acc += tl.dot(q, tl.trans(k))
 
             acc = acc * inv_sqrt_dk
-            s_ptrs = s_ptr + offs_row[:, None] * stride_ss + offs_col[None, :] * stride_sd
-            tl.store(s_ptrs, acc, mask=(offs_row[:, None] < seq_len) & (offs_col[None, :] < seq_len))
+            s_ptrs = (
+                s_ptr + offs_row[:, None] * stride_ss + offs_col[None, :] * stride_sd
+            )
+            tl.store(
+                s_ptrs,
+                acc,
+                mask=(offs_row[:, None] < seq_len) & (offs_col[None, :] < seq_len),
+            )
 
         torch.manual_seed(304)
         seq_len, d_k = 16, 32
@@ -7392,13 +7647,20 @@ class TestMetalBroadMLWorkloads:
         s_mps = torch.empty((seq_len, seq_len), device="mps", dtype=torch.float32)
 
         _attn_score[(triton.cdiv(seq_len, 16), triton.cdiv(seq_len, 16), 1)](
-            q_mps, k_mps, s_mps,
-            seq_len, d_k,
-            q_mps.stride(0), q_mps.stride(1),
-            k_mps.stride(0), k_mps.stride(1),
-            s_mps.stride(0), s_mps.stride(1),
+            q_mps,
+            k_mps,
+            s_mps,
+            seq_len,
+            d_k,
+            q_mps.stride(0),
+            q_mps.stride(1),
+            k_mps.stride(0),
+            k_mps.stride(1),
+            s_mps.stride(0),
+            s_mps.stride(1),
             inv_sqrt_dk=inv_sqrt_dk,
-            BLOCK_S=16, BLOCK_D=16,
+            BLOCK_S=16,
+            BLOCK_D=16,
         )
         torch.mps.synchronize()
         s_cpu = s_mps.cpu()
@@ -7639,13 +7901,9 @@ exit:
         store_idx = next(
             i for i, l in enumerate(lines) if "store float 1.0, ptr addrspace(3)" in l
         )
-        barrier_idx = next(
-            i for i, l in enumerate(lines) if "llvm.nvvm.barrier0" in l
-        )
+        barrier_idx = next(i for i, l in enumerate(lines) if "llvm.nvvm.barrier0" in l)
         load_idx = next(
-            i
-            for i, l in enumerate(lines)
-            if "= load float, ptr addrspace(3)" in l
+            i for i, l in enumerate(lines) if "= load float, ptr addrspace(3)" in l
         )
         assert store_idx < barrier_idx < load_idx
 
@@ -7694,10 +7952,10 @@ exit:
     @skip_non_darwin
     def test_barrier_pass_debug_report(self):
         """Pass reports barrier decisions when debug mode is active."""
-        from third_party.metal.backend.barrier_pass import MetalBarrierInsertionPass
-
-        import io
         import contextlib
+        import io
+
+        from third_party.metal.backend.barrier_pass import MetalBarrierInsertionPass
 
         pass_ = MetalBarrierInsertionPass(debug=True)
         f = io.StringIO()
@@ -7791,9 +8049,13 @@ class TestMetalMatmulAcceleration:
         )
         strat = MetalMatmulStrategy(
             use_simdgroup=True,
-            tile_m=8, tile_n=8, tile_k=8,
-            elem_type="float", accum_type="float",
-            pipeline_depth=2, gpu_family="apple8",
+            tile_m=8,
+            tile_n=8,
+            tile_k=8,
+            elem_type="float",
+            accum_type="float",
+            pipeline_depth=2,
+            gpu_family="apple8",
         )
         result = optimize_matmul_msl(src, [strat])
         assert result == src  # unchanged — no FMA loop detected
@@ -7822,9 +8084,13 @@ class TestMetalMatmulAcceleration:
         )
         strat = MetalMatmulStrategy(
             use_simdgroup=True,
-            tile_m=8, tile_n=8, tile_k=8,
-            elem_type="float", accum_type="float",
-            pipeline_depth=2, gpu_family="apple8",
+            tile_m=8,
+            tile_n=8,
+            tile_k=8,
+            elem_type="float",
+            accum_type="float",
+            pipeline_depth=2,
+            gpu_family="apple8",
         )
         result = optimize_matmul_msl(src, [strat])
         assert "__metal_matmul_accel" in result
@@ -7846,9 +8112,13 @@ class TestMetalMatmulAcceleration:
 
         s = MetalMatmulStrategy(
             use_simdgroup=True,
-            tile_m=8, tile_n=8, tile_k=8,
-            elem_type="half", accum_type="float",
-            pipeline_depth=2, gpu_family="apple9",
+            tile_m=8,
+            tile_n=8,
+            tile_k=8,
+            elem_type="half",
+            accum_type="float",
+            pipeline_depth=2,
+            gpu_family="apple9",
         )
         assert s.use_simdgroup is True
         assert s.tile_m == 8
@@ -7871,7 +8141,11 @@ class TestMetalMatmulAcceleration:
         from third_party.metal.backend.matmul_accel import select_matmul_strategy
 
         s = select_matmul_strategy(
-            128, 128, 128, dtype="float", gpu_family="apple9",
+            128,
+            128,
+            128,
+            dtype="float",
+            gpu_family="apple9",
             strategy_hint="fallback",
         )
         assert s.use_simdgroup is False
@@ -7881,7 +8155,11 @@ class TestMetalMatmulAcceleration:
         from third_party.metal.backend.matmul_accel import select_matmul_strategy
 
         s = select_matmul_strategy(
-            4, 4, 4, dtype="float", gpu_family="apple8",
+            4,
+            4,
+            4,
+            dtype="float",
+            gpu_family="apple8",
             strategy_hint="native",
         )
         assert s.use_simdgroup is True
@@ -7953,8 +8231,10 @@ class TestMetalGluonSupport:
     def test_add_stages_handles_gluon(self):
         """add_stages() registers a ttgir stage when Language is GLUON."""
         from unittest.mock import MagicMock
-        from triton.backends.compiler import GPUTarget, Language
+
         from third_party.metal.backend.compiler import MetalBackend
+
+        from triton.backends.compiler import GPUTarget, Language
 
         target = GPUTarget(backend="metal", arch="apple8", warp_size=32)
         backend = MetalBackend(target)
@@ -7977,8 +8257,10 @@ class TestMetalGluonSupport:
     def test_add_stages_triton_still_works(self):
         """add_stages() with Language.TRITON still produces ttir + ttgir."""
         from unittest.mock import MagicMock
-        from triton.backends.compiler import GPUTarget, Language
+
         from third_party.metal.backend.compiler import MetalBackend
+
+        from triton.backends.compiler import GPUTarget, Language
 
         target = GPUTarget(backend="metal", arch="apple8", warp_size=32)
         backend = MetalBackend(target)
@@ -7992,8 +8274,10 @@ class TestMetalGluonSupport:
     def test_gluon_graceful_when_unavailable(self):
         """gluon_to_ttgir raises RuntimeError when passes.gluon is absent."""
         from unittest.mock import MagicMock, patch
-        from triton.backends.compiler import GPUTarget
+
         from third_party.metal.backend.compiler import MetalBackend
+
+        from triton.backends.compiler import GPUTarget
 
         target = GPUTarget(backend="metal", arch="apple8", warp_size=32)
         backend = MetalBackend(target)
@@ -8020,12 +8304,23 @@ class TestMetalLibdevice:
         from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
 
         required_ops = {
-            "clz", "popc", "fma", "rsqrt", "exp2", "log2",
-            "sin", "cos", "ceil", "floor", "trunc", "round", "saturate",
+            "clz",
+            "popc",
+            "fma",
+            "rsqrt",
+            "exp2",
+            "log2",
+            "sin",
+            "cos",
+            "ceil",
+            "floor",
+            "trunc",
+            "round",
+            "saturate",
         }
-        assert required_ops.issubset(set(METAL_LIBDEVICE_MAP.keys())), (
-            f"Missing: {required_ops - set(METAL_LIBDEVICE_MAP.keys())}"
-        )
+        assert required_ops.issubset(
+            set(METAL_LIBDEVICE_MAP.keys())
+        ), f"Missing: {required_ops - set(METAL_LIBDEVICE_MAP.keys())}"
 
     def test_clz_mapping(self):
         """clz maps to MSL clz()."""
@@ -8072,9 +8367,23 @@ class TestMetalLibdevice:
         from third_party.metal.language import libdevice
 
         func_names = [
-            "clz", "popc", "abs", "floor", "ceil", "trunc", "round",
-            "rsqrt", "sqrt", "exp2", "log2", "sin", "cos",
-            "min", "max", "fma", "saturate",
+            "clz",
+            "popc",
+            "abs",
+            "floor",
+            "ceil",
+            "trunc",
+            "round",
+            "rsqrt",
+            "sqrt",
+            "exp2",
+            "log2",
+            "sin",
+            "cos",
+            "min",
+            "max",
+            "fma",
+            "saturate",
         ]
         for name in func_names:
             assert hasattr(libdevice, name), f"libdevice.{name} not found"
@@ -8107,9 +8416,9 @@ class TestMetalFP8Converters:
         for v in test_values:
             encoded = convert_fp16_to_fp8e5m2(v)
             decoded = convert_fp8e5m2_to_fp16(encoded)
-            assert abs(decoded - v) <= abs(v) * 0.26 + 1e-7, (
-                f"E5M2 round-trip failed for {v}: got {decoded}"
-            )
+            assert (
+                abs(decoded - v) <= abs(v) * 0.26 + 1e-7
+            ), f"E5M2 round-trip failed for {v}: got {decoded}"
 
     def test_fp8e4b15_to_fp16_roundtrip(self):
         """E4B15 encode → decode round-trips for small representable values."""
@@ -8124,13 +8433,14 @@ class TestMetalFP8Converters:
         for v in test_values:
             encoded = convert_fp16_to_fp8e4b15(v)
             decoded = convert_fp8e4b15_to_fp16(encoded)
-            assert decoded == v or (v == 0.0 and decoded == 0.0), (
-                f"E4B15 round-trip failed for {v}: got {decoded}"
-            )
+            assert decoded == v or (
+                v == 0.0 and decoded == 0.0
+            ), f"E4B15 round-trip failed for {v}: got {decoded}"
 
     def test_fp8e5m2_special_values(self):
         """E5M2 handles NaN and Inf correctly."""
         import math
+
         from third_party.metal.language.fp8_utils import (
             convert_fp8e5m2_to_fp16,
             convert_fp16_to_fp8e5m2,
@@ -8166,17 +8476,18 @@ class TestMetalFP8Converters:
 
     def test_fp8_conversion_table(self):
         """Known E5M2 encodings produce expected values."""
-        from third_party.metal.language.fp8_utils import convert_fp8e5m2_to_fp16
         import math
 
+        from third_party.metal.language.fp8_utils import convert_fp8e5m2_to_fp16
+
         known = {
-            0x00: 0.0,          # +0
-            0x80: -0.0,         # -0 (compare as 0.0)
-            0x3C: 1.0,          # 0 01111 00 = 2^0 * 1.0 = 1.0
-            0x40: 2.0,          # 0 10000 00 = 2^1 * 1.0 = 2.0
-            0x38: 0.5,          # 0 01110 00 = 2^-1 * 1.0 = 0.5
-            0x7C: float("inf"), # 0 11111 00 = +Inf
-            0xFC: float("-inf"),# 1 11111 00 = -Inf
+            0x00: 0.0,  # +0
+            0x80: -0.0,  # -0 (compare as 0.0)
+            0x3C: 1.0,  # 0 01111 00 = 2^0 * 1.0 = 1.0
+            0x40: 2.0,  # 0 10000 00 = 2^1 * 1.0 = 2.0
+            0x38: 0.5,  # 0 01110 00 = 2^-1 * 1.0 = 0.5
+            0x7C: float("inf"),  # 0 11111 00 = +Inf
+            0xFC: float("-inf"),  # 1 11111 00 = -Inf
         }
         for bits, expected in known.items():
             result = convert_fp8e5m2_to_fp16(bits)
@@ -8185,13 +8496,14 @@ class TestMetalFP8Converters:
             elif math.isinf(expected):
                 assert result == expected, f"bits=0x{bits:02X}: expected {expected}"
             else:
-                assert abs(result - expected) < 1e-9, (
-                    f"bits=0x{bits:02X}: expected {expected}, got {result}"
-                )
+                assert (
+                    abs(result - expected) < 1e-9
+                ), f"bits=0x{bits:02X}: expected {expected}, got {result}"
 
     def test_fp8e4b15_special_values(self):
         """E4B15 has no Inf — overflows to NaN."""
         import math
+
         from third_party.metal.language.fp8_utils import (
             convert_fp8e4b15_to_fp16,
             convert_fp16_to_fp8e4b15,
@@ -8208,8 +8520,8 @@ class TestMetalFP8Converters:
     def test_fp8_helper_functions(self):
         """fp16_bits_to_float and float_to_fp16_bits round-trip."""
         from third_party.metal.language.fp8_utils import (
-            fp16_bits_to_float,
             float_to_fp16_bits,
+            fp16_bits_to_float,
         )
 
         test_values = [0.0, 1.0, -1.0, 0.5, 65504.0]
@@ -8228,7 +8540,12 @@ class TestMetalCICompatibility:
     """Validate the CI compatibility matrix validation script."""
 
     SCRIPT_PATH = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "scripts", "metal_ci_compat_matrix.py"
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "..",
+        "scripts",
+        "metal_ci_compat_matrix.py",
     )
 
     @staticmethod
@@ -8238,12 +8555,16 @@ class TestMetalCICompatibility:
         path = os.path.normpath(
             os.path.join(
                 os.path.dirname(__file__),
-                "..", "..", "..",
-                "scripts", "metal_ci_compat_matrix.py",
+                "..",
+                "..",
+                "..",
+                "scripts",
+                "metal_ci_compat_matrix.py",
             )
         )
         spec = importlib.util.spec_from_file_location(
-            "metal_ci_compat_matrix", path,
+            "metal_ci_compat_matrix",
+            path,
         )
         assert spec is not None, "Cannot find metal_ci_compat_matrix.py"
         mod = importlib.util.module_from_spec(spec)
@@ -8273,6 +8594,7 @@ class TestMetalCICompatibility:
         assert result.name == "torch"
         try:
             import torch
+
             assert result.value is not None
             assert "version" in result.value
         except ImportError:
@@ -8316,23 +8638,31 @@ class TestMetalAOTRuntime:
     HARNESS_PATH = os.path.normpath(
         os.path.join(
             os.path.dirname(__file__),
-            "..", "..", "..",
-            "third_party", "metal", "tools", "test_aot_runtime.m",
+            "..",
+            "..",
+            "..",
+            "third_party",
+            "metal",
+            "tools",
+            "test_aot_runtime.m",
         )
     )
     RUNTIME_SCRIPT_PATH = os.path.normpath(
         os.path.join(
             os.path.dirname(__file__),
-            "..", "..", "..",
-            "scripts", "test_metal_aot_runtime.py",
+            "..",
+            "..",
+            "..",
+            "scripts",
+            "test_metal_aot_runtime.py",
         )
     )
 
     def test_aot_harness_exists(self):
         """The ObjC AOT runtime harness file exists."""
-        assert os.path.isfile(self.HARNESS_PATH), (
-            f"AOT harness not found at {self.HARNESS_PATH}"
-        )
+        assert os.path.isfile(
+            self.HARNESS_PATH
+        ), f"AOT harness not found at {self.HARNESS_PATH}"
         content = open(self.HARNESS_PATH, "r").read()
         assert "MTLDevice" in content
         assert "MTLComputePipelineState" in content
@@ -8347,26 +8677,28 @@ class TestMetalAOTRuntime:
             result = subprocess.run(
                 [
                     "clang",
-                    "-framework", "Metal",
-                    "-framework", "Foundation",
-                    "-framework", "CoreGraphics",
-                    "-o", output_bin,
+                    "-framework",
+                    "Metal",
+                    "-framework",
+                    "Foundation",
+                    "-framework",
+                    "CoreGraphics",
+                    "-o",
+                    output_bin,
                     self.HARNESS_PATH,
                 ],
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
-            assert result.returncode == 0, (
-                f"clang compilation failed:\n{result.stderr}"
-            )
+            assert result.returncode == 0, f"clang compilation failed:\n{result.stderr}"
             assert os.path.isfile(output_bin)
 
     def test_aot_runtime_script_exists(self):
         """The Python AOT runtime integration script exists."""
-        assert os.path.isfile(self.RUNTIME_SCRIPT_PATH), (
-            f"AOT runtime script not found at {self.RUNTIME_SCRIPT_PATH}"
-        )
+        assert os.path.isfile(
+            self.RUNTIME_SCRIPT_PATH
+        ), f"AOT runtime script not found at {self.RUNTIME_SCRIPT_PATH}"
         content = open(self.RUNTIME_SCRIPT_PATH, "r").read()
         assert "def main" in content
         assert "_compile_triton_kernel_to_metallib" in content
@@ -8379,7 +8711,8 @@ class TestMetalAOTRuntime:
             [
                 sys.executable,
                 self.RUNTIME_SCRIPT_PATH,
-                "--num-elements", "256",
+                "--num-elements",
+                "256",
                 "--json",
             ],
             capture_output=True,
@@ -8387,9 +8720,9 @@ class TestMetalAOTRuntime:
             timeout=120,
             env={
                 **os.environ,
-                "PYTHONPATH": os.path.join(
-                    os.path.dirname(__file__), "..", "..", ".."
-                ) + ":" + os.environ.get("PYTHONPATH", ""),
+                "PYTHONPATH": os.path.join(os.path.dirname(__file__), "..", "..", "..")
+                + ":"
+                + os.environ.get("PYTHONPATH", ""),
             },
         )
         assert result.returncode == 0, (

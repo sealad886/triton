@@ -26,8 +26,13 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-HARNESS_SRC = Path(__file__).resolve().parent.parent / "third_party" / "metal" / "tools" / "test_aot_runtime.m"
+HARNESS_SRC = (
+    Path(__file__).resolve().parent.parent
+    / "third_party"
+    / "metal"
+    / "tools"
+    / "test_aot_runtime.m"
+)
 
 
 def _utc_now_iso() -> str:
@@ -38,15 +43,22 @@ def _compile_harness(harness_src: Path, output_bin: Path) -> tuple[bool, str]:
     """Compile the ObjC AOT harness with clang."""
     cmd = [
         "clang",
-        "-framework", "Metal",
-        "-framework", "Foundation",
-        "-framework", "CoreGraphics",
-        "-o", str(output_bin),
+        "-framework",
+        "Metal",
+        "-framework",
+        "Foundation",
+        "-framework",
+        "CoreGraphics",
+        "-o",
+        str(output_bin),
         str(harness_src),
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         if result.returncode != 0:
             return False, f"clang failed: {result.stderr.strip()}"
@@ -67,7 +79,9 @@ def _compile_triton_kernel_to_metallib(work_dir: Path) -> tuple[bool, Path | Non
         from triton.compiler.compiler import GPUTarget
 
         @triton.jit
-        def vector_add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+        def vector_add_kernel(
+            x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr
+        ):
             pid = tl.program_id(axis=0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < n_elements
@@ -112,12 +126,17 @@ def _compile_triton_kernel_to_metallib(work_dir: Path) -> tuple[bool, Path | Non
         return False, None, str(exc)
 
 
-def _run_harness(harness_bin: Path, metallib_path: Path, kernel_name: str, num_elements: int) -> tuple[bool, str]:
+def _run_harness(
+    harness_bin: Path, metallib_path: Path, kernel_name: str, num_elements: int
+) -> tuple[bool, str]:
     """Run the compiled AOT harness."""
     cmd = [str(harness_bin), str(metallib_path), kernel_name, str(num_elements)]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         output = result.stdout + result.stderr
         passed = result.returncode == 0 and "RESULT: PASS" in output
@@ -130,10 +149,19 @@ def _run_harness(harness_bin: Path, metallib_path: Path, kernel_name: str, num_e
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Metal AOT runtime integration test")
-    parser.add_argument("--num-elements", type=int, default=1024, help="Number of elements")
-    parser.add_argument("--kernel-name", type=str, default="vector_add_kernel", help="Kernel function name")
+    parser.add_argument(
+        "--num-elements", type=int, default=1024, help="Number of elements"
+    )
+    parser.add_argument(
+        "--kernel-name",
+        type=str,
+        default="vector_add_kernel",
+        help="Kernel function name",
+    )
     parser.add_argument("--json", action="store_true", help="Output JSON report")
-    parser.add_argument("-o", "--output", type=str, default=None, help="Write JSON to file")
+    parser.add_argument(
+        "-o", "--output", type=str, default=None, help="Write JSON to file"
+    )
     args = parser.parse_args()
 
     if sys.platform != "darwin":
@@ -160,17 +188,23 @@ def main() -> int:
         print(f"[1/3] Compiled AOT harness: {detail}")
 
         # Step 2: Compile Triton kernel → metallib
-        ok, metallib_path, kernel_name_or_err = _compile_triton_kernel_to_metallib(work_dir)
+        ok, metallib_path, kernel_name_or_err = _compile_triton_kernel_to_metallib(
+            work_dir
+        )
         report["steps"]["compile_kernel"] = {"passed": ok, "detail": kernel_name_or_err}
         if not ok or metallib_path is None:
             print(f"FAIL: compile kernel — {kernel_name_or_err}")
             _output_report(report, args)
             return 1
-        print(f"[2/3] Compiled kernel to metallib: {metallib_path.stat().st_size} bytes (kernel={kernel_name_or_err})")
+        print(
+            f"[2/3] Compiled kernel to metallib: {metallib_path.stat().st_size} bytes (kernel={kernel_name_or_err})"
+        )
 
         # Step 3: Run harness — use the actual kernel name from MSL
         actual_kernel_name = kernel_name_or_err if ok else args.kernel_name
-        ok, output = _run_harness(harness_bin, metallib_path, actual_kernel_name, args.num_elements)
+        ok, output = _run_harness(
+            harness_bin, metallib_path, actual_kernel_name, args.num_elements
+        )
         report["steps"]["run_harness"] = {"passed": ok, "detail": output}
         report["overall_passed"] = ok
         if ok:

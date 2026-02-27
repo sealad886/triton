@@ -67,10 +67,10 @@ def threadgroup_position(_semantic=None):
 # with the symbolic names above.
 
 METAL_BUILTINS = {
-    "thread_position_in_grid":    "uint3  – global thread position",
+    "thread_position_in_grid": "uint3  – global thread position",
     "thread_position_in_threadgroup": "uint3  – local thread position",
-    "threadgroup_position_in_grid":   "uint3  – workgroup position",
-    "threads_per_threadgroup":        "uint3  – workgroup dimensions",
+    "threadgroup_position_in_grid": "uint3  – workgroup position",
+    "threads_per_threadgroup": "uint3  – workgroup dimensions",
     "simdgroup_index_in_threadgroup": "uint   – SIMD-group index",
-    "thread_index_in_simdgroup":      "uint   – lane index within SIMD-group",
+    "thread_index_in_simdgroup": "uint   – lane index within SIMD-group",
 }
