@@ -2775,7 +2775,27 @@ class MetalBackend(BaseBackend):
         msl_lines.extend(body_lines)
         msl_lines.append("}")
         msl_lines.append("")
-        return "\n".join(msl_lines)
+        msl_source = "\n".join(msl_lines)
+
+        # ── Optional matmul acceleration pass ──
+        if simdgroup_strategy in ("auto", "native"):
+            from third_party.metal.backend.matmul_accel import (
+                optimize_matmul_msl,
+                select_matmul_strategy,
+            )
+
+            gpu_family = getattr(opt, "arch", None) or "apple8"
+            strategy = select_matmul_strategy(
+                M=32,
+                N=32,
+                K=32,
+                dtype="float",
+                gpu_family=str(gpu_family),
+                strategy_hint=simdgroup_strategy,
+            )
+            msl_source = optimize_matmul_msl(msl_source, [strategy])
+
+        return msl_source
 
     @staticmethod
     def make_metallib(src, metadata, opt):

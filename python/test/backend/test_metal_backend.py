@@ -7729,3 +7729,206 @@ exit:
         result = run_barrier_pass(self._LOOP_CARRIED_IR)
         assert "call void @llvm.nvvm.barrier0()" in result
         assert "declare void @llvm.nvvm.barrier0()" in result
+
+
+# ── Matmul acceleration strategy tests ───────────────────────────────
+
+
+class TestMetalMatmulAcceleration:
+    """Tests for matmul_accel.py strategy selection and MSL optimisation."""
+
+    def test_strategy_selection_large_fp32(self):
+        """Simdgroup preferred for large fp32 matmul on apple8+."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(64, 64, 64, dtype="float", gpu_family="apple8")
+        assert s.use_simdgroup is True
+        assert s.tile_m == 8
+        assert s.tile_n == 8
+        assert s.elem_type == "float"
+        assert s.accum_type == "float"
+
+    def test_strategy_selection_small(self):
+        """FMA preferred for small shapes regardless of GPU."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(4, 4, 4, dtype="float", gpu_family="apple9")
+        assert s.use_simdgroup is False
+        assert s.tile_m <= 4
+        assert s.tile_n <= 4
+
+    def test_strategy_selection_bf16_apple9(self):
+        """Simdgroup preferred for bf16 on apple9."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(32, 32, 32, dtype="bf16", gpu_family="apple9")
+        assert s.use_simdgroup is True
+        assert s.accum_type == "float"
+
+    def test_strategy_selection_bf16_apple7(self):
+        """FMA used for bf16 on apple7 (no bfloat simdgroup support)."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(32, 32, 32, dtype="bf16", gpu_family="apple7")
+        assert s.use_simdgroup is False
+
+    def test_optimize_msl_noop_no_matmul(self):
+        """Optimizer is a no-op for non-matmul kernels."""
+        from third_party.metal.backend.matmul_accel import (
+            MetalMatmulStrategy,
+            optimize_matmul_msl,
+        )
+
+        src = (
+            "#include <metal_stdlib>\n"
+            "using namespace metal;\n"
+            "kernel void k(device float* a [[buffer(0)]]) {\n"
+            "  a[0] = 1.0;\n"
+            "}\n"
+        )
+        strat = MetalMatmulStrategy(
+            use_simdgroup=True,
+            tile_m=8, tile_n=8, tile_k=8,
+            elem_type="float", accum_type="float",
+            pipeline_depth=2, gpu_family="apple8",
+        )
+        result = optimize_matmul_msl(src, [strat])
+        assert result == src  # unchanged — no FMA loop detected
+
+    def test_optimize_msl_inserts_simdgroup(self):
+        """Optimizer inserts simdgroup hint for matmul-shaped kernels."""
+        from third_party.metal.backend.matmul_accel import (
+            MetalMatmulStrategy,
+            optimize_matmul_msl,
+        )
+
+        src = (
+            "#include <metal_stdlib>\n"
+            "using namespace metal;\n"
+            "kernel void matmul(\n"
+            "  device float* C [[buffer(0)]],\n"
+            "  const device float* A [[buffer(1)]],\n"
+            "  const device float* B [[buffer(2)]]\n"
+            ") {\n"
+            "  float acc = 0.0;\n"
+            "  for (int k = 0; k < K; ++k) {\n"
+            "    acc += A[k] * B[k];\n"
+            "  }\n"
+            "  C[0] = acc;\n"
+            "}\n"
+        )
+        strat = MetalMatmulStrategy(
+            use_simdgroup=True,
+            tile_m=8, tile_n=8, tile_k=8,
+            elem_type="float", accum_type="float",
+            pipeline_depth=2, gpu_family="apple8",
+        )
+        result = optimize_matmul_msl(src, [strat])
+        assert "__metal_matmul_accel" in result
+        assert "tile=8x8x8" in result
+
+    def test_performance_model_apple9(self):
+        """Performance model returns valid estimates for apple9."""
+        from third_party.metal.backend.matmul_accel import get_matmul_performance_model
+
+        model = get_matmul_performance_model("apple9")
+        assert model.gpu_family == "apple9"
+        assert model.simdgroup_gflops > model.fma_gflops
+        assert 0.0 < model.simdgroup_efficiency <= 1.0
+        assert model.preferred() == "simdgroup"
+
+    def test_matmul_strategy_dataclass(self):
+        """Strategy fields are set correctly and summary works."""
+        from third_party.metal.backend.matmul_accel import MetalMatmulStrategy
+
+        s = MetalMatmulStrategy(
+            use_simdgroup=True,
+            tile_m=8, tile_n=8, tile_k=8,
+            elem_type="half", accum_type="float",
+            pipeline_depth=2, gpu_family="apple9",
+        )
+        assert s.use_simdgroup is True
+        assert s.tile_m == 8
+        assert s.elem_type == "half"
+        assert s.accum_type == "float"
+        assert s.gpu_family == "apple9"
+        summary = s.summary()
+        assert "simdgroup" in summary
+        assert "8x8x8" in summary
+
+    def test_strategy_int8_always_fma(self):
+        """int8 always selects FMA even on high-end GPU."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(64, 64, 64, dtype="int8", gpu_family="apple9")
+        assert s.use_simdgroup is False
+
+    def test_strategy_fallback_hint_overrides(self):
+        """strategy_hint='fallback' forces FMA regardless of shape/dtype."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(
+            128, 128, 128, dtype="float", gpu_family="apple9",
+            strategy_hint="fallback",
+        )
+        assert s.use_simdgroup is False
+
+    def test_strategy_native_hint_forces_simdgroup(self):
+        """strategy_hint='native' forces simdgroup even for small shapes."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(
+            4, 4, 4, dtype="float", gpu_family="apple8",
+            strategy_hint="native",
+        )
+        assert s.use_simdgroup is True
+        assert s.tile_m == 8
+
+    def test_optimize_msl_no_strategies(self):
+        """No strategies → source returned unchanged."""
+        from third_party.metal.backend.matmul_accel import optimize_matmul_msl
+
+        src = "kernel void k() {}"
+        assert optimize_matmul_msl(src, None) == src
+        assert optimize_matmul_msl(src, []) == src
+
+    def test_performance_model_apple7_no_simdgroup(self):
+        """apple7 has zero simdgroup throughput, prefers FMA."""
+        from third_party.metal.backend.matmul_accel import get_matmul_performance_model
+
+        model = get_matmul_performance_model("apple7")
+        assert model.simdgroup_gflops == 0.0
+        assert model.preferred() == "fma"
+
+    def test_pipeline_depth_short_k(self):
+        """Short K dimension → pipeline_depth=1."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(32, 32, 16, dtype="float", gpu_family="apple8")
+        assert s.use_simdgroup is True
+        assert s.pipeline_depth == 1
+
+    def test_pipeline_depth_long_k(self):
+        """Long K dimension → pipeline_depth=2."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(32, 32, 64, dtype="float", gpu_family="apple8")
+        assert s.use_simdgroup is True
+        assert s.pipeline_depth == 2
+
+    def test_fp16_strategy_apple8(self):
+        """fp16 selects simdgroup on apple8."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(32, 32, 32, dtype="fp16", gpu_family="apple8")
+        assert s.use_simdgroup is True
+        assert s.elem_type == "half"
+        assert s.accum_type == "float"
+
+    def test_performance_model_unknown_gpu(self):
+        """Unknown GPU family returns conservative defaults."""
+        from third_party.metal.backend.matmul_accel import get_matmul_performance_model
+
+        model = get_matmul_performance_model("apple99")
+        assert model.simdgroup_gflops == 0.0
+        assert model.fma_gflops > 0.0
