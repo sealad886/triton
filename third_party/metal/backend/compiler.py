@@ -133,9 +133,6 @@ _RE_LINE_CLEAN = re.compile(
     r"|\s*;.*$"  # Trailing comments
     r"|\s+#\d+\s*$"  # Attribute-group references
 )
-_RE_LLVM_VECTOR_REDUCE = re.compile(
-    r"^llvm\.vector\.reduce\.([a-z]+)\.v(\d+)([A-Za-z0-9]+)$"
-)
 
 # Structural / parsing patterns
 _RE_LABEL = re.compile(r'^([A-Za-z0-9_."]+):$')
@@ -147,27 +144,14 @@ _RE_PARAM_TYPE = re.compile(
     r"(ptr(?:\s+addrspace\(\d+\))?|i\d+|float|half|bfloat|double|i1)"
 )
 
-# Helper-function patterns
-_RE_MSL_ID_CLEAN = re.compile(r"[^A-Za-z0-9_]")
-_RE_PTR_TYPE = re.compile(r"^ptr(?:\s+addrspace\((\d+)\))?$")
+# Helper-function patterns (duplicates live in translator_context.py)
 _RE_VEC_TYPE = re.compile(r"^<\s*(\d+)\s+x\s+(.+)\s*>$")
-# _RE_ALIGN_STRIP: imported from translator_context
 _RE_CONST_INT = re.compile(r"^-?[0-9]+$")
-_RE_CONST_HEX_FLOAT = re.compile(r"^0x([0-9A-Fa-f]{16})$")
-_RE_CONST_HEX_HALF = re.compile(r"^0xH([0-9A-Fa-f]{4})$")
-_RE_CONST_HEX_BFLOAT = re.compile(r"^0xR([0-9A-Fa-f]{4})$")
-_RE_CONST_FLOAT = re.compile(r"^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$")
-_RE_CALL_RET_VEC = re.compile(r"<\s*\d+\s+x\s+[^>]+\s*>")
-_RE_CALL_RET_PTR = re.compile(r"ptr(?:\s+addrspace\(\d+\))?")
-_RE_CALL_RET_SCALAR = re.compile(
-    r"\bi\d+\b|\bi1\b|\bhalf\b|\bbfloat\b|\bfloat\b|\bdouble\b"
-)
 
 # LLVM IR attribute-group reference stripping (applied during line cleaning)
 _RE_ATTR_GROUP_STRIP = re.compile(r"\s+#\d+\s*$")
 
 # SSA declaration pass patterns (types needed but not full codegen)
-_RE_PHI_DECL = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+(.+?)\s+\[")
 _RE_FNEG_DECL = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*fneg" + _LLVM_FLAGS + r"\s+(.+?)\s+(.+)$"
 )
@@ -192,10 +176,6 @@ _RE_SHUFFLEVECTOR_DECL = re.compile(
     + _SSA_NAME_RE
     + r")\s*=\s*shufflevector\s+<\s*(\d+)\s+x\s+(.+?)\s*>\s+([^,]+),\s*"
     r"<\s*(\d+)\s+x\s+.+?\s*>\s+([^,]+),\s*<\s*(\d+)\s+x\s+i\d+\s*>\s+(.+)$"
-)
-_RE_LOAD_DECL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*load\s+([^,]+),"
-    r"\s+ptr(?:\s+addrspace\(\d+\))?\s+(.+)$"
 )
 
 # Code-generation pass patterns
@@ -270,13 +250,6 @@ _RE_SWITCH_CASE = re.compile(r"(\S+)\s+(-?\d+),\s*label\s+%(\S+)")
 _RE_FENCE = re.compile(
     r"^fence\s+(?:syncscope\(\"(\w+)\"\)\s+)?(monotonic|acquire|release|acq_rel|seq_cst)$"
 )
-
-# ── Fallback GEP / ptr patterns (pre-compiled for hot helpers) ──────
-_RE_GEP_INSTRUCTION_FALLBACK = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*getelementptr(?:\s+\w+)*\s+(.+)$"
-)
-_RE_PTR_SPEC = re.compile(r"^ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$")
-_RE_GEP_FLAG_STRIP = re.compile(r"^(?:inbounds|nuw|nsw|inrange)\s+")
 
 # ── Opcode dispatch sets for codegen fast-path (PERF-005) ───────────
 _BINOP_OPCODES = frozenset(

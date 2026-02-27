@@ -5957,7 +5957,7 @@ define void @half_nan(ptr %out) {
         """Verify _RE_CONST_HEX_BFLOAT regex matches 0xR prefix."""
         import struct as _struct
 
-        from third_party.metal.backend.compiler import _RE_CONST_HEX_BFLOAT
+        from third_party.metal.backend.translator_context import _RE_CONST_HEX_BFLOAT
 
         m = _RE_CONST_HEX_BFLOAT.match("0xR3F80")
         assert m is not None
