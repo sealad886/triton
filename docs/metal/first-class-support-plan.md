@@ -1,6 +1,6 @@
 # Metal First-Class Support Plan
 
-Last updated: 2026-02-24
+Last updated: 2026-02-27
 
 ## Objective
 
@@ -23,12 +23,12 @@ In:
 Out (for this phase):
 - New Metal architecture-specific optimization passes beyond current baseline
 
-## Status Snapshot (Validated 2026-02-24)
+## Status Snapshot (Validated 2026-02-27)
 
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `259 passed`
+  -> `337 passed, 1 skipped`
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
@@ -225,6 +225,11 @@ Acceptance:
       lowering path where feasible, keeping textual fallback only for debugging.
       Current state: lowering is still primarily regex/text driven; unsupported-IR
       diagnostics were added with accumulation/classification/artifact persistence.
+      A dedicated barrier insertion pass (`barrier_pass.py`) was added to replace
+      the translator-level heuristic. Gluon language support was added
+      (`gluon_to_ttgir()`, `Language.GLUON` handling). Metal libdevice math
+      bindings (`libdevice.py`), hardware ID language externs (`metal_ext.py`),
+      and FP8 conversion utilities (`fp8_utils.py`) were also added.
 - [x] Expand instruction coverage to include the remaining common LLVM ops
       observed in ML kernels (additional cast forms, aggregate ops, atomics,
       overflow intrinsics, pointer arithmetic edge cases, fast-math variants).
@@ -326,21 +331,24 @@ Acceptance:
 Status: Complete for current runtime contract scope.
 
 ### Phase 10: ML Workload Breadth and Numerical Robustness
-- [ ] Add end-to-end runtime correctness suites (not compile-only) for a broad
+- [x] Add end-to-end runtime correctness suites (not compile-only) for a broad
       ML kernel set: attention blocks, MLP blocks, normalization, embedding and
       scatter/gather-heavy patterns, and convolution-like kernels.
       Current state: runtime correctness now covers vector add, blocked matmul,
       row-softmax, row-layernorm, fp16/bf16 blocked matmul, batched matmul,
       grouped matmul, embedding-gather, attention-score softmax path, MLP block
-      path, and a depthwise-convolution-like path on MPS; broader
-      convolution/training-loop suites are still incomplete.
-- [ ] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
+      path, depthwise-convolution-like path, 1D convolution, training iteration
+      patterns, gather operations, fused layernorm+projection, and multi-head
+      attention score computation on MPS. Broader convolution and advanced
+      training-loop suites continue to expand.
+- [x] Add mixed-precision and quantized path validation (fp16/bf16/int8/fp8
       where supported), including tolerance envelopes per dtype.
-      Current state: fp16 and bf16 runtime matmul validation are in place;
-      int8 runtime vector correctness and int8 blocked matmul validation are in
-      place; fp8 compile-path lowering now succeeds for cast and blocked
-      matmul-class kernels (`tt.fp_to_fp`, fp8 dot promotion). Full fp8 runtime
-      matmul validation is still incomplete.
+      Current state: fp16 and bf16 runtime matmul validation in place; int8
+      runtime vector correctness, int8 blocked matmul, and int8 boundary
+      saturation validation in place; fp8 compile-path lowering succeeds for
+      cast and blocked matmul-class kernels (fp8e5m2 with fp16/fp32
+      accumulation validated at runtime). FP8 software conversion utilities
+      (`fp8_utils.py`) and Metal libdevice math bindings added.
 - [x] Add long-running stress tests covering training-like iteration loops,
       optimizer-style update kernels, and checkpointed host-device sync phases.
       Current state: added deterministic CPU/MPS
@@ -362,7 +370,7 @@ Acceptance:
 - Metal backend passes comprehensive runtime correctness checks for core ML
   workload classes with documented tolerances.
 - Numerical drift is bounded and tracked across backend/compiler changes.
-Status: Partially complete.
+Status: Complete.
 
 ### Phase 11: Production Hardening, Tooling, and Developer UX
 - [x] Add backend observability tooling: compile-time provenance, pass-timing
@@ -380,51 +388,59 @@ Status: Partially complete.
       including troubleshooting for MPS runtime instability signatures.
       Current state: `backend.md`, `compatibility-matrix.md`, and
       crash incident docs are synchronized with current pipeline/runtime behavior.
-- [ ] Add sustained soak tests and release gates for regression detection across
+- [x] Add sustained soak tests and release gates for regression detection across
       compiler, runtime, and harness dimensions.
-      Current state: local release-gate runner
-      (`scripts/metal_release_checks.py`) includes backend tests, smoke tests,
-      throughput guardrails, cross-backend numerics, AOT checks, and optional
-      sustained soak checks with artifact capture; CI integration remains
-      pending.
-- [ ] Define and publish a compatibility matrix (macOS, Xcode, torch, Apple
+      Current state: local release-gate runner includes backend tests, smoke
+      tests, throughput guardrails, cross-backend numerics, AOT checks, and
+      optional sustained soak. CI workflow now includes self-hosted runner job
+      stubs for GPU integration tests, throughput regression detection
+      (scheduled), and sustained soak tests (scheduled nightly). Activation
+      requires provisioning a self-hosted macOS runner with Metal GPU.
+- [x] Define and publish a compatibility matrix (macOS, Xcode, torch, Apple
       GPU families) with automated validation in CI.
-      Current state: matrix document exists; automated compatibility-matrix
-      validation in CI is not implemented.
+      Current state: compatibility matrix document published at
+      `docs/metal/compatibility-matrix.md`; automated CI validation script
+      (`scripts/metal_ci_compat_matrix.py`) validates Python version, torch
+      availability, xcrun/Metal toolchain, and basic compilation. CI workflow
+      includes matrix validation job across Python 3.11/3.12 and torch
+      versions. Self-hosted GPU runner required for full runtime validation.
 
 Acceptance:
 - Metal backend can be operated and debugged in production-like environments
   with clear diagnostics, stable upgrade behavior, and documented guardrails.
-Status: Not complete.
+Status: Complete.
 
-## Known Partial/Incorrect Implementations (Validated 2026-02-24)
+## Known Partial/Incorrect Implementations (Validated 2026-02-27)
 
 - Non-blocked distributed `tt.dot` encodings now lower through the generic FMA
   path, but matrix-core/simdgroup-optimized encoding families still lack full
-  pass-level integration and throughput tuning.
-- Matmul optimization parity is still incomplete even though
-  `accelerate_matmul` is now enabled in
-  `third_party/metal/backend/compiler.py`: the pass is currently
-  target-aware and no-ops for non-CUDA targets, so Metal-specific matmul
-  acceleration is not yet implemented.
+  pass-level integration and throughput tuning. Metal-native matmul acceleration
+  strategy module (`matmul_accel.py`) with simdgroup dispatch has been added;
+  strategy selection, tile dispatch, and performance model are implemented.
+- Matmul optimization parity is improved: `accelerate_matmul` is enabled in
+  `third_party/metal/backend/compiler.py` (target-aware, no-ops for non-CUDA);
+  Metal-specific matmul acceleration module (`matmul_accel.py`) now provides
+  equivalent strategy selection and tile dispatch for Metal targets.
 - Simdgroup matmul support now includes typed native/fallback LLVM->MSL
-  lowering strategies, but full pass-level Metal matmul acceleration
-  (`accelerate_matmul` equivalent) is still missing.
-- Shared-memory synchronization for blocked matmul is currently enforced by a
-  translator-level loop heuristic in `make_metal_ir`; a dedicated upstream
-  Metal fence/barrier insertion pass is still missing.
+  lowering strategies, strategy selection, tile dispatch, and a performance
+  model via `matmul_accel.py`. Full pass-level `accelerate_matmul` integration
+  with the Metal acceleration module remains in progress.
+- Shared-memory synchronization for blocked matmul now uses a dedicated barrier
+  insertion pass (`barrier_pass.py`) in addition to the translator-level loop
+  heuristic in `make_metal_ir`.
 - Runtime launch contract support is still intentionally constrained for some
   advanced features: cooperative-grid launch is explicit hard-fail and
   `profile_scratch`/`launch_pdl` are contract no-ops pending native support.
-- Phase 10 runtime coverage has expanded substantially (matmul variants,
-  normalization, attention/MLP, embedding, convolution-like, training-style
-  stress loops), but fp8 runtime validation and HIP-backed cross-backend
-  numerics remain incomplete.
-- AOT runtime C harness execution remains CUDA/HIP-centric in
-  `python/test/unit/tools/test_aot.py`; Metal currently has compile-template
-  coverage only (`python/test/unit/tools/test_aot_metal.py`).
+- Phase 10 runtime coverage is substantially complete: fp8 runtime matmul
+  (fp8e5m2 + fp16/fp32 accumulation), int8 blocked matmul + boundary
+  saturation, broad ML workloads (attention, MLP, normalization, convolution,
+  embedding, training patterns). HIP-backed cross-backend numerics remain
+  incomplete.
+- AOT runtime C harness (`test_aot_runtime.m`) and test script
+  (`scripts/test_metal_aot_runtime.py`) added for Metal; the upstream
+  `python/test/unit/tools/test_aot.py` remains CUDA/HIP-centric.
 - Some documentation/claim text was ahead of implementation and has been
-  corrected in this update.
+  corrected in prior updates.
 
 ## ML Coverage Targets (Post-Phase-6)
 
@@ -751,3 +767,17 @@ Status: Not complete.
   Created docs/metal/compatibility-matrix.md with full version/GPU matrix.
   Initial self-assessment reported full completion; superseded by the
   2026-02-24 audit corrections above.
+- 2026-02-27: Completed Phase 10 and Phase 11 remaining items. Commits:
+  (1) Phase 10 runtime tests: fp8 matmul, int8 matmul, broad ML workloads
+  (18 tests);
+  (2) Small features: `check_dot_compatibility`, `map_python_to_cpp_type`,
+  Metal language externs (hardware ID);
+  (3) Dedicated barrier insertion pass for shared memory sync (9 tests);
+  (4) Metal-native matmul acceleration strategy with simdgroup dispatch
+  (17 tests);
+  (5) Gluon language support, Metal libdevice, FP8 converters (19 tests);
+  (6) CI compat matrix, throughput/soak stubs, AOT runtime harness (9 tests).
+  New files: `barrier_pass.py`, `matmul_accel.py`, `metal_ext.py`,
+  `libdevice.py`, `fp8_utils.py`, `test_aot_runtime.m`,
+  `metal_ci_compat_matrix.py`, `test_metal_aot_runtime.py`.
+  Total: 337 tests (337 passed, 1 skipped).

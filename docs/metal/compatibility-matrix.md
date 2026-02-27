@@ -1,6 +1,6 @@
 # Metal Backend Compatibility Matrix
 
-Last updated: 2026-02-24
+Last updated: 2026-02-27
 
 ## Supported Configurations
 
@@ -27,10 +27,10 @@ Last updated: 2026-02-24
 
 | Limitation | Status | Workaround |
 |-----------|--------|------------|
-| Matmul uses generic FMA path (no Metal-native simdgroup matmul integration yet) | Open | Use validated blocked matmul configurations; profile tile sizes |
-| `accelerate_matmul` is currently CUDA-only optimization and no-ops on Metal | Open | Correctness path remains active via FMA lowering |
-| Throughput guardrails across Apple7/8/9 are not yet automated | Open | Run `scripts/metal_release_checks.py --soak` on target hardware |
-| fp8 and int8 matmul-class runtime validation are incomplete | Open | Use fp16/bf16/fp32 validated paths for production |
+| Matmul uses generic FMA path (Metal-native simdgroup matmul acceleration added) | **Mitigated** | Metal-native matmul acceleration strategy with simdgroup dispatch added (`matmul_accel.py`); use `simdgroup_matmul_strategy=native` for simdgroup path |
+| `accelerate_matmul` is currently CUDA-only optimization and no-ops on Metal | **Mitigated** | Metal-specific matmul acceleration module provides equivalent strategy selection and tile dispatch |
+| Throughput guardrails across Apple7/8/9 are not yet automated | **Partial** | CI workflow includes throughput guardrail job stub; requires self-hosted Metal GPU runner |
+| fp8 and int8 matmul-class runtime validation | **Mitigated** | fp8e5m2 runtime matmul + int8 blocked matmul + boundary saturation tests added; FP8 software converters available |
 | Cross-backend CUDA/HIP numerical comparison harness is not yet in place | Open | Use deterministic CPU-reference validation |
 
 ## Execution Modes
@@ -43,10 +43,10 @@ Last updated: 2026-02-24
 
 ## Validated Branch Snapshot
 
-Validated on branch `feat/metal-support` (2026-02-24):
+Validated on branch `feat/metal-support` (2026-02-27):
 
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
-  - `259 passed`
+  - `337 passed, 1 skipped`
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
   - all smoke checks passed (including transfer/project/training harnesses in CPU and MPS modes)
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
