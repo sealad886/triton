@@ -9362,3 +9362,215 @@ exit:
         assert "sqrt(" in msl
         assert "exp(" in msl
         assert " ? " in msl
+
+
+# ── Golden MSL parity tests for typed IR dispatch ──────────────────
+
+
+class TestMetalTypedIRParity:
+    """Golden MSL structure tests that pin the current make_metal_ir output.
+
+    Each test builds minimal LLVM IR for a representative kernel pattern,
+    compiles it through MetalBackend.make_metal_ir(), and verifies specific
+    MSL patterns and structural invariants.  When the typed IR dispatch
+    refactoring (Phases 1-3) lands these tests confirm output parity.
+    """
+
+    def test_vector_add_golden_msl(self):
+        """Binary float ops: add+multiply produce correct MSL operators."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @vector_add_kernel(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_grid_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %pa = getelementptr float, ptr addrspace(1) %a, i64 %idx
+  %va = load float, ptr addrspace(1) %pa
+  %pb = getelementptr float, ptr addrspace(1) %b, i64 %idx
+  %vb = load float, ptr addrspace(1) %pb
+  %sum = fadd float %va, %vb
+  %prod = fmul float %sum, %vb
+  %pout = getelementptr float, ptr addrspace(1) %out, i64 %idx
+  store float %prod, ptr addrspace(1) %pout
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(ir, metadata, None)
+        assert metadata["name"] == "vector_add_kernel"
+        assert "kernel void vector_add_kernel" in msl
+        assert "device float*" in msl
+        assert "[[buffer(0)]]" in msl
+        assert "[[buffer(1)]]" in msl
+        assert "[[buffer(2)]]" in msl
+        assert "__metal_get_thread_position_in_grid_x()" in msl
+        assert " + " in msl
+        assert " * " in msl
+        assert "if (" in msl
+        assert "while (true)" in msl
+        assert "switch (__pc)" in msl
+        assert "UNSUPPORTED" not in msl
+
+    def test_matmul_tile_golden_msl(self):
+        """Simdgroup matrix ops produce native MSL simdgroup intrinsics."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @matmul_tile_kernel(ptr addrspace(1) %A, ptr addrspace(1) %B, ptr addrspace(1) %C) {
+entry:
+  %ma = call <8 x float> @__metal_simdgroup_load(ptr addrspace(1) %A, i32 64)
+  %mb = call <8 x float> @__metal_simdgroup_load(ptr addrspace(1) %B, i32 64)
+  %mc = call <8 x float> @__metal_simdgroup_load(ptr addrspace(1) %C, i32 64)
+  %md = call <8 x float> @__metal_simdgroup_multiply_accumulate(<8 x float> %ma, <8 x float> %mb, <8 x float> %mc)
+  call void @__metal_simdgroup_store(<8 x float> %md, ptr addrspace(1) %C, i32 64)
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(ir, metadata, None)
+        assert metadata["name"] == "matmul_tile_kernel"
+        assert "kernel void matmul_tile_kernel" in msl
+        assert "device float*" in msl
+        assert "simdgroup_matrix<float, 8, 8>" in msl
+        assert "simdgroup_load(" in msl
+        assert "simdgroup_multiply_accumulate(" in msl
+        assert "simdgroup_store(" in msl
+        assert "UNSUPPORTED" not in msl
+
+    def test_softmax_row_golden_msl(self):
+        """Softmax pattern: max-reduce, exp, sum, division all lower correctly."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @softmax_row_kernel(ptr addrspace(1) %in, ptr addrspace(1) %out, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_grid_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %pin = getelementptr float, ptr addrspace(1) %in, i64 %idx
+  %x = load float, ptr addrspace(1) %pin
+  ; max(x, 0) then exp then sum pattern
+  %zero = bitcast i32 0 to float
+  %is_gt = fcmp ogt float %x, %zero
+  %xmax = select i1 %is_gt, float %x, float %zero
+  %neg = fneg float %xmax
+  %e = call float @__nv_expf(float %neg)
+  %one = bitcast i32 1065353216 to float
+  %denom = fadd float %one, %e
+  %result = fdiv float %x, %denom
+  %pout = getelementptr float, ptr addrspace(1) %out, i64 %idx
+  store float %result, ptr addrspace(1) %pout
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(ir, metadata, None)
+        assert metadata["name"] == "softmax_row_kernel"
+        assert "kernel void softmax_row_kernel" in msl
+        assert "device float*" in msl
+        assert "__metal_get_thread_position_in_grid_x()" in msl
+        assert "exp(" in msl
+        assert " / " in msl
+        assert " + " in msl
+        assert " ? " in msl
+        assert "= -(" in msl
+        assert "as_type<float>(" in msl
+        assert "UNSUPPORTED" not in msl
+
+    def test_reduction_sum_golden_msl(self):
+        """Reduce-loop with phi accumulator and backedge lowers correctly."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @reduction_sum_kernel(ptr addrspace(1) %data, ptr addrspace(1) %out, i32 %n) {
+entry:
+  br label %loop
+
+loop:
+  %i = phi i32 [0, %entry], [%i_next, %loop_body]
+  %acc = phi float [0.0, %entry], [%acc_next, %loop_body]
+  %cond = icmp slt i32 %i, %n
+  br i1 %cond, label %loop_body, label %done
+
+loop_body:
+  %idx = sext i32 %i to i64
+  %ptr = getelementptr float, ptr addrspace(1) %data, i64 %idx
+  %val = load float, ptr addrspace(1) %ptr
+  %acc_next = fadd float %acc, %val
+  %i_next = add i32 %i, 1
+  br label %loop
+
+done:
+  %out_ptr = getelementptr float, ptr addrspace(1) %out, i64 0
+  store float %acc, ptr addrspace(1) %out_ptr
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(ir, metadata, None)
+        assert metadata["name"] == "reduction_sum_kernel"
+        assert "kernel void reduction_sum_kernel" in msl
+        assert "device float*" in msl
+        assert "while (true)" in msl
+        assert "switch (__pc)" in msl
+        assert " + " in msl
+        assert "__triton_pred_block ==" in msl
+        assert "float acc" in msl
+        assert "UNSUPPORTED" not in msl
+
+    def test_silu_activation_golden_msl(self):
+        """SiLU = x / (1 + exp(-x)) lowers to exp + division MSL."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ir = """\
+define void @silu_kernel(ptr addrspace(1) %in, ptr addrspace(1) %out, i32 %n) {
+entry:
+  %tid = call i32 @__metal_get_thread_position_in_grid_x()
+  %cmp = icmp slt i32 %tid, %n
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %idx = sext i32 %tid to i64
+  %pin = getelementptr float, ptr addrspace(1) %in, i64 %idx
+  %x = load float, ptr addrspace(1) %pin
+  ; SiLU: x * sigmoid(x) = x / (1 + exp(-x))
+  %neg_x = fneg float %x
+  %exp_neg = call float @__nv_expf(float %neg_x)
+  %one = bitcast i32 1065353216 to float
+  %denom = fadd float %one, %exp_neg
+  %sigmoid = fdiv float %x, %denom
+  %pout = getelementptr float, ptr addrspace(1) %out, i64 %idx
+  store float %sigmoid, ptr addrspace(1) %pout
+  br label %exit
+
+exit:
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(ir, metadata, None)
+        assert metadata["name"] == "silu_kernel"
+        assert "kernel void silu_kernel" in msl
+        assert "device float*" in msl
+        assert "__metal_get_thread_position_in_grid_x()" in msl
+        assert "exp(" in msl
+        assert "= -(" in msl
+        assert " / " in msl
+        assert " + " in msl
+        assert "as_type<float>(1065353216)" in msl
+        assert "if (" in msl
+        assert "UNSUPPORTED" not in msl
