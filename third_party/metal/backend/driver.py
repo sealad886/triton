@@ -45,6 +45,11 @@ def _ceildiv(a: int, b: int) -> int:
 # ── Argument packing format map ─────────────────────────────────────
 
 _ARG_PACK_FORMAT: dict[str, str] = {
+    "i1": "?",  # bool
+    "i8": "b",  # signed char
+    "u8": "B",  # unsigned char
+    "i16": "h",  # signed short
+    "u16": "H",  # unsigned short
     "i32": "i",
     "i64": "q",
     "u32": "I",
@@ -52,6 +57,7 @@ _ARG_PACK_FORMAT: dict[str, str] = {
     "f32": "f",
     "f64": "d",
     "f16": "e",
+    "bf16": "H",  # bfloat16 packed as raw 16-bit unsigned (no struct format)
 }
 
 

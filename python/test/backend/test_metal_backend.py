@@ -3816,13 +3816,22 @@ class TestMetalRuntimeConformance:
     def test_arg_pack_format_map(self):
         from third_party.metal.backend.driver import _ARG_PACK_FORMAT
 
-        expected_keys = {"i32", "i64", "u32", "u64", "f32", "f64", "f16"}
+        expected_keys = {
+            "i1", "i8", "u8", "i16", "u16",
+            "i32", "i64", "u32", "u64",
+            "f32", "f64", "f16", "bf16",
+        }
         assert expected_keys == set(_ARG_PACK_FORMAT.keys())
 
     def test_arg_pack_format_sizes(self):
         from third_party.metal.backend.driver import _ARG_PACK_FORMAT
 
         expected_sizes = {
+            "i1": 1,
+            "i8": 1,
+            "u8": 1,
+            "i16": 2,
+            "u16": 2,
             "i32": 4,
             "i64": 8,
             "u32": 4,
@@ -3830,6 +3839,7 @@ class TestMetalRuntimeConformance:
             "f32": 4,
             "f64": 8,
             "f16": 2,
+            "bf16": 2,
         }
         for key, fmt in _ARG_PACK_FORMAT.items():
             assert struct.calcsize(fmt) == expected_sizes[key], f"{key} size mismatch"
@@ -6131,3 +6141,277 @@ declare float @llvm.powi.f32.i32(float, i32)
         assert (
             "static_cast<float>" not in msl
         ), "pown() takes integer exponent; float cast is unnecessary"
+
+
+class TestMetalAudit2Pass2LineClean:
+    """ERR2-001: _RE_LINE_CLEAN must strip ALL LLVM metadata, not just !dbg.
+
+    LLVM O3 can add !tbaa, !range, !alias.scope, !invariant.load, and
+    !noalias metadata independently of debug info.  If these aren't
+    stripped, downstream regex patterns capture metadata tokens inside
+    pointer/operand groups, producing invalid MSL variable references.
+    """
+
+    def test_tbaa_metadata_stripped(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @tbaa_kernel(ptr %out, ptr %in) {
+  %v = load i32, ptr %in, align 4, !tbaa !0
+  store i32 %v, ptr %out, align 4
+  ret void
+}
+!0 = !{!1, !1, i64 0}
+!1 = !{!"int", !2, i64 0}
+!2 = !{!"omnipotent char", !3, i64 0}
+!3 = !{!"Simple C/C++ TBAA"}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "!tbaa" not in msl, "!tbaa metadata leaked into generated MSL"
+        assert "UNSUPPORTED" not in msl, "load with !tbaa should be supported"
+
+    def test_range_metadata_stripped(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @range_kernel(ptr %out, ptr %in) {
+  %v = load i32, ptr %in, align 4, !range !0
+  store i32 %v, ptr %out, align 4
+  ret void
+}
+!0 = !{i32 0, i32 256}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "!range" not in msl, "!range metadata leaked into generated MSL"
+        assert "UNSUPPORTED" not in msl
+
+    def test_noalias_metadata_stripped(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @noalias_kernel(ptr %out, ptr %in) {
+  %v = load i32, ptr %in, align 4, !noalias !0
+  store i32 %v, ptr %out, align 4
+  ret void
+}
+!0 = !{!1}
+!1 = distinct !{!1, !2}
+!2 = distinct !{!2}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "!noalias" not in msl, "!noalias metadata leaked into generated MSL"
+        assert "UNSUPPORTED" not in msl
+
+    def test_invariant_load_metadata_stripped(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @inv_kernel(ptr %out, ptr %in) {
+  %v = load i32, ptr %in, align 4, !invariant.load !0
+  store i32 %v, ptr %out, align 4
+  ret void
+}
+!0 = !{}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "!invariant" not in msl, "!invariant.load metadata leaked into MSL"
+        assert "UNSUPPORTED" not in msl
+
+    def test_multiple_metadata_stripped(self):
+        """Multiple metadata attachments on one instruction must all be stripped."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @multi_meta_kernel(ptr %out, ptr %in) {
+  %v = load i32, ptr %in, align 4, !tbaa !0, !noalias !1
+  store i32 %v, ptr %out, align 4, !tbaa !0
+  ret void
+}
+!0 = !{!2, !2, i64 0}
+!1 = !{!3}
+!2 = !{!"int", !4, i64 0}
+!3 = distinct !{!3}
+!4 = !{!"omnipotent char"}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "!tbaa" not in msl
+        assert "!noalias" not in msl
+        assert "UNSUPPORTED" not in msl
+
+
+class TestMetalAudit2Pass2CallPrefixes:
+    """ERR2-002: _RE_CALL_OUT / _RE_VOID_CALL must handle musttail/notail.
+
+    _extract_ir_opcode correctly strips musttail/notail prefixes to yield
+    'call', but the regex patterns only had (?:tail\\s+)? — causing
+    musttail/notail calls to fall through as unsupported IR.
+    """
+
+    def test_musttail_call_handled(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @musttail_kernel(ptr %out) {
+  %v = musttail call i32 @helper()
+  store i32 %v, ptr %out
+  ret void
+}
+declare i32 @helper()
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "UNSUPPORTED" not in msl, "musttail call should be handled"
+        assert "helper()" in msl
+
+    def test_notail_call_handled(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @notail_kernel(ptr %out) {
+  %v = notail call i32 @helper2()
+  store i32 %v, ptr %out
+  ret void
+}
+declare i32 @helper2()
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "UNSUPPORTED" not in msl, "notail call should be handled"
+        assert "helper2()" in msl
+
+    def test_musttail_void_call_handled(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @musttail_void_kernel(ptr %out) {
+  musttail call void @void_helper(ptr %out)
+  ret void
+}
+declare void @void_helper(ptr)
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "UNSUPPORTED" not in msl, "musttail void call should be handled"
+
+    def test_notail_void_call_handled(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @notail_void_kernel(ptr %out) {
+  notail call void @void_helper2(ptr %out)
+  ret void
+}
+declare void @void_helper2(ptr)
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        assert "UNSUPPORTED" not in msl, "notail void call should be handled"
+
+
+class TestMetalAudit2Pass2ArgPack:
+    """ERR2-003: _ARG_PACK_FORMAT must cover all Metal-relevant scalar types.
+
+    Before this fix, i1/i8/u8/i16/u16/bf16 fell through to the generic
+    isinstance(arg, int) path which packed as 4-byte i32 — accidentally
+    correct on little-endian Apple Silicon but fragile and wasteful.
+    """
+
+    def test_i8_packs_to_1_byte(self):
+        import struct
+        from third_party.metal.backend.driver import _ARG_PACK_FORMAT
+
+        packed = struct.pack(_ARG_PACK_FORMAT["i8"], -1)
+        assert len(packed) == 1
+        assert struct.unpack("b", packed)[0] == -1
+
+    def test_u8_packs_to_1_byte(self):
+        import struct
+        from third_party.metal.backend.driver import _ARG_PACK_FORMAT
+
+        packed = struct.pack(_ARG_PACK_FORMAT["u8"], 255)
+        assert len(packed) == 1
+        assert struct.unpack("B", packed)[0] == 255
+
+    def test_i16_packs_to_2_bytes(self):
+        import struct
+        from third_party.metal.backend.driver import _ARG_PACK_FORMAT
+
+        packed = struct.pack(_ARG_PACK_FORMAT["i16"], -32768)
+        assert len(packed) == 2
+
+    def test_u16_packs_to_2_bytes(self):
+        import struct
+        from third_party.metal.backend.driver import _ARG_PACK_FORMAT
+
+        packed = struct.pack(_ARG_PACK_FORMAT["u16"], 65535)
+        assert len(packed) == 2
+
+    def test_i1_packs_to_1_byte(self):
+        import struct
+        from third_party.metal.backend.driver import _ARG_PACK_FORMAT
+
+        packed = struct.pack(_ARG_PACK_FORMAT["i1"], True)
+        assert len(packed) == 1
+
+    def test_bf16_packs_to_2_bytes(self):
+        import struct
+        from third_party.metal.backend.driver import _ARG_PACK_FORMAT
+
+        packed = struct.pack(_ARG_PACK_FORMAT["bf16"], 0x3F80)
+        assert len(packed) == 2
+
+
+class TestMetalAudit2Pass2ReservedIds:
+    """ERR2-004: _MSL_RESERVED_IDENTIFIERS must include MSL unsigned
+    type aliases and C++ keywords that could collide with MLIR SSA names.
+    """
+
+    def test_uint_reserved(self):
+        from third_party.metal.backend.compiler import _MSL_RESERVED_IDENTIFIERS
+
+        for name in ("uint", "uchar", "ushort", "ulong"):
+            assert name in _MSL_RESERVED_IDENTIFIERS, (
+                f"{name} must be reserved — MSL uses it as unsigned type alias"
+            )
+
+    def test_cpp_keywords_reserved(self):
+        from third_party.metal.backend.compiler import _MSL_RESERVED_IDENTIFIERS
+
+        cpp_keywords = {"void", "struct", "class", "const", "static", "sizeof"}
+        for kw in cpp_keywords:
+            assert kw in _MSL_RESERVED_IDENTIFIERS, (
+                f"C++ keyword '{kw}' must be in reserved set"
+            )
+
+    def test_msl_builtins_reserved(self):
+        from third_party.metal.backend.compiler import _MSL_RESERVED_IDENTIFIERS
+
+        builtins = {"select", "clamp", "abs", "mix", "saturate", "step"}
+        for b in builtins:
+            assert b in _MSL_RESERVED_IDENTIFIERS, (
+                f"MSL builtin '{b}' must be in reserved set"
+            )
+
+    def test_reserved_id_collision_avoided(self):
+        """If an SSA name collides with a reserved word, msl_id prefixes it."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        llvm_ir = """
+define void @reserved_kernel(ptr %out, i32 %x) {
+  %uint = add i32 %x, 1
+  store i32 %uint, ptr %out
+  ret void
+}
+"""
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
+        # The name 'uint' must be escaped (e.g., v_uint) to avoid
+        # shadowing the MSL unsigned int type alias
+        assert "v_uint" in msl, (
+            "SSA name %uint must be escaped to avoid shadowing MSL uint type"
+        )

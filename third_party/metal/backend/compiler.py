@@ -93,7 +93,7 @@ _LLVM_FLAGS = (
 _RE_CALL_OUT = re.compile(
     r"^("
     + _SSA_NAME_RE
-    + r")\s*=\s*(?:tail\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
+    + r")\s*=\s*(?:(?:tail|musttail|notail)\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
 )
 _RE_BINOP = re.compile(
     r"^("
@@ -118,7 +118,7 @@ _RE_CAST = re.compile(
 # Combined line-cleaning regex: strips debug metadata, trailing
 # comments, and attribute-group references in a single pass.
 _RE_LINE_CLEAN = re.compile(
-    r",\s*!dbg\s*![0-9]+.*$"  # Debug metadata
+    r",\s*!\w+(?:\.\w+)*\s*![0-9]+.*$"  # LLVM metadata (!dbg, !tbaa, !range, …)
     r"|\s*;.*$"  # Trailing comments
     r"|\s+#\d+\s*$"  # Attribute-group references
 )
@@ -190,7 +190,7 @@ _RE_LOAD_DECL = re.compile(
 # Code-generation pass patterns
 _RE_PHI = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+.+?\s+(\[.+)$")
 _RE_VOID_CALL = re.compile(
-    r"^(?:tail\s+)?call(?:\s+\w+)*\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
+    r"^(?:(?:tail|musttail|notail)\s+)?call(?:\s+\w+)*\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
 )
 _RE_FNEG = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*fneg" + _LLVM_FLAGS + r"\s+[^ ]+\s+(.+)$"
@@ -330,6 +330,7 @@ def _extract_ir_opcode(line: str) -> str:
 # ── Module-level constant data structures (PERF-003) ───────────────
 _MSL_RESERVED_IDENTIFIERS = frozenset(
     {
+        # MSL address space / function qualifiers
         "kernel",
         "vertex",
         "fragment",
@@ -338,6 +339,7 @@ _MSL_RESERVED_IDENTIFIERS = frozenset(
         "threadgroup",
         "device",
         "constant",
+        # MSL / C++ scalar types
         "bool",
         "char",
         "short",
@@ -346,6 +348,13 @@ _MSL_RESERVED_IDENTIFIERS = frozenset(
         "half",
         "float",
         "double",
+        "void",
+        # MSL unsigned type aliases (used in generated code)
+        "uint",
+        "uchar",
+        "ushort",
+        "ulong",
+        # C++ control-flow keywords
         "if",
         "else",
         "switch",
@@ -356,6 +365,28 @@ _MSL_RESERVED_IDENTIFIERS = frozenset(
         "break",
         "while",
         "for",
+        "do",
+        "goto",
+        # C++ type / storage keywords
+        "struct",
+        "class",
+        "union",
+        "enum",
+        "auto",
+        "const",
+        "volatile",
+        "static",
+        "extern",
+        "inline",
+        "sizeof",
+        "namespace",
+        "using",
+        "template",
+        "typename",
+        "typedef",
+        "new",
+        "delete",
+        # MSL math builtins (collision would shadow the builtin)
         "fma",
         "fabs",
         "sqrt",
@@ -376,6 +407,13 @@ _MSL_RESERVED_IDENTIFIERS = frozenset(
         "min",
         "isnan",
         "popcount",
+        "select",
+        "clamp",
+        "abs",
+        "sign",
+        "saturate",
+        "step",
+        "mix",
     }
 )
 
