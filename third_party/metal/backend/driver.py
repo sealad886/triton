@@ -583,7 +583,15 @@ class MetalUtils:
         return self._execution_mode
 
     def get_device_properties(self, device_id=0):
-        """Get Metal device properties."""
+        """Get Metal device properties.
+
+        Args:
+            device_id: Must be 0 (Apple Silicon exposes a single GPU).
+        """
+        if int(device_id) != 0:
+            raise ValueError(
+                f"Metal backend has a single device (0), got device_id={device_id}"
+            )
         dev = self.device
         if dev is None:
             return {
@@ -1268,7 +1276,16 @@ class MetalLauncher:
 
 
 class MetalDriver(DriverBase):
-    """Triton driver implementation for Apple Metal."""
+    """Triton driver implementation for Apple Metal.
+
+    Apple Silicon GPUs expose exactly one MTLDevice per system — even Ultra
+    chips (M1/M2/M3/M4 Ultra) present their dual-die GPU as a single
+    unified device.  The driver therefore hardcodes device index 0.
+
+    If Apple ever ships multi-GPU Macs or restores eGPU support on AS,
+    this class will need per-device command queues, buffer pools, and
+    pipeline caches keyed by device_id.
+    """
 
     def __init__(self):
         super().__init__()
@@ -1307,8 +1324,18 @@ class MetalDriver(DriverBase):
 
         return torch.device("mps")
 
+    def get_device_count(self):
+        """Return the number of Metal GPU devices available.
+
+        Apple Silicon always exposes exactly 1 MTLDevice, even on Ultra
+        chips.  On Intel Macs with eGPUs MTLCopyAllDevices() could
+        return more, but this backend targets Apple Silicon only.
+        """
+        return 1
+
     def get_current_device(self):
-        return 0  # Metal typically has one device
+        """Return the active device index (always 0 on Apple Silicon)."""
+        return 0
 
     def set_current_device(self, device_id):
         if int(device_id) != 0:

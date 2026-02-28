@@ -11193,3 +11193,52 @@ class TestMetalFPSanitizer:
         target = GPUTarget("metal", "apple8", 32)
         kernel = triton.compile(src=src, target=target)
         assert kernel is not None, "Compilation with LICM in TTIR failed"
+
+
+class TestMetalMultiDevice:
+    """Tests for Metal multi-device support (single-device validation)."""
+
+    @skip_non_darwin
+    def test_device_count_is_one(self):
+        """Apple Silicon exposes exactly 1 Metal device."""
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver()
+        assert driver.get_device_count() == 1
+
+    @skip_non_darwin
+    def test_current_device_is_zero(self):
+        """Active device index is always 0."""
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver()
+        assert driver.get_current_device() == 0
+
+    @skip_non_darwin
+    def test_set_device_zero_accepted(self):
+        """set_current_device(0) succeeds silently."""
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver()
+        driver.set_current_device(0)
+
+    @skip_non_darwin
+    def test_set_device_nonzero_rejected(self):
+        """set_current_device(N>0) raises ValueError."""
+        from third_party.metal.backend.driver import MetalDriver
+
+        driver = MetalDriver()
+        with pytest.raises(ValueError, match="single.*device"):
+            driver.set_current_device(1)
+
+    @skip_non_darwin
+    def test_device_properties_validates_id(self):
+        """get_device_properties rejects non-zero device_id."""
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        props = utils.get_device_properties(0)
+        assert "gpu_family" in props
+
+        with pytest.raises(ValueError, match="single device"):
+            utils.get_device_properties(1)
