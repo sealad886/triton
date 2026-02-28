@@ -1377,10 +1377,18 @@ class MetalBackend(BaseBackend):
         passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
+        # Loop fusion and select/if combining (generic TritonGPU passes).
+        # Note: add_schedule_loops and add_assign_latencies are excluded
+        # because they cause add_pipeline to emit ttg.async_copy_global_to_local
+        # which Metal cannot lower (no async copy hardware).
+        passes.ttgpuir.add_fuse_nested_loops(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.ttir.add_triton_licm(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.ttgpuir.add_combine_tensor_select_and_if(pm)
         if opt.num_stages != 0:
             passes.ttgpuir.add_pipeline(pm, opt.num_stages, False)
         passes.ttir.add_loop_aware_cse(pm)
-        passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
         passes.ttgpuir.add_prefetch(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
