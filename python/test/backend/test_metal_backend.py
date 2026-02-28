@@ -5792,7 +5792,6 @@ class TestMetalRuntimeExecuteVerify:
 
     @skip_non_darwin
     @skip_no_mps
-    @pytest.mark.skip(reason="Metal backend does not yet legalize tt.atomic_rmw")
     def test_runtime_atomic_add_matches_cpu(self):
         import torch
 
@@ -5824,7 +5823,6 @@ class TestMetalRuntimeExecuteVerify:
 
     @skip_non_darwin
     @skip_no_mps
-    @pytest.mark.skip(reason="Metal backend does not yet legalize tt.atomic_rmw")
     def test_runtime_atomic_add_per_bin(self):
         """Histogram-style atomic add into multiple bins."""
         import torch
