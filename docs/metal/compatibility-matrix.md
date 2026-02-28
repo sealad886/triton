@@ -1,6 +1,6 @@
 # Metal Backend Compatibility Matrix
 
-Last updated: 2026-07-02
+Last updated: 2026-07-03
 
 ## Supported Configurations
 
@@ -26,14 +26,29 @@ Last updated: 2026-07-02
 | Shared memory (32KB) | ✅ | ✅ | ✅ |
 | Threadgroup size (1024) | ✅ | ✅ | ✅ |
 | Device property reporting | ✅ | ✅ | ✅ |
+| Atomic operations (add/max/min/xor/or/and/xchg) | ✅ | ✅ | ✅ |
+| Scan operations (cumsum) | ✅ | ✅ | ✅ |
+| Transpose (tl.trans) | ✅ | ✅ | ✅ |
+| Barrier/fence lowering (C++) | ✅ | ✅ | ✅ |
+| MetalGPU dialect ops | ✅ | ✅ | ✅ |
+| FP sanitizer | ✅ | ✅ | ✅ |
+| GPU profiling (timing) | ✅ | ✅ | ✅ |
+| Register estimation | ✅ | ✅ | ✅ |
+| Buffer pool reuse | ✅ | ✅ | ✅ |
+| RNG (Philox CBRNG) | ✅ | ✅ | ✅ |
+| Histogram | ✅ | ✅ | ✅ |
+| Join/split/interleave | ✅ | ✅ | ✅ |
+| Clamp + propagate_nan | ✅ | ✅ | ✅ |
+| 3D grid launch | ✅ | ✅ | ✅ |
 
 ## Known Limitations
 
 | Limitation | Status | Workaround |
 |-----------|--------|------------|
-| Atomic operations (`tl.atomic_add`, etc.) | **Open** | Not yet legalized in Metal lowering |
-| Scan ops (`tl.cumsum`) hit unsupported `icmp samesign` | **Open** | Use explicit reduction loops |
-| Transpose (`tl.trans`) generates unsupported vector select | **Open** | Manual transpose via indexing |
+| Warp specialization (Hopper async-warp model) | **N/A** | No Metal hardware equivalent; architectural impossibility |
+| TMA / Tensor Memory Access | **N/A** | NVIDIA Hopper-specific; no Metal DMA engine |
+| Inline assembly | **N/A** | MSL has no inline assembly mechanism |
+| Fence insertion pass (dual-proxy ordering) | **N/A** | NVIDIA Hopper-specific; Metal barriers are sufficient |
 | Throughput guardrails across Apple7/8/9 are not yet automated | **Partial** | CI workflow includes throughput guardrail job stub; requires self-hosted Metal GPU runner |
 | fp8 and int8 matmul-class runtime validation | **Mitigated** | fp8e5m2 runtime matmul + int8 blocked matmul + boundary saturation tests added; FP8 software converters available |
 | Cross-backend CUDA/HIP numerical comparison harness is not yet in place | **Open** | Use deterministic CPU-reference validation |
@@ -48,11 +63,11 @@ Last updated: 2026-07-02
 
 ## Validated Branch Snapshot
 
-Validated on branch `feat/metal-support` (2026-07-02):
+Validated on branch `feat/metal-support` (2026-07-03):
 
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py python/test/backend/test_ir_types.py`
-  - `531 passed, 5 skipped`
-  - Skipped: 2× atomic ops (not legalized), 1× scan/cumsum (`samesign` icmp), 1× transpose (vector select)
+  - `609 passed, 1 skipped`
+  - Skipped: 1× fp8e4b15 matmul pipeline (unsupported format)
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
   - all smoke checks passed (including transfer/project/training harnesses in CPU and MPS modes)
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`

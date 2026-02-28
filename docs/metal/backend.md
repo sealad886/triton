@@ -86,6 +86,15 @@ third_party/metal/
 │   ├── compiler.py             # MetalBackend (BaseBackend impl)
 │   ├── driver.py               # MetalDriver (DriverBase impl)
 │   └── driver.c                # Native Metal utilities (Obj-C)
+├── include/Dialect/MetalGPU/IR/
+│   ├── MetalGPUDialect.td      # MetalGPU MLIR dialect definition
+│   ├── MetalGPUOps.td          # Op definitions (barriers, shuffles)
+│   └── MetalGPUAttrDefs.td     # Attribute definitions
+└── lib/TritonMetalGPUToLLVM/
+    ├── TritonGPUToLLVM.cpp     # Main conversion pass
+    ├── TargetInfo.cpp/.h       # Metal target info (shuffles, atomics)
+    ├── MetalGPUOpsToLLVM.cpp/.h # MetalGPU ops → LLVM lowering
+    └── Utility.cpp/.h          # Shared lowering utilities
 ```
 
 ## GPU Family Mapping
@@ -123,13 +132,12 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
   are handled, including fp8e5m2 compile-path lowering for casts and dot/matmul
   kernels. fp8 runtime numerics and broader quantized-path validation still
   require additional coverage.
-- **Atomic operations**: `tt.atomic_rmw` is not yet legalized in the Metal
-  lowering pipeline. Kernels using `tl.atomic_add`, `tl.atomic_max`, etc.
-  will fail during compilation.
-- **Scan operations**: `tl.cumsum` and related scans hit an unsupported
-  `icmp samesign` predicate in the LLVM IR→MSL translator.
-- **Transpose**: `tl.trans` on 2D tensors generates vector-select LLVM IR
-  that the translator does not yet support.
+- **Warp specialization**: Metal has no hardware equivalent to NVIDIA's
+  Hopper async-warp model. There is no Metal API for independent warp
+  scheduling.
+- **TMA / Tensor Memory Access**: NVIDIA-specific hardware (Hopper+). Metal
+  has no equivalent DMA engine or tensor descriptor hardware.
+- **Inline assembly**: MSL has no inline assembly mechanism.
 - **Cross-backend numerics**: deterministic CPU-reference comparisons are
   implemented for MPS and optional CUDA via a dedicated harness; HIP parity and
   CI-backed multi-backend coverage remain pending.
