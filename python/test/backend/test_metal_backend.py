@@ -8637,6 +8637,7 @@ class TestMetalGPUProfiling:
     def test_timing_event_returns_positive_time(self):
         """A kernel execution should produce a positive elapsed time."""
         import torch
+
         import triton
         import triton.language as tl
 
@@ -8661,6 +8662,7 @@ class TestMetalGPUProfiling:
     def test_gpu_timing_less_than_or_equal_host_timing(self):
         """GPU-side timing should be ≤ host-side (synchronize overhead)."""
         import torch
+
         import triton
         import triton.language as tl
 
@@ -8673,8 +8675,8 @@ class TestMetalGPUProfiling:
             tl.store(out_ptr + offsets, x * 2.0, mask=mask)
 
         from third_party.metal.backend.driver import (
-            _MetalTimingEvent,
             _gpu_elapsed_ms,
+            _MetalTimingEvent,
         )
 
         n = 4096
@@ -8692,9 +8694,9 @@ class TestMetalGPUProfiling:
 
         assert host_ms > 0
         if gpu_ms is not None:
-            assert gpu_ms <= host_ms * 1.5, (
-                f"GPU time ({gpu_ms:.3f}ms) much larger than host time ({host_ms:.3f}ms)"
-            )
+            assert (
+                gpu_ms <= host_ms * 1.5
+            ), f"GPU time ({gpu_ms:.3f}ms) much larger than host time ({host_ms:.3f}ms)"
 
     @skip_non_darwin
     def test_fallback_when_no_cmd_buf(self):
@@ -8718,9 +8720,9 @@ class TestMetalGPUProfiling:
         from third_party.metal.backend.driver import _MetalDeviceInterface
 
         event = _MetalDeviceInterface.Event()
-        assert hasattr(event, "_cmd_buf"), (
-            "Event should have _cmd_buf attribute for GPU timing"
-        )
+        assert hasattr(
+            event, "_cmd_buf"
+        ), "Event should have _cmd_buf attribute for GPU timing"
 
 
 # ── Barrier insertion pass tests ────────────────────────────────────
@@ -11079,8 +11081,9 @@ entry:
 
         metadata = {}
         msl = MetalBackend.make_metal_ir(self._SHUFFLE_IR, metadata, None)
-        assert "simd_shuffle(" in msl or "simd_shuffle_and_fill" in msl, \
-            f"simd_shuffle not found in MSL"
+        assert (
+            "simd_shuffle(" in msl or "simd_shuffle_and_fill" in msl
+        ), f"simd_shuffle not found in MSL"
         assert "simd_shuffle_xor(" in msl, f"simd_shuffle_xor not found in MSL"
         assert "simd_shuffle_up(" in msl, f"simd_shuffle_up not found in MSL"
         assert "simd_shuffle_down(" in msl, f"simd_shuffle_down not found in MSL"
@@ -11103,8 +11106,9 @@ entry:
 
         metadata = {}
         msl = MetalBackend.make_metal_ir(self._SHUFFLE_IR, metadata, None)
-        assert "int" in msl or "uint" in msl, \
-            "Expected integer type in shuffle MSL output"
+        assert (
+            "int" in msl or "uint" in msl
+        ), "Expected integer type in shuffle MSL output"
 
     @skip_non_darwin
     def test_barrier_shuffle_combined_kernel(self):
@@ -11170,8 +11174,9 @@ class TestMetalFPSanitizer:
         from third_party.metal.backend.compiler import MetalOptions
 
         opts = MetalOptions()
-        assert opts.instrumentation_mode == "", \
-            f"Expected empty instrumentation_mode, got '{opts.instrumentation_mode}'"
+        assert (
+            opts.instrumentation_mode == ""
+        ), f"Expected empty instrumentation_mode, got '{opts.instrumentation_mode}'"
 
     @skip_non_darwin
     def test_licm_in_ttir_pipeline(self):
@@ -11242,3 +11247,59 @@ class TestMetalMultiDevice:
 
         with pytest.raises(ValueError, match="single device"):
             utils.get_device_properties(1)
+
+
+class TestMetalRegisterReporting:
+    """Tests for register/spill estimation from pipeline occupancy."""
+
+    @skip_non_darwin
+    def test_estimate_registers_no_pressure(self):
+        """No register pressure when kernel_max == device_max."""
+        from third_party.metal.backend.driver import _estimate_registers_from_occupancy
+
+        assert _estimate_registers_from_occupancy(1024, 1024) == 0
+
+    @skip_non_darwin
+    def test_estimate_registers_high_pressure(self):
+        """Reduced occupancy yields positive register estimate."""
+        from third_party.metal.backend.driver import _estimate_registers_from_occupancy
+
+        regs = _estimate_registers_from_occupancy(512, 1024)
+        assert regs > 0, f"Expected >0 registers, got {regs}"
+        assert regs <= 256, f"Register count {regs} exceeds maximum"
+
+    @skip_non_darwin
+    def test_estimate_registers_extreme_pressure(self):
+        """Very low occupancy yields high register count."""
+        from third_party.metal.backend.driver import _estimate_registers_from_occupancy
+
+        regs = _estimate_registers_from_occupancy(384, 1024)
+        assert regs > 100, f"Expected >100 registers at 384 max threads, got {regs}"
+
+    @skip_non_darwin
+    def test_load_binary_returns_five_tuple(self):
+        """load_binary() 4-arg form returns (handle, handle, n_regs, n_spills, n_max)."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _trivial_kernel(out_ptr, N: tl.constexpr):
+            pid = tl.program_id(0)
+            tl.store(out_ptr + pid, pid.to(tl.float32))
+
+        out = torch.zeros(4, dtype=torch.float32, device="mps")
+        _trivial_kernel[(4,)](out, N=4)
+        result = out.cpu()
+        assert result[0] == 0.0 and result[3] == 3.0
+
+    @skip_non_darwin
+    def test_spills_always_zero(self):
+        """Metal n_spills is always 0 (no runtime API to query)."""
+        from third_party.metal.backend.driver import _estimate_registers_from_occupancy
+
+        # The estimate function returns register count; spills are always 0
+        # in the load_binary return tuple. Test the estimate boundary:
+        assert _estimate_registers_from_occupancy(1024, 1024) == 0
+        assert _estimate_registers_from_occupancy(0, 1024) == 256

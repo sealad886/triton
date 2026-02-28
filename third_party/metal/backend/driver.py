@@ -43,6 +43,40 @@ def _ceildiv(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
+# Register-file sizes per GPU family (16-bit half-word register file in bytes).
+# Source: Alyssa Rosenzweig's M1 reverse-engineering; M2-M4 use the same
+# register file dimension per GPU core but scale core count instead.
+_REGISTER_FILE_BYTES = {
+    "apple7": 212992,   # 208 KiB
+    "apple8": 212992,
+    "apple9": 212992,
+    "apple10": 212992,  # assumed same until Apple documents otherwise
+}
+
+
+def _estimate_registers_from_occupancy(
+    kernel_max_threads: int,
+    device_max_threads: int,
+    gpu_family: str = "apple8",
+) -> int:
+    """Estimate 16-bit register count from per-kernel occupancy reduction.
+
+    Apple GPUs limit maxTotalThreadsPerThreadgroup when a shader's register
+    pressure exceeds a threshold.  By inverting this relationship we derive
+    a rough register-per-thread estimate.
+
+    Returns 0 when occupancy is not limited (register pressure below
+    reporting threshold).
+    """
+    if kernel_max_threads >= device_max_threads:
+        return 0
+    if kernel_max_threads <= 0:
+        return 256
+    reg_file = _REGISTER_FILE_BYTES.get(gpu_family, 212992)
+    regs_16bit = reg_file // (kernel_max_threads * 2)
+    return min(regs_16bit, 256)
+
+
 # ── Size-bucketed MTLBuffer pool ────────────────────────────────────
 
 
@@ -782,9 +816,25 @@ class MetalUtils:
                 handle = self._load_metallib_handle(bytes(binary_or_source), metadata)
             else:
                 handle = self._load_msl_source_handle(binary_or_source, metadata)
+
             props = self.get_device_properties(device_id)
-            n_max_threads = props.get("max_threads_per_threadgroup", 1024) or 1024
-            return handle, handle, 0, 0, n_max_threads
+            device_max = props.get("max_threads_per_threadgroup", 1024) or 1024
+            gpu_family = props.get("gpu_family", "apple8")
+
+            # Query the per-kernel max threads from the compiled pipeline
+            # state — this reflects actual register pressure, unlike the
+            # device-level constant.
+            try:
+                pipeline = handle.get_pipeline(name)
+                per_kernel_max = int(pipeline.maxTotalThreadsPerThreadgroup())
+            except Exception:
+                per_kernel_max = device_max
+
+            n_regs = _estimate_registers_from_occupancy(
+                per_kernel_max, device_max, gpu_family
+            )
+            n_spills = 0  # Metal does not expose spill counts
+            return handle, handle, n_regs, n_spills, per_kernel_max
 
         raise TypeError(
             "load_binary() expected either (binary_or_source, metadata=None) "
