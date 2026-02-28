@@ -6,6 +6,7 @@ infrastructure. Tests that require a real Metal device are skipped on
 non-macOS platforms.
 """
 
+import ctypes
 import os
 import shutil
 import struct
@@ -10419,3 +10420,217 @@ exit:
         assert "as_type<float>(1065353216)" in msl
         assert "if (" in msl
         assert "UNSUPPORTED" not in msl
+
+
+# ── MetalBufferPool tests ───────────────────────────────────────────
+
+
+class _MockMTLBuffer:
+    """Lightweight stand-in for an MTLBuffer returned by PyObjC."""
+
+    def __init__(self, length):
+        self._length = length
+        self._mem = ctypes.create_string_buffer(length)
+
+    def contents(self):
+        return ctypes.addressof(self._mem)
+
+    def length(self):
+        return self._length
+
+
+class _MockDevice:
+    """Minimal MTLDevice mock that allocates _MockMTLBuffer."""
+
+    def newBufferWithLength_options_(self, length, options):
+        return _MockMTLBuffer(length)
+
+
+class TestMetalBufferPool:
+    """Unit tests for MetalBufferPool size-bucketed buffer reuse."""
+
+    # -- bucket sizing ----------------------------------------------------
+
+    @skip_non_darwin
+    def test_bucket_size_rounds_up_to_power_of_2(self):
+        from third_party.metal.backend.driver import MetalBufferPool
+
+        assert MetalBufferPool._bucket_size(300) == 512
+        assert MetalBufferPool._bucket_size(512) == 512
+        assert MetalBufferPool._bucket_size(513) == 1024
+        assert MetalBufferPool._bucket_size(1) == 256
+        assert MetalBufferPool._bucket_size(4096) == 4096
+        assert MetalBufferPool._bucket_size(4097) == 8192
+
+    @skip_non_darwin
+    def test_bucket_size_minimum_256(self):
+        from third_party.metal.backend.driver import MetalBufferPool
+
+        for n in (0, 1, 2, 100, 128, 255, 256):
+            assert MetalBufferPool._bucket_size(n) >= 256, f"bucket_size({n}) < 256"
+        assert MetalBufferPool._bucket_size(0) == 256
+        assert MetalBufferPool._bucket_size(256) == 256
+
+    # -- acquire / release ------------------------------------------------
+
+    @skip_non_darwin
+    def test_acquire_miss_creates_new_buffer(self):
+        from third_party.metal.backend.driver import MetalBufferPool
+
+        pool = MetalBufferPool()
+        device = _MockDevice()
+        buf = pool.acquire(device, 100)
+        assert buf is not None
+        assert buf.length() == 256  # rounded to min bucket
+        stats = pool.stats()
+        assert stats["misses"] == 1
+        assert stats["hits"] == 0
+
+    @skip_non_darwin
+    def test_acquire_hit_reuses_buffer(self):
+        from third_party.metal.backend.driver import MetalBufferPool
+
+        pool = MetalBufferPool()
+        device = _MockDevice()
+        buf1 = pool.acquire(device, 100)
+        pool.release(buf1, 100)
+        buf2 = pool.acquire(device, 100)
+        assert buf2 is buf1, "Expected pool to reuse the released buffer"
+        stats = pool.stats()
+        assert stats["hits"] == 1
+        assert stats["misses"] == 1
+
+    @skip_non_darwin
+    def test_release_respects_max_per_bucket(self):
+        from third_party.metal.backend.driver import MetalBufferPool
+
+        pool = MetalBufferPool()
+        device = _MockDevice()
+        buffers = [pool.acquire(device, 100) for _ in range(33)]
+        for b in buffers:
+            pool.release(b, 100)
+        assert pool.pool_size == 32, "Pool should cap at _MAX_PER_BUCKET=32"
+
+    # -- drain ------------------------------------------------------------
+
+    @skip_non_darwin
+    def test_drain_clears_pool(self):
+        from third_party.metal.backend.driver import MetalBufferPool
+
+        pool = MetalBufferPool()
+        device = _MockDevice()
+        buffers = [pool.acquire(device, 512) for _ in range(5)]
+        for b in buffers:
+            pool.release(b, 512)
+        assert pool.pool_size == 5
+        pool.drain()
+        assert pool.pool_size == 0
+
+    # -- stats ------------------------------------------------------------
+
+    @skip_non_darwin
+    def test_stats_tracking(self):
+        from third_party.metal.backend.driver import MetalBufferPool
+
+        pool = MetalBufferPool()
+        device = _MockDevice()
+
+        buf1 = pool.acquire(device, 1024)  # miss
+        buf2 = pool.acquire(device, 1024)  # miss
+        pool.release(buf1, 1024)
+        buf3 = pool.acquire(device, 1024)  # hit
+
+        stats = pool.stats()
+        assert stats["hits"] == 1
+        assert stats["misses"] == 2
+        assert stats["total_allocated_bytes"] == 2 * 1024
+        assert stats["pool_size"] == 0  # buf1 was re-acquired, buf2 not released
+
+        pool.release(buf2, 1024)
+        pool.release(buf3, 1024)
+        assert pool.stats()["pool_size"] == 2
+
+    # -- integration: _bind_argument with pool ----------------------------
+
+    @skip_non_darwin
+    def test_pool_integrated_in_bind_argument(self):
+        from unittest.mock import MagicMock
+
+        import numpy as np
+
+        from third_party.metal.backend.driver import MetalBufferPool, _bind_argument
+
+        pool = MetalBufferPool()
+        device = _MockDevice()
+        encoder = MagicMock()
+        arr = np.zeros(64, dtype=np.float32)  # 256 bytes
+        acquired: list = []
+
+        _bind_argument(device, encoder, 0, arr, pool=pool, acquired_bufs=acquired)
+
+        assert pool.stats()["misses"] == 1
+        assert len(acquired) == 1
+        buf, nbytes = acquired[0]
+        assert nbytes == arr.nbytes
+        encoder.setBuffer_offset_atIndex_.assert_called_once()
+
+    # -- integration: launch_kernel passes pool through -------------------
+
+    @skip_non_darwin
+    def test_pool_integrated_in_launch_kernel(self):
+        from unittest.mock import MagicMock, patch
+
+        from third_party.metal.backend.driver import (
+            MetalBufferPool,
+            MetalKernelHandle,
+        )
+
+        pool = MetalBufferPool()
+        device = MagicMock()
+        queue = MagicMock()
+        library = MagicMock()
+
+        handle = MetalKernelHandle(device, queue, library, metadata={})
+
+        with patch(
+            "third_party.metal.backend.driver._bind_argument"
+        ) as mock_bind:
+            handle.launch_kernel(
+                "test_fn",
+                args=[42],
+                grid=(1, 1, 1),
+                block=(1, 1, 1),
+                sync=False,
+                buffer_pool=pool,
+            )
+            assert mock_bind.called
+            call_kwargs = mock_bind.call_args
+            assert call_kwargs.kwargs.get("pool") is pool or (
+                len(call_kwargs.args) > 5 and call_kwargs.args[5] is pool
+            )
+
+    # -- integration: clear_cache drains pool -----------------------------
+
+    @skip_non_darwin
+    def test_clear_cache_drains_pool(self):
+        from unittest.mock import MagicMock
+
+        from third_party.metal.backend.driver import MetalBufferPool, MetalDriver
+
+        pool = MetalBufferPool()
+        device = _MockDevice()
+        buffers = [pool.acquire(device, 256) for _ in range(3)]
+        for b in buffers:
+            pool.release(b, 256)
+        assert pool.pool_size == 3
+
+        driver = MetalDriver.__new__(MetalDriver)
+        driver._initialized = True
+        utils = MagicMock()
+        utils._buffer_pool = pool
+        driver.utils = utils
+
+        cache = MagicMock()
+        driver.clear_cache(cache)
+
+        assert pool.pool_size == 0

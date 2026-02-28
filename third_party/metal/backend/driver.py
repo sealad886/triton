@@ -6,6 +6,7 @@ with the Metal framework for device management, memory allocation, and
 kernel dispatch.
 """
 
+import ctypes
 import logging
 import os
 import struct
@@ -40,6 +41,87 @@ def _get_numpy_module():
 
 def _ceildiv(a: int, b: int) -> int:
     return (a + b - 1) // b
+
+
+# ── Size-bucketed MTLBuffer pool ────────────────────────────────────
+
+
+class MetalBufferPool:
+    """Size-bucketed MTLBuffer pool for reuse across kernel launches.
+
+    Buffers are allocated in power-of-2 sizes (minimum 256 bytes). When a buffer
+    is acquired, the pool provides one of matching bucket size. After GPU work
+    completes, buffers are returned to the pool via the synchronization path.
+    """
+
+    _MAX_PER_BUCKET = 32
+    _MIN_BUCKET = 256
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._free: dict[int, list] = {}
+        self.hits = 0
+        self.misses = 0
+        self.total_allocated_bytes = 0
+
+    @staticmethod
+    def _bucket_size(nbytes: int) -> int:
+        """Return next power-of-2 >= *nbytes*, minimum 256."""
+        size = max(nbytes, MetalBufferPool._MIN_BUCKET)
+        # next power-of-2
+        size -= 1
+        size |= size >> 1
+        size |= size >> 2
+        size |= size >> 4
+        size |= size >> 8
+        size |= size >> 16
+        size |= size >> 32
+        return size + 1
+
+    def acquire(self, device, nbytes: int):
+        """Return an MTLBuffer of at least *nbytes* (bucket-aligned)."""
+        bucket = self._bucket_size(nbytes)
+        with self._lock:
+            free_list = self._free.get(bucket)
+            if free_list:
+                self.hits += 1
+                return free_list.pop()
+            self.misses += 1
+        # Allocate outside the lock
+        buf = device.newBufferWithLength_options_(bucket, 0)
+        with self._lock:
+            self.total_allocated_bytes += bucket
+        return buf
+
+    def release(self, buf, nbytes: int) -> None:
+        """Return *buf* to the free list for its bucket."""
+        bucket = self._bucket_size(nbytes)
+        with self._lock:
+            free_list = self._free.setdefault(bucket, [])
+            if len(free_list) < self._MAX_PER_BUCKET:
+                free_list.append(buf)
+            # else: discard — cap reached
+
+    def drain(self) -> None:
+        """Clear all free lists."""
+        with self._lock:
+            self._free.clear()
+
+    @property
+    def pool_size(self) -> int:
+        """Total number of free buffers across all buckets."""
+        with self._lock:
+            return sum(len(v) for v in self._free.values())
+
+    def stats(self) -> dict:
+        """Return pool statistics."""
+        with self._lock:
+            return {
+                "hits": self.hits,
+                "misses": self.misses,
+                "total_allocated_bytes": self.total_allocated_bytes,
+                "pool_size": sum(len(v) for v in self._free.values()),
+            }
 
 
 # ── Argument packing format map ─────────────────────────────────────
@@ -313,7 +395,15 @@ class MetalUtils:
         self._command_queues: dict[int, object] = {}
         self._current_stream: int = 0
         self._pending_buffers: dict[int, list] = {}
+        self._pending_pool_returns: dict[int, list] = {}
         self._execution_mode: str | None = None
+        self._buffer_pool: MetalBufferPool | None = None
+
+    @property
+    def buffer_pool(self) -> MetalBufferPool:
+        if self._buffer_pool is None:
+            self._buffer_pool = MetalBufferPool()
+        return self._buffer_pool
 
     @property
     def device(self):
@@ -393,6 +483,14 @@ class MetalUtils:
         for buf in pending:
             buf.waitUntilCompleted()
         self._pending_buffers[stream_id] = []
+
+        pool_returns = self._pending_pool_returns.pop(stream_id, [])
+        if pool_returns and self._buffer_pool is not None:
+            pool = self._buffer_pool
+            for acquired_list in pool_returns:
+                for mtl_buf, nbytes in acquired_list:
+                    pool.release(mtl_buf, nbytes)
+
         torch = self._torch or _get_torch_module()
         if (
             torch is not None
@@ -401,10 +499,19 @@ class MetalUtils:
         ):
             torch.mps.synchronize()
 
-    def track_command_buffer(self, stream_id: int, cmd_buf: object) -> None:
+    def track_command_buffer(
+        self,
+        stream_id: int,
+        cmd_buf: object,
+        acquired_pool_bufs: list | None = None,
+    ) -> None:
         """Track a committed command buffer for later synchronization."""
         stream_id = self._coerce_stream_id(stream_id)
         self._pending_buffers.setdefault(stream_id, []).append(cmd_buf)
+        if acquired_pool_bufs:
+            self._pending_pool_returns.setdefault(stream_id, []).append(
+                acquired_pool_bufs
+            )
 
     def resolve_execution_mode(self) -> str:
         """Determine the best available execution path.
@@ -715,6 +822,7 @@ class MetalUtils:
             }
             if isinstance(handle, MetalKernelHandle):
                 launch_kwargs["command_queue"] = self.get_command_queue(active_stream)
+                launch_kwargs["buffer_pool"] = self.buffer_pool
 
             handle.launch_kernel(**launch_kwargs)
         finally:
@@ -845,6 +953,7 @@ class MetalKernelHandle:
         command_queue=None,
         stream_id: int | None = None,
         utils=None,
+        buffer_pool: MetalBufferPool | None = None,
     ):
         """
         Dispatch a compute kernel on the Metal device.
@@ -856,6 +965,7 @@ class MetalKernelHandle:
             block: (x, y, z) threads per threadgroup
             arg_types: Optional per-arg type hints (e.g. 'i32', 'i64', 'f16')
             sync: If True (default), wait for completion before returning
+            buffer_pool: Optional MetalBufferPool for buffer reuse
         """
         pipeline = self.get_pipeline(name)
         queue = command_queue if command_queue is not None else self.command_queue
@@ -865,11 +975,20 @@ class MetalKernelHandle:
         encoder = cmd_buf.computeCommandEncoder()
         encoder.setComputePipelineState_(pipeline)
 
+        acquired_bufs: list[tuple] | None = [] if buffer_pool is not None else None
         num_args = 0
         if args:
             for idx, arg in enumerate(args):
                 atype = arg_types[idx] if arg_types and idx < len(arg_types) else None
-                _bind_argument(self.device, encoder, idx, arg, arg_type=atype)
+                _bind_argument(
+                    self.device,
+                    encoder,
+                    idx,
+                    arg,
+                    arg_type=atype,
+                    pool=buffer_pool,
+                    acquired_bufs=acquired_bufs,
+                )
             num_args = len(args)
 
         if self.global_scratch_size > 0:
@@ -889,14 +1008,25 @@ class MetalKernelHandle:
 
         if sync:
             cmd_buf.waitUntilCompleted()
+            if buffer_pool is not None and acquired_bufs:
+                for mtl_buf, nbytes in acquired_bufs:
+                    buffer_pool.release(mtl_buf, nbytes)
         else:
             utils = utils or MetalUtils()
             if stream_id is None:
                 stream_id = utils.get_current_stream()
-            utils.track_command_buffer(stream_id, cmd_buf)
+            utils.track_command_buffer(stream_id, cmd_buf, acquired_bufs)
 
 
-def _bind_argument(device, encoder, idx, arg, arg_type: str | None = None):
+def _bind_argument(
+    device,
+    encoder,
+    idx,
+    arg,
+    arg_type: str | None = None,
+    pool: MetalBufferPool | None = None,
+    acquired_bufs: list | None = None,
+):
     """Bind a single argument to a Metal compute encoder at the given index.
 
     Args:
@@ -905,11 +1035,20 @@ def _bind_argument(device, encoder, idx, arg, arg_type: str | None = None):
         idx: Argument buffer index
         arg: The argument value
         arg_type: Optional explicit type hint ('i32', 'i64', 'f32', 'f64', 'f16', etc.)
+        pool: Optional MetalBufferPool for buffer reuse
+        acquired_bufs: Optional list to collect (buf, nbytes) pairs for later release
     """
     np = _get_numpy_module()
     if np is not None and isinstance(arg, np.ndarray):
         nbytes = arg.nbytes
-        buf = device.newBufferWithBytes_length_options_(arg.tobytes(), nbytes, 0)
+        if pool is not None:
+            buf = pool.acquire(device, nbytes)
+            data = arg.tobytes()
+            ctypes.memmove(buf.contents(), data, len(data))
+            if acquired_bufs is not None:
+                acquired_bufs.append((buf, nbytes))
+        else:
+            buf = device.newBufferWithBytes_length_options_(arg.tobytes(), nbytes, 0)
         encoder.setBuffer_offset_atIndex_(buf, 0, idx)
         return
 
@@ -1090,6 +1229,7 @@ class MetalLauncher:
             }
             if isinstance(handle, MetalKernelHandle):
                 launch_kwargs["command_queue"] = utils.get_command_queue(active_stream)
+                launch_kwargs["buffer_pool"] = utils.buffer_pool
 
             handle.launch_kernel(**launch_kwargs)
         finally:
@@ -1212,3 +1352,6 @@ class MetalDriver(DriverBase):
         zero_ = getattr(cache, "zero_", None)
         if callable(zero_):
             zero_()
+        pool = getattr(self.utils, "_buffer_pool", None)
+        if pool is not None:
+            pool.drain()
