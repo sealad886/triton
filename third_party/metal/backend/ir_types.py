@@ -36,7 +36,8 @@ _RE_CALL_OUT = re.compile(
     + r")\s*=\s*(?:(?:tail|musttail|notail)\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
 )
 _RE_ICMP = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*icmp\s+(\w+)\s+([^ ]+)\s+([^,]+),\s*(.+)$"
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*icmp\s+(?:samesign\s+)?(\w+)\s+"
+    r"(<\s*\d+\s+x\s+[^>]+>|[^ ]+)\s+([^,]+),\s*(.+)$"
 )
 _RE_CAST = re.compile(
     r"^("
@@ -243,13 +244,14 @@ class Phi(LLVMInstruction):
 
 @dataclass(frozen=True, slots=True)
 class Select(LLVMInstruction):
-    """select instruction."""
+    """select instruction (scalar i1 or vector <N x i1> condition)."""
 
     out_ssa: str
     cond: str
     true_val: str
     false_val: str
     result_ty: str
+    cond_ty: str = "i1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,10 +432,14 @@ _RE_GEP_FULL = re.compile(
 # Phi with type capture
 _RE_PHI_FULL = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+(.+?)\s+(\[.+)$")
 
-# Select with result type
-_RE_SELECT_FULL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*select\s+i1\s+([^,]+),"
+# Select with result type — scalar (i1) or vector (<N x i1>) condition
+_RE_SELECT_SCALAR = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*select\s+(i1)\s+([^,]+),"
     r"\s+(\S+)\s+([^,]+),\s+\S+\s+(.+)$"
+)
+_RE_SELECT_VECTOR = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*select\s+(<\s*\d+\s+x\s+i1\s*>)\s+([^,]+),"
+    r"\s+(<[^>]+>)\s+([^,]+),\s+<[^>]+>\s+(.+)$"
 )
 
 # FNeg with type capture
@@ -730,18 +736,31 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 incoming_raw=m.group(3),
             )
 
-    # ── Select ──────────────────────────────────────────────────────
+    # ── Select (scalar i1 or vector <N x i1> condition) ─────────────
     if opcode == "select":
-        m = _RE_SELECT_FULL.match(cleaned)
+        m = _RE_SELECT_SCALAR.match(cleaned)
         if m:
             return Select(
                 raw_line=raw,
                 opcode="select",
                 out_ssa=m.group(1),
-                cond=m.group(2).strip(),
-                true_val=m.group(4).strip(),
-                false_val=m.group(5).strip(),
-                result_ty=m.group(3).strip(),
+                cond=m.group(3).strip(),
+                true_val=m.group(5).strip(),
+                false_val=m.group(6).strip(),
+                result_ty=m.group(4).strip(),
+                cond_ty=m.group(2).strip(),
+            )
+        m = _RE_SELECT_VECTOR.match(cleaned)
+        if m:
+            return Select(
+                raw_line=raw,
+                opcode="select",
+                out_ssa=m.group(1),
+                cond=m.group(3).strip(),
+                true_val=m.group(5).strip(),
+                false_val=m.group(6).strip(),
+                result_ty=m.group(4).strip(),
+                cond_ty=m.group(2).strip(),
             )
 
     # ── FNeg ────────────────────────────────────────────────────────

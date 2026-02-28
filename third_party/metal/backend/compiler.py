@@ -468,9 +468,15 @@ def _emit_icmp(ctx: "TranslatorContext", inst: _ICmp) -> bool:
     lhs_expr = ctx.to_expr(lhs)
     rhs_expr = ctx.to_expr(rhs)
     if pred.startswith("u") and pred not in ("eq", "ne"):
-        u_ty = unsigned_msl(ctx.llvm_scalar_to_msl(llvm_ty_icmp))
-        lhs_expr = f"({u_ty}){lhs_expr}"
-        rhs_expr = f"({u_ty}){rhs_expr}"
+        vec_m = re.match(r"<\s*(\d+)\s+x\s+(\S+)\s*>", llvm_ty_icmp)
+        if vec_m:
+            width = int(vec_m.group(1))
+            scalar_u = unsigned_msl(ctx.llvm_scalar_to_msl(vec_m.group(2)))
+            u_ty = f"vec<{scalar_u}, {width}>"
+        else:
+            u_ty = unsigned_msl(ctx.llvm_scalar_to_msl(llvm_ty_icmp))
+        lhs_expr = f"({u_ty})({lhs_expr})"
+        rhs_expr = f"({u_ty})({rhs_expr})"
     ctx.emit(f"{out} = ({lhs_expr} {cmp_op} {rhs_expr});")
     return False
 
@@ -514,9 +520,17 @@ def _emit_select(ctx: "TranslatorContext", inst: _Select) -> bool:
     out_ssa = inst.out_ssa
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
-    ctx.emit(
-        f"{out} = ({ctx.to_expr(inst.cond)} ? {ctx.to_expr(inst.true_val)} : {ctx.to_expr(inst.false_val)});"
-    )
+    cond_ty = getattr(inst, "cond_ty", "i1")
+    vec_m = re.match(r"<\s*(\d+)\s+x", cond_ty)
+    if vec_m:
+        cond_expr = ctx.to_expr(inst.cond)
+        true_expr = ctx.to_expr(inst.true_val)
+        false_expr = ctx.to_expr(inst.false_val)
+        ctx.emit(f"{out} = select({false_expr}, {true_expr}, {cond_expr});")
+    else:
+        ctx.emit(
+            f"{out} = ({ctx.to_expr(inst.cond)} ? {ctx.to_expr(inst.true_val)} : {ctx.to_expr(inst.false_val)});"
+        )
     return False
 
 
@@ -1745,7 +1759,12 @@ class MetalBackend(BaseBackend):
                     )
 
                 elif isinstance(inst, _ICmp):
-                    ctx.record_ssa_decl(inst.out_ssa, msl_ty="bool")
+                    vec_m = re.match(r"<\s*(\d+)\s+x", inst.llvm_ty)
+                    if vec_m:
+                        width = int(vec_m.group(1))
+                        ctx.record_ssa_decl(inst.out_ssa, msl_ty=f"bool{width}" if width > 1 else "bool")
+                    else:
+                        ctx.record_ssa_decl(inst.out_ssa, msl_ty="bool")
 
                 elif isinstance(inst, _FCmp):
                     ctx.record_ssa_decl(inst.out_ssa, msl_ty="bool")

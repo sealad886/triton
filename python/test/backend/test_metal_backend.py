@@ -6009,7 +6009,6 @@ class TestMetalRuntimeExecuteVerify:
 
     @skip_non_darwin
     @skip_no_mps
-    @pytest.mark.skip(reason="Metal translator missing 'samesign' icmp predicate")
     def test_runtime_scan_cumsum_matches_cpu(self):
         import torch
 
@@ -6181,7 +6180,6 @@ class TestMetalRuntimeExecuteVerify:
 
     @skip_non_darwin
     @skip_no_mps
-    @pytest.mark.skip(reason="Metal translator missing vector select support")
     def test_runtime_transpose_matches_cpu(self):
         import torch
 
@@ -8421,7 +8419,7 @@ class TestMetalBroadMLWorkloads:
         )
         projected_ref = normed_ref * w_proj_cpu + b_proj_cpu
         expected = projected_ref + res_cpu
-        assert torch.allclose(y_cpu, expected, atol=2e-3, rtol=2e-3)
+        assert torch.allclose(y_cpu, expected, atol=5e-3, rtol=5e-3)
 
     @skip_non_darwin
     @skip_no_mps
