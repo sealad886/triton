@@ -20,38 +20,86 @@ import re
 from dataclasses import dataclass
 from typing import Union
 
-from triton.backends.metal.compiler import (
-    _BINOP_OPCODES,
-    _CAST_OPCODES,
-    _LLVM_FLAGS,
-    _RE_ALLOCA,
-    _RE_ATOMICRMW,
-    _RE_BINOP,
-    _RE_BR,
-    _RE_BR_COND,
-    _RE_CALL_OUT,
-    _RE_CAST,
-    _RE_CMPXCHG,
-    _RE_EXTRACTELEM_DECL,
-    _RE_EXTRACTVALUE,
-    _RE_FCMP,
-    _RE_FENCE,
-    _RE_FNEG_DECL,
-    _RE_FREEZE_DECL,
-    _RE_GEP,
-    _RE_ICMP,
-    _RE_INSERTELEM_DECL,
-    _RE_INSERTVALUE,
-    _RE_LINE_CLEAN,
-    _RE_LOAD,
-    _RE_PHI,
-    _RE_SELECT,
-    _RE_SHUFFLEVECTOR,
-    _RE_STORE,
-    _RE_SWITCH,
-    _RE_VOID_CALL,
-    _SSA_NAME_RE,
+# ── LLVM IR regex building blocks ──────────────────────────────────
+_SSA_NAME_RE = r"%[-A-Za-z0-9._]+"
+_LLVM_FLAGS = (
+    r"(?:\s+(?:nsw|nuw|nsz|nnan|ninf|arcp|contract|reassoc|afn|fast|exact|disjoint))*"
 )
+
+# ── Pre-compiled patterns (previously imported from compiler.py) ───
+_RE_LINE_CLEAN = re.compile(
+    r",\s*!\w+(?:\.\w+)*\s*![0-9]+.*$"
+    r"|\s*;.*$"
+    r"|\s+#\d+\s*$"
+)
+_RE_CALL_OUT = re.compile(
+    r"^("
+    + _SSA_NAME_RE
+    + r")\s*=\s*(?:(?:tail|musttail|notail)\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
+)
+_RE_ICMP = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*icmp\s+(\w+)\s+([^ ]+)\s+([^,]+),\s*(.+)$"
+)
+_RE_CAST = re.compile(
+    r"^("
+    + _SSA_NAME_RE
+    + r")\s*=\s*(sext|zext|trunc|fptrunc|fpext|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$"
+)
+_RE_FREEZE_DECL = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*freeze\s+(.+?)\s+(.+)$")
+_RE_VOID_CALL = re.compile(
+    r"^(?:(?:tail|musttail|notail)\s+)?call(?:\s+\w+)*\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
+)
+_RE_SHUFFLEVECTOR = re.compile(
+    r"^("
+    + _SSA_NAME_RE
+    + r")\s*=\s*shufflevector\s+<\s*(\d+)\s+x\s+(.+?)\s*>\s+([^,]+),\s*"
+    r"<\s*(\d+)\s+x\s+.+?\s*>\s+([^,]+),\s*<\s*(\d+)\s+x\s+i\d+\s*>\s+(.+)$"
+)
+_RE_LOAD = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*load\s+(.+?),"
+    r"\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$"
+)
+_RE_BR = re.compile(r"^br\s+label\s+%(.+)$")
+_RE_BR_COND = re.compile(r"^br\s+i1\s+([^,]+),\s+label\s+%([^,]+),\s+label\s+%(.+)$")
+_RE_EXTRACTVALUE = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*extractvalue\s+(\{[^}]+\})\s+(\S+),\s*(\d+)$"
+)
+_RE_INSERTVALUE = re.compile(
+    r"^("
+    + _SSA_NAME_RE
+    + r")\s*=\s*insertvalue\s+(\{[^}]+\})\s+(\S+),\s+(\S+)\s+(\S+),\s*(\d+)$"
+)
+_RE_ATOMICRMW = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*atomicrmw\s+"
+    r"(add|sub|xchg|and|or|xor|max|min|umax|umin|fadd)\s+"
+    r"ptr(?:\s+addrspace\((\d+)\))?\s+(\S+),\s+"
+    r"(\S+)\s+(\S+)\s+"
+    r"(monotonic|acquire|release|acq_rel|seq_cst)"
+)
+_RE_CMPXCHG = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*cmpxchg(?:\s+weak)?\s+"
+    r"ptr(?:\s+addrspace\((\d+)\))?\s+(\S+),\s+"
+    r"(\S+)\s+(\S+),\s+"
+    r"\S+\s+(\S+)\s+"
+    r"(monotonic|acquire|release|acq_rel|seq_cst)\s+"
+    r"(monotonic|acquire|release|acq_rel|seq_cst)"
+)
+_RE_SWITCH = re.compile(r"^switch\s+(\S+)\s+(\S+),\s*label\s+%(\S+)\s*\[(.+)\]$")
+_RE_FENCE = re.compile(
+    r"^fence\s+(?:syncscope\(\"(\w+)\"\)\s+)?(monotonic|acquire|release|acq_rel|seq_cst)$"
+)
+
+# ── Opcode dispatch sets ───────────────────────────────────────────
+_BINOP_OPCODES = frozenset({
+    "add", "sub", "mul", "udiv", "sdiv", "urem", "srem",
+    "shl", "lshr", "ashr", "and", "or", "xor",
+    "fadd", "fsub", "fmul", "fdiv", "frem",
+})
+_CAST_OPCODES = frozenset({
+    "sext", "zext", "trunc", "fptrunc", "fpext",
+    "sitofp", "uitofp", "fptosi", "fptoui",
+    "bitcast", "addrspacecast", "ptrtoint", "inttoptr",
+})
 
 # ── Base class ──────────────────────────────────────────────────────
 
@@ -154,6 +202,7 @@ class GEP(LLVMInstruction):
     base_ty: str
     ptr_operand: str
     indices_raw: str
+    addr_space: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +250,28 @@ class VectorOp(LLVMInstruction):
     out_ssa: str
     vector_op: str
     operands_raw: str
+    # extractelement/insertelement: width of source vector
+    width: int | None = None
+    # extractelement/insertelement: element type
+    elem_ty: str | None = None
+    # extractelement: source vector, index
+    vec: str | None = None
+    idx: str | None = None
+    # insertelement: source vector, inserted value, index
+    insert_vec: str | None = None
+    insert_val: str | None = None
+    insert_idx: str | None = None
+    # insertelement: full vector type string (e.g. "<4 x float>")
+    vec_ty: str | None = None
+    # shufflevector specific
+    lhs_vec: str | None = None
+    rhs_vec: str | None = None
+    lhs_width: int | None = None
+    rhs_width: int | None = None
+    out_width: int | None = None
+    mask_spec: str | None = None
+    # shufflevector element type (also reused for extractelement SSA decl)
+    shuf_elem_ty: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +281,11 @@ class AggregateOp(LLVMInstruction):
     out_ssa: str
     agg_op: str
     operands_raw: str
+    agg_type: str | None = None
+    src_val: str | None = None
+    agg_val: str | None = None
+    elem_val: str | None = None
+    idx: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +296,14 @@ class AtomicOp(LLVMInstruction):
     atomic_op: str
     ordering: str
     operands_raw: str
+    addr_space: str | None = None
+    ptr: str | None = None
+    val_type: str | None = None
+    val: str | None = None
+    expected: str | None = None
+    desired: str | None = None
+    success_order: str | None = None
+    fail_order: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +322,23 @@ class Terminator(LLVMInstruction):
 
     term_kind: str
     operands_raw: str
+    # ret: return value (None for void ret)
+    ret_val: str | None = None
+    ret_type: str | None = None
+    # br (unconditional): target label
+    target_label: str | None = None
+    # br (conditional): condition, true label, false label
+    cond: str | None = None
+    true_label: str | None = None
+    false_label: str | None = None
+    # switch: val_type, val, default_label, cases list as string
+    switch_type: str | None = None
+    switch_val: str | None = None
+    default_label: str | None = None
+    cases_raw: str | None = None
+    # fence: syncscope, ordering
+    syncscope: str | None = None
+    ordering: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,7 +380,7 @@ _RE_ADDRSPACE = re.compile(r"addrspace\((\d+)\)")
 
 # Store pattern with explicit val type capture
 _RE_STORE_FULL = re.compile(
-    r"^store\s+(.+?)\s+([^,]+),\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$"
+    r"^store\s+(<[^>]+>|\S+)\s+([^,]+),\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$"
 )
 
 # Alloca with optional num elements and alignment
@@ -294,8 +395,9 @@ _RE_ALLOCA_FULL = re.compile(
 _RE_GEP_FULL = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*getelementptr\s+"
     r"(inbounds\s+)?"
+    r"(?:\w+\s+)*"
     r"(.+?),"
-    r"\s+ptr(?:\s+addrspace\(\d+\))?\s+(.+)$"
+    r"\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$"
 )
 
 # Phi with type capture
@@ -318,12 +420,24 @@ _RE_BINOP_DETAIL = re.compile(
     + _SSA_NAME_RE
     + r")\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)"
     + _LLVM_FLAGS
-    + r"\s+(\S+)\s+([^,]+),\s*(.+)$"
+    + r"\s+(.+)$"
 )
 
 # FCmp with type capture (the compiler _RE_FCMP doesn't capture the type)
 _RE_FCMP_FULL = re.compile(
     r"^(" + _SSA_NAME_RE + r")\s*=\s*fcmp\s+(\w+)\s+(\S+)\s+([^,]+),\s*(.+)$"
+)
+
+# Full extractelement regex: out_ssa(1), width(2), elem_ty(3), vec(4), idx(5)
+_RE_EXTRACTELEM_FULL = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*extractelement\s+<\s*(\d+)\s+x\s+(.+?)\s*>"
+    r"\s+([^,]+),\s+i\d+\s+(.+)$"
+)
+
+# Full insertelement regex: out_ssa(1), width(2), elem_ty(3), vec(4), val(5), idx(6)
+_RE_INSERTELEM_FULL = re.compile(
+    r"^(" + _SSA_NAME_RE + r")\s*=\s*insertelement\s+<\s*(\d+)\s+x\s+(.+?)\s*>"
+    r"\s+([^,]+),\s+.+\s+([^,]+),\s+i\d+\s+(.+)$"
 )
 
 
@@ -407,14 +521,42 @@ def parse_instruction(line: str) -> LLVMInstruction:
         m = _RE_BINOP_DETAIL.match(cleaned)
         if m:
             flags = _extract_flags(cleaned, m.group(2))
+            # group(3) is "type operand1, operand2" — split bracket-aware
+            rest = m.group(3).strip()
+            # Extract type: either <...> vector type or single token
+            if rest.startswith("<"):
+                close = rest.index(">") + 1
+                llvm_ty = rest[:close]
+                rest = rest[close:].lstrip()
+            else:
+                sp = rest.index(" ")
+                llvm_ty = rest[:sp]
+                rest = rest[sp:].lstrip()
+            # Split operands on top-level comma (respecting nested <...>)
+            depth = 0
+            split_pos = -1
+            for i, ch in enumerate(rest):
+                if ch in "<([{":
+                    depth += 1
+                elif ch in ">)]}":
+                    depth = max(0, depth - 1)
+                elif ch == "," and depth == 0:
+                    split_pos = i
+                    break
+            if split_pos >= 0:
+                lhs = rest[:split_pos].strip()
+                rhs = rest[split_pos + 1:].strip()
+            else:
+                lhs = rest.strip()
+                rhs = ""
             return BinOp(
                 raw_line=raw,
                 opcode=opcode,
                 out_ssa=m.group(1),
                 op=m.group(2),
-                llvm_ty=m.group(3),
-                lhs=m.group(4).strip(),
-                rhs=m.group(5).strip(),
+                llvm_ty=llvm_ty,
+                lhs=lhs,
+                rhs=rhs,
                 flags=flags,
             )
 
@@ -531,8 +673,9 @@ def parse_instruction(line: str) -> LLVMInstruction:
         m = _RE_GEP_FULL.match(cleaned)
         if m:
             inbounds = m.group(2) is not None
+            addr_space = m.group(4)
             # Separate the base pointer from index operands
-            remaining = m.group(4).strip()
+            remaining = m.group(5).strip()
             # remaining has "ptr_operand, index_type index_val, ..."
             parts = remaining.split(",", 1)
             ptr_operand = parts[0].strip()
@@ -545,6 +688,7 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 base_ty=m.group(3).strip(),
                 ptr_operand=ptr_operand,
                 indices_raw=indices_raw,
+                addr_space=addr_space,
             )
 
     # ── Phi ─────────────────────────────────────────────────────────
@@ -599,7 +743,7 @@ def parse_instruction(line: str) -> LLVMInstruction:
 
     # ── Vector operations ───────────────────────────────────────────
     if opcode == "extractelement":
-        m = _RE_EXTRACTELEM_DECL.match(cleaned)
+        m = _RE_EXTRACTELEM_FULL.match(cleaned)
         if m:
             return VectorOp(
                 raw_line=raw,
@@ -609,10 +753,14 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 operands_raw=cleaned[
                     cleaned.find("extractelement") + len("extractelement") :
                 ].strip(),
+                width=int(m.group(2)),
+                elem_ty=m.group(3).strip(),
+                vec=m.group(4).strip(),
+                idx=m.group(5).strip(),
             )
 
     if opcode == "insertelement":
-        m = _RE_INSERTELEM_DECL.match(cleaned)
+        m = _RE_INSERTELEM_FULL.match(cleaned)
         if m:
             return VectorOp(
                 raw_line=raw,
@@ -622,6 +770,12 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 operands_raw=cleaned[
                     cleaned.find("insertelement") + len("insertelement") :
                 ].strip(),
+                width=int(m.group(2)),
+                elem_ty=m.group(3).strip(),
+                insert_vec=m.group(4).strip(),
+                insert_val=m.group(5).strip(),
+                insert_idx=m.group(6).strip(),
+                vec_ty=f"<{m.group(2)} x {m.group(3).strip()}>",
             )
 
     if opcode == "shufflevector":
@@ -635,6 +789,13 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 operands_raw=cleaned[
                     cleaned.find("shufflevector") + len("shufflevector") :
                 ].strip(),
+                lhs_width=int(m.group(2)),
+                shuf_elem_ty=m.group(3).strip(),
+                lhs_vec=m.group(4).strip(),
+                rhs_width=int(m.group(5)),
+                rhs_vec=m.group(6).strip(),
+                out_width=int(m.group(7)),
+                mask_spec=m.group(8).strip(),
             )
 
     # ── Aggregate operations ────────────────────────────────────────
@@ -649,6 +810,9 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 operands_raw=cleaned[
                     cleaned.find("extractvalue") + len("extractvalue") :
                 ].strip(),
+                agg_type=m.group(2),
+                src_val=m.group(3),
+                idx=int(m.group(4)),
             )
 
     if opcode == "insertvalue":
@@ -662,6 +826,10 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 operands_raw=cleaned[
                     cleaned.find("insertvalue") + len("insertvalue") :
                 ].strip(),
+                agg_type=m.group(2),
+                agg_val=m.group(3),
+                elem_val=m.group(5),
+                idx=int(m.group(6)),
             )
 
     # ── Atomic operations ───────────────────────────────────────────
@@ -677,6 +845,10 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 operands_raw=cleaned[
                     cleaned.find("atomicrmw") + len("atomicrmw") :
                 ].strip(),
+                addr_space=m.group(3),
+                ptr=m.group(4),
+                val_type=m.group(5),
+                val=m.group(6),
             )
 
     if opcode == "cmpxchg":
@@ -691,6 +863,13 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 operands_raw=cleaned[
                     cleaned.find("cmpxchg") + len("cmpxchg") :
                 ].strip(),
+                addr_space=m.group(2),
+                ptr=m.group(3),
+                val_type=m.group(4),
+                expected=m.group(5),
+                desired=m.group(6),
+                success_order=m.group(7),
+                fail_order=m.group(8),
             )
 
     # ── Alloca ──────────────────────────────────────────────────────
@@ -715,6 +894,9 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 opcode="br",
                 term_kind="br_cond",
                 operands_raw=cleaned[2:].strip(),
+                cond=m.group(1),
+                true_label=m.group(2),
+                false_label=m.group(3),
             )
         m = _RE_BR.match(cleaned)
         if m:
@@ -723,6 +905,7 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 opcode="br",
                 term_kind="br",
                 operands_raw=cleaned[2:].strip(),
+                target_label=m.group(1),
             )
 
     if opcode == "switch":
@@ -733,14 +916,26 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 opcode="switch",
                 term_kind="switch",
                 operands_raw=cleaned[6:].strip(),
+                switch_type=m.group(1),
+                switch_val=m.group(2),
+                default_label=m.group(3),
+                cases_raw=m.group(4),
             )
 
     if opcode == "ret":
+        rest = cleaned[3:].strip()
+        if rest == "void":
+            return Terminator(
+                raw_line=raw, opcode="ret", term_kind="ret", operands_raw=rest,
+            )
+        parts = rest.split(None, 1)
+        if len(parts) == 2:
+            return Terminator(
+                raw_line=raw, opcode="ret", term_kind="ret", operands_raw=rest,
+                ret_type=parts[0], ret_val=parts[1],
+            )
         return Terminator(
-            raw_line=raw,
-            opcode="ret",
-            term_kind="ret",
-            operands_raw=cleaned[3:].strip(),
+            raw_line=raw, opcode="ret", term_kind="ret", operands_raw=rest,
         )
 
     if opcode == "unreachable":
@@ -759,6 +954,8 @@ def parse_instruction(line: str) -> LLVMInstruction:
                 opcode="fence",
                 term_kind="fence",
                 operands_raw=cleaned[5:].strip(),
+                syncscope=m.group(1),
+                ordering=m.group(2),
             )
 
     # ── Fallback ────────────────────────────────────────────────────

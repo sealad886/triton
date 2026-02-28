@@ -101,30 +101,6 @@ _LLVM_FLAGS = (
     r"(?:\s+(?:nsw|nuw|nsz|nnan|ninf|arcp|contract|reassoc|afn|fast|exact|disjoint))*"
 )
 
-_RE_CALL_OUT = re.compile(
-    r"^("
-    + _SSA_NAME_RE
-    + r")\s*=\s*(?:(?:tail|musttail|notail)\s+)?call\s+(.+?)\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
-)
-_RE_BINOP = re.compile(
-    r"^("
-    + _SSA_NAME_RE
-    + r")\s*=\s*(add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|fadd|fsub|fmul|fdiv|frem)"
-    + _LLVM_FLAGS
-    + r"\s+(.+)$"
-)
-_RE_ICMP = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*icmp\s+(\w+)\s+([^ ]+)\s+([^,]+),\s*(.+)$"
-)
-_RE_FCMP = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*fcmp\s+(\w+)\s+[^ ]+\s+([^,]+),\s*(.+)$"
-)
-_RE_CAST = re.compile(
-    r"^("
-    + _SSA_NAME_RE
-    + r")\s*=\s*(sext|zext|trunc|fptrunc|fpext|sitofp|uitofp|fptosi|fptoui|bitcast|addrspacecast|ptrtoint|inttoptr)\s+(.+)\s+to\s+(.+)$"
-)
-
 # ── Additional pre-compiled regex (PERF-001) ────────────────────────
 # Combined line-cleaning regex: strips debug metadata, trailing
 # comments, and attribute-group references in a single pass.
@@ -151,151 +127,12 @@ _RE_CONST_INT = re.compile(r"^-?[0-9]+$")
 # LLVM IR attribute-group reference stripping (applied during line cleaning)
 _RE_ATTR_GROUP_STRIP = re.compile(r"\s+#\d+\s*$")
 
-# SSA declaration pass patterns (types needed but not full codegen)
-_RE_FNEG_DECL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*fneg" + _LLVM_FLAGS + r"\s+(.+?)\s+(.+)$"
-)
-_RE_FREEZE_DECL = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*freeze\s+(.+?)\s+(.+)$")
-_RE_SELECT_DECL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*select\s+i1\s+[^,]+,\s+(.+?)\s+[^,]+,\s+.+$"
-)
-_RE_GEP_DECL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*getelementptr(?:\s+\w+)*\s+([A-Za-z0-9_]+),"
-    r"\s+ptr(?:\s+addrspace\((\d+)\))?\s+([^,]+),\s+i\d+\s+(.+)$"
-)
-_RE_EXTRACTELEM_DECL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*extractelement\s+<\s*\d+\s+x\s+(.+?)\s*>"
-    r"\s+([^,]+),\s+i\d+\s+(.+)$"
-)
-_RE_INSERTELEM_DECL = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*insertelement\s+(<\s*\d+\s+x\s+.+\s*>)"
-    r"\s+([^,]+),\s+.+\s+([^,]+),\s+i\d+\s+(.+)$"
-)
-_RE_SHUFFLEVECTOR_DECL = re.compile(
-    r"^("
-    + _SSA_NAME_RE
-    + r")\s*=\s*shufflevector\s+<\s*(\d+)\s+x\s+(.+?)\s*>\s+([^,]+),\s*"
-    r"<\s*(\d+)\s+x\s+.+?\s*>\s+([^,]+),\s*<\s*(\d+)\s+x\s+i\d+\s*>\s+(.+)$"
-)
-
-# Code-generation pass patterns
-_RE_PHI = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*phi\s+.+?\s+(\[.+)$")
-_RE_VOID_CALL = re.compile(
-    r"^(?:(?:tail|musttail|notail)\s+)?call(?:\s+\w+)*\s+void\s+@([A-Za-z0-9_.$-]+)\((.*)\)$"
-)
-_RE_FNEG = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*fneg" + _LLVM_FLAGS + r"\s+[^ ]+\s+(.+)$"
-)
-_RE_FREEZE = re.compile(r"^(" + _SSA_NAME_RE + r")\s*=\s*freeze\s+[^ ]+\s+(.+)$")
-_RE_SELECT = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*select\s+i1\s+([^,]+),"
-    r"\s+[^ ]+\s+([^,]+),\s+[^ ]+\s+(.+)$"
-)
-_RE_GEP = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*getelementptr(?:\s+\w+)*\s+([A-Za-z0-9_]+),"
-    r"\s+ptr(?:\s+addrspace\((\d+)\))?\s+([^,]+),\s+i\d+\s+(.+)$"
-)
-_RE_EXTRACTELEM = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*extractelement\s+<\s*(\d+)\s+x\s+.+\s*>"
-    r"\s+([^,]+),\s+i\d+\s+(.+)$"
-)
-_RE_INSERTELEM = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*insertelement\s+<\s*(\d+)\s+x\s+.+\s*>"
-    r"\s+([^,]+),\s+.+\s+([^,]+),\s+i\d+\s+(.+)$"
-)
-_RE_SHUFFLEVECTOR = re.compile(
-    r"^("
-    + _SSA_NAME_RE
-    + r")\s*=\s*shufflevector\s+<\s*(\d+)\s+x\s+(.+?)\s*>\s+([^,]+),\s*"
-    r"<\s*(\d+)\s+x\s+.+?\s*>\s+([^,]+),\s*<\s*(\d+)\s+x\s+i\d+\s*>\s+(.+)$"
-)
-_RE_LOAD = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*load\s+(.+?),"
-    r"\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$"
-)
-_RE_STORE = re.compile(r"^store\s+(.+?),\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+)$")
-_RE_BR = re.compile(r"^br\s+label\s+%(.+)$")
-_RE_BR_COND = re.compile(r"^br\s+i1\s+([^,]+),\s+label\s+%([^,]+),\s+label\s+%(.+)$")
+# Codegen helper patterns
 _RE_PHI_INCOMING = re.compile(r"^\[\s*(.+)\s*,\s*%(.+)\s*\]$")
-
-# ── Phase 7: LLVM surface generalization patterns ──────────────────
-_RE_EXTRACTVALUE = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*extractvalue\s+(\{[^}]+\})\s+(\S+),\s*(\d+)$"
-)
-_RE_INSERTVALUE = re.compile(
-    r"^("
-    + _SSA_NAME_RE
-    + r")\s*=\s*insertvalue\s+(\{[^}]+\})\s+(\S+),\s+(\S+)\s+(\S+),\s*(\d+)$"
-)
-_RE_ATOMICRMW = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*atomicrmw\s+"
-    r"(add|sub|xchg|and|or|xor|max|min|umax|umin|fadd)\s+"
-    r"ptr(?:\s+addrspace\((\d+)\))?\s+(\S+),\s+"
-    r"(\S+)\s+(\S+)\s+"
-    r"(monotonic|acquire|release|acq_rel|seq_cst)"
-)
-_RE_CMPXCHG = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*cmpxchg(?:\s+weak)?\s+"
-    r"ptr(?:\s+addrspace\((\d+)\))?\s+(\S+),\s+"
-    r"(\S+)\s+(\S+),\s+"
-    r"\S+\s+(\S+)\s+"
-    r"(monotonic|acquire|release|acq_rel|seq_cst)\s+"
-    r"(monotonic|acquire|release|acq_rel|seq_cst)"
-)
-_RE_ALLOCA = re.compile(
-    r"^(" + _SSA_NAME_RE + r")\s*=\s*alloca\s+(\S+)(?:,\s*align\s+\d+)?$"
-)
-_RE_SWITCH = re.compile(r"^switch\s+(\S+)\s+(\S+),\s*label\s+%(\S+)\s*\[(.+)\]$")
 _RE_SWITCH_CASE = re.compile(r"(\S+)\s+(-?\d+),\s*label\s+%(\S+)")
-_RE_FENCE = re.compile(
-    r"^fence\s+(?:syncscope\(\"(\w+)\"\)\s+)?(monotonic|acquire|release|acq_rel|seq_cst)$"
-)
 
-# ── Opcode dispatch sets for codegen fast-path (PERF-005) ───────────
-_BINOP_OPCODES = frozenset(
-    {
-        "add",
-        "sub",
-        "mul",
-        "udiv",
-        "sdiv",
-        "urem",
-        "srem",
-        "shl",
-        "lshr",
-        "ashr",
-        "and",
-        "or",
-        "xor",
-        "fadd",
-        "fsub",
-        "fmul",
-        "fdiv",
-        "frem",
-    }
-)
-_CAST_OPCODES = frozenset(
-    {
-        "sext",
-        "zext",
-        "trunc",
-        "fptrunc",
-        "fpext",
-        "sitofp",
-        "uitofp",
-        "fptosi",
-        "fptoui",
-        "bitcast",
-        "addrspacecast",
-        "ptrtoint",
-        "inttoptr",
-    }
-)
-
-# ── Typed IR instruction imports (Phase 2) ──────────────────────────
-# Placed after all regex/constant definitions to avoid circular import:
-# ir_types.py imports regex patterns from this module, so those must be
-# fully defined before we import ir_types.
+# ── Typed IR instruction imports ────────────────────────────────────
+# ir_types.py defines its own regex patterns (no circular dependency).
 from triton.backends.metal.ir_types import GEP as _GEP
 from triton.backends.metal.ir_types import AggregateOp as _AggregateOp
 from triton.backends.metal.ir_types import Alloca as _Alloca
@@ -324,18 +161,11 @@ from triton.backends.metal.ir_types import parse_block as _parse_block  # noqa: 
 
 
 def _emit_binop(ctx: "TranslatorContext", inst: _BinOp) -> bool:
-    line = inst.raw_line
-    m = _RE_BINOP.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported binary op form in Metal lowering: '{line}'")
-    out_ssa, op, operands_spec = m.groups()
-    parts = split_top_level(operands_spec)
-    if len(parts) != 2:
-        raise RuntimeError(
-            f"Unsupported binary operand form in Metal lowering: '{line}'"
-        )
-    llvm_ty_binop, lhs = ctx.split_typed_value(parts[0])
-    _, rhs = ctx.split_typed_value(parts[1])
+    out_ssa = inst.out_ssa
+    op = inst.op
+    llvm_ty_binop = inst.llvm_ty
+    lhs = inst.lhs
+    rhs = inst.rhs
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
     lhs_expr = ctx.to_expr(lhs)
@@ -371,11 +201,10 @@ def _emit_load(
     needs_tg_loop_sync: bool,
     inserted_tg_sync_before_load: bool,
 ) -> tuple[bool, bool]:
-    line = inst.raw_line
-    m = _RE_LOAD.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported load form in Metal lowering: '{line}'")
-    out_ssa, llvm_ty, addr_space, ptr = m.groups()
+    out_ssa = inst.out_ssa
+    llvm_ty = inst.llvm_ty
+    addr_space = inst.addr_space
+    ptr = inst.ptr
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
     llvm_ty = llvm_ty.strip()
@@ -389,12 +218,10 @@ def _emit_load(
 
 
 def _emit_store(ctx: "TranslatorContext", inst: _Store) -> bool:
-    line = inst.raw_line
-    m = _RE_STORE.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported store form in Metal lowering: '{line}'")
-    val_spec, addr_space, ptr = m.groups()
-    llvm_ty, val_token = ctx.split_typed_value(val_spec)
+    llvm_ty = inst.val_ty
+    val_token = inst.val
+    addr_space = inst.addr_space
+    ptr = inst.ptr
     msl_ty = ctx.llvm_type_to_msl(llvm_ty)
     ptr_expr = ctx.to_expr(strip_operand_attrs(ptr))
     ctx.emit(
@@ -404,36 +231,39 @@ def _emit_store(ctx: "TranslatorContext", inst: _Store) -> bool:
 
 
 def _emit_gep(ctx: "TranslatorContext", inst: _GEP) -> bool:
-    line = inst.raw_line
-    m = _RE_GEP.match(line)
-    if m:
-        out_ssa, elem_ty, addr_space, base, idx = m.groups()
+    out_ssa = inst.out_ssa
+    elem_ty = inst.base_ty
+    addr_space = inst.addr_space
+    base = inst.ptr_operand
+    # Try to extract single index from indices_raw (format: "iN value")
+    idx_raw = inst.indices_raw.strip()
+    idx_parts = idx_raw.split(None, 1)
+    if len(idx_parts) == 2 and idx_parts[0].startswith("i"):
+        idx = idx_parts[1].strip()
         out = ctx.msl_id(out_ssa)
         ctx.ssa[out_ssa] = out
         ptr_msl_ty = ctx.ptr_type_to_msl(elem_ty, addr_space=addr_space)
         ctx.emit(f"{out} = ({ptr_msl_ty})({ctx.to_expr(base)}) + {ctx.to_expr(idx)};")
         return False
-    parsed_gep = ctx.parse_gep_instruction(line)
+    # Fallback for complex GEPs
+    parsed_gep = ctx.parse_gep_instruction(inst.raw_line)
     if parsed_gep is not None:
-        out_ssa, elem_ty, addr_space, base, idx = parsed_gep
+        _, elem_ty, addr_space, base, idx = parsed_gep
         out = ctx.msl_id(out_ssa)
         ctx.ssa[out_ssa] = out
         ptr_msl_ty = ctx.ptr_type_to_msl(elem_ty, addr_space=addr_space)
         ctx.emit(f"{out} = ({ptr_msl_ty})({ctx.to_expr(base)}) + {ctx.to_expr(idx)};")
         return False
-    raise RuntimeError(f"Unsupported GEP form in Metal lowering: '{line}'")
+    raise RuntimeError(f"Unsupported GEP form in Metal lowering: '{inst.raw_line}'")
 
 
 def _emit_cast(ctx: "TranslatorContext", inst: _Cast) -> bool:
-    line = inst.raw_line
-    m = _RE_CAST.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported cast form in Metal lowering: '{line}'")
-    out_ssa, op, src_spec, dst_ty = m.groups()
+    out_ssa = inst.out_ssa
+    op = inst.cast_op
+    dst_ty = inst.to_ty.strip()
+    val = inst.val
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
-    dst_ty = dst_ty.strip()
-    val = extract_value_token(src_spec)
     if op in ("bitcast", "addrspacecast"):
         if dst_ty.startswith("ptr"):
             ctx.emit(f"{out} = {ctx.to_expr(val)};")
@@ -449,12 +279,9 @@ def _emit_cast(ctx: "TranslatorContext", inst: _Cast) -> bool:
 
 
 def _emit_call(ctx: "TranslatorContext", inst: _Call) -> bool:
-    line = inst.raw_line
-    m = _RE_CALL_OUT.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported call form in Metal lowering: '{line}'")
-    out_ssa, _, fn, args_raw = m.groups()
-    args = [ctx.to_expr(v) for v in ctx.parse_call_args(args_raw)]
+    out_ssa = inst.out_ssa
+    fn = inst.fn_name
+    args = [ctx.to_expr(v) for v in ctx.parse_call_args(inst.args_raw)]
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
     if fn.startswith("llvm.sadd.with.overflow.") and len(args) == 2:
@@ -529,12 +356,8 @@ def _emit_call(ctx: "TranslatorContext", inst: _Call) -> bool:
 
 
 def _emit_void_call(ctx: "TranslatorContext", inst: _Call) -> bool:
-    line = inst.raw_line
-    m = _RE_VOID_CALL.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported void call form in Metal lowering: '{line}'")
-    fn, args_raw = m.groups()
-    args = [ctx.to_expr(v) for v in ctx.parse_call_args(args_raw)]
+    fn = inst.fn_name
+    args = [ctx.to_expr(v) for v in ctx.parse_call_args(inst.args_raw)]
     if fn.startswith("__metal_predicated_st_global_") and len(args) == 3:
         ctx.emit(f"if ({args[2]}) {{ *{args[1]} = {args[0]}; }}")
     elif fn == "__metal_simdgroup_barrier":
@@ -606,11 +429,11 @@ def _emit_void_call(ctx: "TranslatorContext", inst: _Call) -> bool:
 
 
 def _emit_icmp(ctx: "TranslatorContext", inst: _ICmp) -> bool:
-    line = inst.raw_line
-    m = _RE_ICMP.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported icmp form in Metal lowering: '{line}'")
-    out_ssa, pred, llvm_ty_icmp, lhs, rhs = m.groups()
+    out_ssa = inst.out_ssa
+    pred = inst.pred
+    llvm_ty_icmp = inst.llvm_ty
+    lhs = inst.lhs
+    rhs = inst.rhs
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
     cmp_op = _CMP_MAP.get(pred)
@@ -627,29 +450,21 @@ def _emit_icmp(ctx: "TranslatorContext", inst: _ICmp) -> bool:
 
 
 def _emit_fcmp(ctx: "TranslatorContext", inst: _FCmp) -> bool:
-    line = inst.raw_line
-    m = _RE_FCMP.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported fcmp form in Metal lowering: '{line}'")
-    out_ssa, pred, lhs, rhs = m.groups()
+    out_ssa = inst.out_ssa
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
-    lhs_expr = ctx.to_expr(lhs)
-    rhs_expr = ctx.to_expr(rhs)
-    ctx.emit(f"{out} = {ctx.fcmp_expr(pred, lhs_expr, rhs_expr)};")
+    lhs_expr = ctx.to_expr(inst.lhs)
+    rhs_expr = ctx.to_expr(inst.rhs)
+    ctx.emit(f"{out} = {ctx.fcmp_expr(inst.pred, lhs_expr, rhs_expr)};")
     return False
 
 
 def _emit_phi(ctx: "TranslatorContext", inst: _Phi) -> bool:
-    line = inst.raw_line
-    m = _RE_PHI.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported phi form in Metal lowering: '{line}'")
-    out_ssa, incoming_raw = m.groups()
+    out_ssa = inst.out_ssa
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
     incoming_pairs = []
-    for incoming in split_top_level(incoming_raw):
+    for incoming in split_top_level(inst.incoming_raw):
         pair = incoming.strip()
         pm = _RE_PHI_INCOMING.match(pair)
         if pm is None:
@@ -670,98 +485,95 @@ def _emit_phi(ctx: "TranslatorContext", inst: _Phi) -> bool:
 
 
 def _emit_select(ctx: "TranslatorContext", inst: _Select) -> bool:
-    line = inst.raw_line
-    m = _RE_SELECT.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported select form in Metal lowering: '{line}'")
-    out_ssa, cond, lhs, rhs = m.groups()
+    out_ssa = inst.out_ssa
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
     ctx.emit(
-        f"{out} = ({ctx.to_expr(cond)} ? {ctx.to_expr(lhs)} : {ctx.to_expr(rhs)});"
+        f"{out} = ({ctx.to_expr(inst.cond)} ? {ctx.to_expr(inst.true_val)} : {ctx.to_expr(inst.false_val)});"
     )
     return False
 
 
 def _emit_fneg(ctx: "TranslatorContext", inst: _FNeg) -> bool:
-    line = inst.raw_line
-    m = _RE_FNEG.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported fneg form in Metal lowering: '{line}'")
-    out_ssa, val = m.groups()
+    out_ssa = inst.out_ssa
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
-    ctx.emit(f"{out} = -({ctx.to_expr(val)});")
+    ctx.emit(f"{out} = -({ctx.to_expr(inst.operand)});")
     return False
 
 
 def _emit_freeze(ctx: "TranslatorContext", inst: _Freeze) -> bool:
-    line = inst.raw_line
-    m = _RE_FREEZE.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported freeze form in Metal lowering: '{line}'")
-    out_ssa, val = m.groups()
+    out_ssa = inst.out_ssa
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
-    ctx.emit(f"{out} = {ctx.to_expr(val)};")
+    ctx.emit(f"{out} = {ctx.to_expr(inst.operand)};")
     return False
 
 
 def _emit_vector_op(ctx: "TranslatorContext", inst: _VectorOp) -> bool:
-    line = inst.raw_line
 
     def _lane(vec_expr: str, width: int, lane: int) -> str:
         if width <= 1:
             return vec_expr
         return f"{vec_expr}[{lane}]"
 
-    m = _RE_EXTRACTELEM.match(line)
-    if m:
-        out_ssa, width_s, vec, idx = m.groups()
-        out = ctx.msl_id(out_ssa)
-        ctx.ssa[out_ssa] = out
-        width = int(width_s)
-        if width == 1:
-            ctx.emit(f"{out} = {ctx.to_expr(vec)};")
+    if inst.vector_op == "extractelement":
+        if inst.width is None or inst.vec is None or inst.idx is None:
+            raise RuntimeError(
+                f"Unsupported extractelement form in Metal lowering: '{inst.raw_line}'"
+            )
+        out = ctx.msl_id(inst.out_ssa)
+        ctx.ssa[inst.out_ssa] = out
+        if inst.width == 1:
+            ctx.emit(f"{out} = {ctx.to_expr(inst.vec)};")
         else:
-            ctx.emit(f"{out} = {ctx.to_expr(vec)}[{ctx.to_expr(idx)}];")
+            ctx.emit(f"{out} = {ctx.to_expr(inst.vec)}[{ctx.to_expr(inst.idx)}];")
         return False
 
-    m = _RE_INSERTELEM.match(line)
-    if m:
-        out_ssa, width_s, vec, val, idx = m.groups()
-        out = ctx.msl_id(out_ssa)
-        ctx.ssa[out_ssa] = out
-        width = int(width_s)
-        if width == 1:
-            ctx.emit(f"{out} = {ctx.to_expr(val)};")
+    if inst.vector_op == "insertelement":
+        if (
+            inst.width is None
+            or inst.insert_vec is None
+            or inst.insert_val is None
+            or inst.insert_idx is None
+        ):
+            raise RuntimeError(
+                f"Unsupported insertelement form in Metal lowering: '{inst.raw_line}'"
+            )
+        out = ctx.msl_id(inst.out_ssa)
+        ctx.ssa[inst.out_ssa] = out
+        if inst.width == 1:
+            ctx.emit(f"{out} = {ctx.to_expr(inst.insert_val)};")
         else:
-            ctx.emit(f"{out} = {ctx.to_expr(vec)};")
-            ctx.emit(f"{out}[{ctx.to_expr(idx)}] = {ctx.to_expr(val)};")
+            ctx.emit(f"{out} = {ctx.to_expr(inst.insert_vec)};")
+            ctx.emit(
+                f"{out}[{ctx.to_expr(inst.insert_idx)}] = {ctx.to_expr(inst.insert_val)};"
+            )
         return False
 
-    m = _RE_SHUFFLEVECTOR.match(line)
-    if m:
-        (
-            out_ssa,
-            lhs_width_s,
-            elem_ty,
-            lhs_vec,
-            rhs_width_s,
-            rhs_vec,
-            out_width_s,
-            mask_spec,
-        ) = m.groups()
-        out = ctx.msl_id(out_ssa)
-        ctx.ssa[out_ssa] = out
-        lhs_width = int(lhs_width_s)
-        rhs_width = int(rhs_width_s)
-        out_width = int(out_width_s)
-        lhs_expr = ctx.to_expr(extract_value_token(lhs_vec))
-        rhs_expr = ctx.to_expr(extract_value_token(rhs_vec))
-        scalar_ty = ctx.llvm_scalar_to_msl(elem_ty.strip())
+    if inst.vector_op == "shufflevector":
+        if (
+            inst.lhs_width is None
+            or inst.shuf_elem_ty is None
+            or inst.lhs_vec is None
+            or inst.rhs_width is None
+            or inst.rhs_vec is None
+            or inst.out_width is None
+            or inst.mask_spec is None
+        ):
+            raise RuntimeError(
+                f"Unsupported shufflevector form in Metal lowering: '{inst.raw_line}'"
+            )
+        out = ctx.msl_id(inst.out_ssa)
+        ctx.ssa[inst.out_ssa] = out
+        lhs_width = inst.lhs_width
+        rhs_width = inst.rhs_width
+        out_width = inst.out_width
+        lhs_expr = ctx.to_expr(extract_value_token(inst.lhs_vec))
+        rhs_expr = ctx.to_expr(extract_value_token(inst.rhs_vec))
+        scalar_ty = ctx.llvm_scalar_to_msl(inst.shuf_elem_ty)
 
-        mask = mask_spec.strip()
+        mask = inst.mask_spec
         if mask == "zeroinitializer":
             mask_elems = ["0"] * out_width
         elif mask in ("undef", "poison"):
@@ -803,91 +615,74 @@ def _emit_vector_op(ctx: "TranslatorContext", inst: _VectorOp) -> bool:
             )
         return False
 
-    raise RuntimeError(f"Unsupported vector op form in Metal lowering: '{line}'")
+    raise RuntimeError(
+        f"Unsupported vector op form in Metal lowering: '{inst.raw_line}'"
+    )
 
 
 def _emit_aggregate_op(ctx: "TranslatorContext", inst: _AggregateOp) -> bool:
-    line = inst.raw_line
     if inst.agg_op == "extractvalue":
-        m = _RE_EXTRACTVALUE.match(line)
-        if not m:
+        if inst.src_val is None or inst.idx is None:
             raise RuntimeError(
-                f"Unsupported extractvalue form in Metal lowering: '{line}'"
+                f"Unsupported extractvalue form in Metal lowering: '{inst.raw_line}'"
             )
-        out_ssa, _, src_val, idx_str = m.groups()
+        out_ssa = inst.out_ssa
         out = ctx.msl_id(out_ssa)
         ctx.ssa[out_ssa] = out
-        ctx.emit(f"{out} = {ctx.to_expr(src_val)}.field{idx_str};")
+        ctx.emit(f"{out} = {ctx.to_expr(inst.src_val)}.field{inst.idx};")
         return False
     if inst.agg_op == "insertvalue":
-        m = _RE_INSERTVALUE.match(line)
-        if not m:
+        if inst.agg_val is None or inst.elem_val is None or inst.idx is None:
             raise RuntimeError(
-                f"Unsupported insertvalue form in Metal lowering: '{line}'"
+                f"Unsupported insertvalue form in Metal lowering: '{inst.raw_line}'"
             )
-        out_ssa, _, agg_val, _, elem_val, idx_str = m.groups()
+        out_ssa = inst.out_ssa
         out = ctx.msl_id(out_ssa)
         ctx.ssa[out_ssa] = out
-        ctx.emit(f"{out} = {ctx.to_expr(agg_val)};")
-        ctx.emit(f"{out}.field{idx_str} = {ctx.to_expr(elem_val)};")
+        ctx.emit(f"{out} = {ctx.to_expr(inst.agg_val)};")
+        ctx.emit(f"{out}.field{inst.idx} = {ctx.to_expr(inst.elem_val)};")
         return False
     raise RuntimeError(
-        f"Unsupported aggregate op '{inst.agg_op}' in Metal lowering: '{line}'"
+        f"Unsupported aggregate op '{inst.agg_op}' in Metal lowering: '{inst.raw_line}'"
     )
 
 
 def _emit_atomic(ctx: "TranslatorContext", inst: _AtomicOp) -> bool:
-    line = inst.raw_line
     if inst.atomic_op == "cmpxchg":
-        m = _RE_CMPXCHG.match(line)
-        if not m:
-            raise RuntimeError(f"Unsupported cmpxchg form in Metal lowering: '{line}'")
-        (
-            out_ssa,
-            addr_space,
-            ptr,
-            val_type,
-            expected,
-            desired,
-            success_order,
-            fail_order,
-        ) = m.groups()
+        if inst.ptr is None or inst.val_type is None or inst.expected is None or inst.desired is None:
+            raise RuntimeError(f"Unsupported cmpxchg form in Metal lowering: '{inst.raw_line}'")
+        out_ssa = inst.out_ssa
         out = ctx.msl_id(out_ssa)
         ctx.ssa[out_ssa] = out
-        msl_ty = ctx.llvm_scalar_to_msl(val_type.strip())
-        msl_success = _MEMORY_ORDER_MAP.get(success_order, "memory_order_relaxed")
-        msl_fail = _MEMORY_ORDER_MAP.get(fail_order, "memory_order_relaxed")
-        ctx.emit(f"{out}.field0 = {ctx.to_expr(expected)};")
+        msl_ty = ctx.llvm_scalar_to_msl(inst.val_type.strip())
+        msl_success = _MEMORY_ORDER_MAP.get(inst.success_order or inst.ordering, "memory_order_relaxed")
+        msl_fail = _MEMORY_ORDER_MAP.get(inst.fail_order or inst.ordering, "memory_order_relaxed")
+        ctx.emit(f"{out}.field0 = {ctx.to_expr(inst.expected)};")
         ctx.emit(
             f"{out}.field1 = atomic_compare_exchange_weak_explicit("
-            f"reinterpret_cast<{ctx.msl_addr_space(addr_space)} atomic_{msl_ty}*>({ctx.to_expr(ptr)}), "
-            f"&{out}.field0, {ctx.to_expr(desired)}, {msl_success}, {msl_fail});"
+            f"reinterpret_cast<{ctx.msl_addr_space(inst.addr_space)} atomic_{msl_ty}*>({ctx.to_expr(inst.ptr)}), "
+            f"&{out}.field0, {ctx.to_expr(inst.desired)}, {msl_success}, {msl_fail});"
         )
         return False
     # atomicrmw
-    m = _RE_ATOMICRMW.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported atomicrmw form in Metal lowering: '{line}'")
-    out_ssa, op, addr_space, ptr, val_type, val, ordering = m.groups()
+    if inst.ptr is None or inst.val_type is None or inst.val is None:
+        raise RuntimeError(f"Unsupported atomicrmw form in Metal lowering: '{inst.raw_line}'")
+    out_ssa = inst.out_ssa
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
-    msl_ty = ctx.llvm_scalar_to_msl(val_type.strip())
-    atomic_func = _ATOMIC_OP_MAP.get(op, "atomic_fetch_add_explicit")
-    msl_order = _MEMORY_ORDER_MAP.get(ordering, "memory_order_relaxed")
+    msl_ty = ctx.llvm_scalar_to_msl(inst.val_type.strip())
+    atomic_func = _ATOMIC_OP_MAP.get(inst.atomic_op, "atomic_fetch_add_explicit")
+    msl_order = _MEMORY_ORDER_MAP.get(inst.ordering, "memory_order_relaxed")
     ctx.emit(
         f"{out} = {atomic_func}("
-        f"reinterpret_cast<{ctx.msl_addr_space(addr_space)} atomic_{msl_ty}*>({ctx.to_expr(ptr)}), "
-        f"{ctx.to_expr(val)}, {msl_order});"
+        f"reinterpret_cast<{ctx.msl_addr_space(inst.addr_space)} atomic_{msl_ty}*>({ctx.to_expr(inst.ptr)}), "
+        f"{ctx.to_expr(inst.val)}, {msl_order});"
     )
     return False
 
 
 def _emit_alloca(ctx: "TranslatorContext", inst: _Alloca) -> bool:
-    line = inst.raw_line
-    m = _RE_ALLOCA.match(line)
-    if not m:
-        raise RuntimeError(f"Unsupported alloca form in Metal lowering: '{line}'")
-    out_ssa, elem_type = m.groups()
+    out_ssa = inst.out_ssa
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
     ctx.emit(f"{out} = &{out}_storage;")
@@ -904,10 +699,9 @@ def _emit_terminator(
     line = inst.raw_line
 
     if inst.term_kind == "br":
-        m = _RE_BR.match(line)
-        if not m:
+        if inst.target_label is None:
             raise RuntimeError(f"Unsupported br form in Metal lowering: '{line}'")
-        target = normalize_label(m.group(1))
+        target = normalize_label(inst.target_label)
         target_id = ctx.block_ids.get(target)
         if target_id is None:
             raise RuntimeError(f"Unknown branch target '{target}' in Metal lowering")
@@ -919,12 +713,11 @@ def _emit_terminator(
         return True
 
     if inst.term_kind == "br_cond":
-        m = _RE_BR_COND.match(line)
-        if not m:
+        if inst.cond is None or inst.true_label is None or inst.false_label is None:
             raise RuntimeError(f"Unsupported br_cond form in Metal lowering: '{line}'")
-        cond, t_lbl, f_lbl = m.groups()
-        t_lbl = normalize_label(t_lbl)
-        f_lbl = normalize_label(f_lbl)
+        cond = inst.cond
+        t_lbl = normalize_label(inst.true_label)
+        f_lbl = normalize_label(inst.false_label)
         t_id = ctx.block_ids.get(t_lbl)
         f_id = ctx.block_ids.get(f_lbl)
         if t_id is None or f_id is None:
@@ -941,20 +734,19 @@ def _emit_terminator(
         return True
 
     if inst.term_kind == "switch":
-        m = _RE_SWITCH.match(line)
-        if not m:
+        if inst.switch_val is None or inst.default_label is None:
             raise RuntimeError(f"Unsupported switch form in Metal lowering: '{line}'")
-        val_type, val, default_label, cases_str = m.groups()
-        default_label = normalize_label(default_label)
+        default_label = normalize_label(inst.default_label)
         default_id = ctx.block_ids.get(default_label)
         ctx.emit(f"__triton_pred_block = {block_id};")
-        ctx.emit(f"switch ({ctx.to_expr(val)}) {{")
-        for cm in _RE_SWITCH_CASE.finditer(cases_str):
-            case_val = cm.group(2)
-            case_label = normalize_label(cm.group(3))
-            case_id = ctx.block_ids.get(case_label)
-            if case_id is not None:
-                ctx.emit(f"  case {case_val}: __pc = {case_id}; break;")
+        ctx.emit(f"switch ({ctx.to_expr(inst.switch_val)}) {{")
+        if inst.cases_raw is not None:
+            for cm in _RE_SWITCH_CASE.finditer(inst.cases_raw):
+                case_val = cm.group(2)
+                case_label = normalize_label(cm.group(3))
+                case_id = ctx.block_ids.get(case_label)
+                if case_id is not None:
+                    ctx.emit(f"  case {case_val}: __pc = {case_id}; break;")
         if default_id is not None:
             ctx.emit(f"  default: __pc = {default_id}; break;")
         ctx.emit("}")
@@ -962,10 +754,10 @@ def _emit_terminator(
         return True
 
     if inst.term_kind == "fence":
-        m = _RE_FENCE.match(line)
-        if not m:
+        syncscope = inst.syncscope
+        ordering = inst.ordering
+        if ordering is None:
             raise RuntimeError(f"Unsupported fence form in Metal lowering: '{line}'")
-        syncscope, ordering = m.groups()
         if syncscope in ("workgroup", "threadgroup"):
             ctx.emit("threadgroup_barrier(mem_flags::mem_threadgroup);")
         elif syncscope in ("subgroup", "wavefront"):
@@ -1860,13 +1652,7 @@ class MetalBackend(BaseBackend):
                     continue
 
                 if isinstance(inst, _BinOp):
-                    m_binop = _RE_BINOP.match(inst.raw_line)
-                    if m_binop:
-                        _, _, operands_spec = m_binop.groups()
-                        parts = split_top_level(operands_spec)
-                        if len(parts) >= 2:
-                            llvm_ty, _ = ctx.split_typed_value(parts[0])
-                            ctx.record_ssa_decl(inst.out_ssa, llvm_ty=llvm_ty)
+                    ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.llvm_ty)
 
                 elif isinstance(inst, _Load):
                     ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.llvm_ty)
@@ -1909,24 +1695,12 @@ class MetalBackend(BaseBackend):
                         ctx.record_ssa_decl(inst.out_ssa, llvm_ty=ret_type)
 
                 elif isinstance(inst, _GEP):
-                    m_gep = _RE_GEP_DECL.match(inst.raw_line)
-                    if m_gep:
-                        elem_ty = m_gep.group(2)
-                        addr_space = m_gep.group(3)
-                        ctx.record_ssa_decl(
-                            inst.out_ssa,
-                            msl_ty=ctx.ptr_type_to_msl(elem_ty, addr_space=addr_space),
-                        )
-                    else:
-                        parsed_gep = ctx.parse_gep_instruction(inst.raw_line)
-                        if parsed_gep is not None:
-                            _, elem_ty, addr_space, _, _ = parsed_gep
-                            ctx.record_ssa_decl(
-                                inst.out_ssa,
-                                msl_ty=ctx.ptr_type_to_msl(
-                                    elem_ty, addr_space=addr_space
-                                ),
-                            )
+                    ctx.record_ssa_decl(
+                        inst.out_ssa,
+                        msl_ty=ctx.ptr_type_to_msl(
+                            inst.base_ty, addr_space=inst.addr_space
+                        ),
+                    )
 
                 elif isinstance(inst, _ICmp):
                     ctx.record_ssa_decl(inst.out_ssa, msl_ty="bool")
@@ -1938,89 +1712,51 @@ class MetalBackend(BaseBackend):
                     ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.llvm_ty)
 
                 elif isinstance(inst, _Select):
-                    m_sel = _RE_SELECT_DECL.match(inst.raw_line)
-                    if m_sel:
-                        ctx.record_ssa_decl(inst.out_ssa, llvm_ty=m_sel.group(2))
+                    ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.result_ty)
 
                 elif isinstance(inst, _FNeg):
-                    m_fneg = _RE_FNEG_DECL.match(inst.raw_line)
-                    if m_fneg:
-                        ctx.record_ssa_decl(inst.out_ssa, llvm_ty=m_fneg.group(2))
+                    ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.llvm_ty)
 
                 elif isinstance(inst, _Freeze):
                     ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.llvm_ty)
 
                 elif isinstance(inst, _VectorOp):
                     if inst.vector_op == "extractelement":
-                        m_vec = _RE_EXTRACTELEM_DECL.match(inst.raw_line)
-                        if m_vec:
-                            elem_ty = m_vec.group(2)
-                            ctx.record_ssa_decl(inst.out_ssa, llvm_ty=elem_ty)
+                        if inst.elem_ty is not None:
+                            ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.elem_ty)
                     elif inst.vector_op == "insertelement":
-                        m_vec = _RE_INSERTELEM_DECL.match(inst.raw_line)
-                        if m_vec:
-                            vec_ty = m_vec.group(2)
-                            ctx.record_ssa_decl(inst.out_ssa, llvm_ty=vec_ty)
+                        if inst.vec_ty is not None:
+                            ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.vec_ty)
                     elif inst.vector_op == "shufflevector":
-                        m_vec = _RE_SHUFFLEVECTOR_DECL.match(inst.raw_line)
-                        if m_vec:
-                            elem_ty = m_vec.group(3)
-                            out_width = int(m_vec.group(7))
-                            scalar_ty = ctx.llvm_scalar_to_msl(elem_ty.strip())
-                            if out_width <= 1:
+                        if inst.shuf_elem_ty is not None and inst.out_width is not None:
+                            scalar_ty = ctx.llvm_scalar_to_msl(inst.shuf_elem_ty)
+                            if inst.out_width <= 1:
                                 ctx.record_ssa_decl(inst.out_ssa, msl_ty=scalar_ty)
                             else:
                                 ctx.record_ssa_decl(
                                     inst.out_ssa,
-                                    msl_ty=f"{scalar_ty}{out_width}",
+                                    msl_ty=f"{scalar_ty}{inst.out_width}",
                                 )
 
                 elif isinstance(inst, _AggregateOp):
                     if inst.agg_op == "extractvalue":
-                        m_agg = _RE_EXTRACTVALUE.match(inst.raw_line)
-                        if m_agg:
-                            agg_type = m_agg.group(2)
-                            idx_str = m_agg.group(4)
-                            _, field_types = ctx.get_aggregate_struct_name(agg_type)
-                            idx = int(idx_str)
-                            ft = field_types[idx] if idx < len(field_types) else "int"
+                        if inst.agg_type is not None and inst.idx is not None:
+                            _, field_types = ctx.get_aggregate_struct_name(inst.agg_type)
+                            ft = field_types[inst.idx] if inst.idx < len(field_types) else "int"
                             ctx.record_ssa_decl(inst.out_ssa, msl_ty=ft)
                     elif inst.agg_op == "insertvalue":
-                        m_agg = _RE_INSERTVALUE.match(inst.raw_line)
-                        if m_agg:
-                            agg_type = m_agg.group(2)
-                            struct_name, _ = ctx.get_aggregate_struct_name(agg_type)
+                        if inst.agg_type is not None:
+                            struct_name, _ = ctx.get_aggregate_struct_name(inst.agg_type)
                             ctx.record_ssa_decl(inst.out_ssa, msl_ty=struct_name)
 
                 elif isinstance(inst, _AtomicOp):
-                    if inst.atomic_op in (
-                        "add",
-                        "sub",
-                        "xchg",
-                        "and",
-                        "or",
-                        "xor",
-                        "nand",
-                        "max",
-                        "min",
-                        "umax",
-                        "umin",
-                        "fadd",
-                        "fsub",
-                        "fmax",
-                        "fmin",
-                    ):
-                        m_atom = _RE_ATOMICRMW.match(inst.raw_line)
-                        if m_atom:
-                            val_type = m_atom.group(5)
-                            ctx.record_ssa_decl(inst.out_ssa, llvm_ty=val_type.strip())
-                    elif inst.atomic_op == "cmpxchg":
-                        m_atom = _RE_CMPXCHG.match(inst.raw_line)
-                        if m_atom:
-                            val_type = m_atom.group(4)
-                            agg_type = "{" + val_type.strip() + ", i1}"
+                    if inst.atomic_op == "cmpxchg":
+                        if inst.val_type is not None:
+                            agg_type = "{" + inst.val_type.strip() + ", i1}"
                             struct_name, _ = ctx.get_aggregate_struct_name(agg_type)
                             ctx.record_ssa_decl(inst.out_ssa, msl_ty=struct_name)
+                    elif inst.val_type is not None:
+                        ctx.record_ssa_decl(inst.out_ssa, llvm_ty=inst.val_type.strip())
 
                 elif isinstance(inst, _Alloca):
                     msl_ty = ctx.llvm_scalar_to_msl(inst.alloc_ty.strip())
@@ -2069,24 +1805,20 @@ class MetalBackend(BaseBackend):
             has_backedge = False
             for scan_inst in block_insts:
                 if isinstance(scan_inst, _Store):
-                    scan_store = _RE_STORE.match(scan_inst.raw_line)
-                    if scan_store and scan_store.group(2) == "3":
+                    if scan_inst.addr_space == "3":
                         has_tg_store = True
                 elif isinstance(scan_inst, _Load):
-                    scan_load = _RE_LOAD.match(scan_inst.raw_line)
-                    if scan_load and scan_load.group(3) == "3":
+                    if scan_inst.addr_space == "3":
                         has_tg_load = True
                 elif isinstance(scan_inst, _Terminator) and scan_inst.opcode == "br":
-                    scan_br = _RE_BR.match(scan_inst.raw_line)
-                    if scan_br is not None:
-                        target = normalize_label(scan_br.group(1))
+                    if scan_inst.target_label is not None:
+                        target = normalize_label(scan_inst.target_label)
                         target_id = ctx.block_ids.get(target)
                         if target_id is not None and target_id <= block_id:
                             has_backedge = True
-                    scan_cond = _RE_BR_COND.match(scan_inst.raw_line)
-                    if scan_cond is not None:
-                        t_lbl = normalize_label(scan_cond.group(2))
-                        f_lbl = normalize_label(scan_cond.group(3))
+                    if scan_inst.true_label is not None and scan_inst.false_label is not None:
+                        t_lbl = normalize_label(scan_inst.true_label)
+                        f_lbl = normalize_label(scan_inst.false_label)
                         t_id = ctx.block_ids.get(t_lbl)
                         f_id = ctx.block_ids.get(f_lbl)
                         if (t_id is not None and t_id <= block_id) or (
@@ -2100,7 +1832,7 @@ class MetalBackend(BaseBackend):
             for inst in block_insts:
                 line = inst.raw_line
 
-                if line == "ret void":
+                if isinstance(inst, _Terminator) and inst.term_kind == "ret" and inst.ret_val is None:
                     ctx.emit("return;")
                     terminated = True
                     break
