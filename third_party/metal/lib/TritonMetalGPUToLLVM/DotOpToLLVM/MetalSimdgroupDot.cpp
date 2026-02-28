@@ -28,26 +28,37 @@ LogicalResult convertMetalSimdgroupDot(triton::DotOp op,
   Type elemTy = resultTy.getElementType();
   auto aType = cast<RankedTensorType>(op.getA().getType());
   auto bType = cast<RankedTensorType>(op.getB().getType());
+  Type aElemTy = aType.getElementType();
+  Type bElemTy = bType.getElementType();
 
-  // Support only f32 x f32 -> f32 for now; fall back to FMA otherwise.
-  if (!elemTy.isF32() || !aType.getElementType().isF32() ||
-      !bType.getElementType().isF32())
+  // Accumulator must be f32.
+  if (!elemTy.isF32())
     return convertFMADot(op, adaptor, typeConverter, rewriter);
 
-  Type llvmElemTy = typeConverter->convertType(elemTy);
-  if (!llvmElemTy)
+  // Operands must match and be f32, f16, or bf16.
+  if (aElemTy != bElemTy)
+    return convertFMADot(op, adaptor, typeConverter, rewriter);
+  if (!aElemTy.isF32() && !aElemTy.isF16() && !aElemTy.isBF16())
+    return convertFMADot(op, adaptor, typeConverter, rewriter);
+
+  bool isMixedPrecision = !aElemTy.isF32();
+
+  Type llvmResTy = typeConverter->convertType(elemTy);
+  Type llvmOpTy =
+      isMixedPrecision ? typeConverter->convertType(aElemTy) : llvmResTy;
+  if (!llvmResTy || !llvmOpTy)
     return failure();
 
   auto resultShape = resultTy.getShape();
   int rank = resultShape.size();
   bool hasBatch = (rank == 3);
 
-  if (hasBatch)
-    return convertFMADot(op, adaptor, typeConverter, rewriter);
-
-  int64_t M = resultShape[0];
-  int64_t N = resultShape[1];
-  int64_t K = aType.getShape().back();
+  unsigned batchSize = hasBatch ? resultShape[0] : 1;
+  int mIdx = hasBatch ? 1 : 0;
+  int nIdx = hasBatch ? 2 : 1;
+  int64_t M = resultShape[mIdx];
+  int64_t N = resultShape[nIdx];
+  int64_t K = aType.getShape()[hasBatch ? 2 : 1];
 
   auto instrShape = dEnc.getInstrShape();
   unsigned mDim = instrShape[0]; // 8
@@ -55,8 +66,8 @@ LogicalResult convertMetalSimdgroupDot(triton::DotOp op,
   unsigned kDim = instrShape[2]; // 8
 
   auto warpsPerCTA = dEnc.getWarpsPerCTA();
-  unsigned warpsM = warpsPerCTA[0];
-  unsigned warpsN = warpsPerCTA[1];
+  unsigned warpsM = hasBatch ? warpsPerCTA[1] : warpsPerCTA[0];
+  unsigned warpsN = hasBatch ? warpsPerCTA[2] : warpsPerCTA[1];
 
   unsigned numRepM = M / (mDim * warpsM);
   unsigned numRepN = N / (nDim * warpsN);
@@ -66,11 +77,16 @@ LogicalResult convertMetalSimdgroupDot(triton::DotOp op,
   auto bElems = unpackLLElements(loc, adaptor.getB(), rewriter);
   auto cElems = unpackLLElements(loc, adaptor.getC(), rewriter);
 
-  assert(aElems.size() == 2 * numRepK * numRepM &&
+  constexpr unsigned regsPerTile = 2;
+  unsigned aElemsPerBatch = regsPerTile * numRepK * numRepM;
+  unsigned bElemsPerBatch = regsPerTile * numRepK * numRepN;
+  unsigned cElemsPerBatch = regsPerTile * numRepN * numRepM;
+
+  assert(aElems.size() == aElemsPerBatch * batchSize &&
          "unexpected A element count");
-  assert(bElems.size() == 2 * numRepK * numRepN &&
+  assert(bElems.size() == bElemsPerBatch * batchSize &&
          "unexpected B element count");
-  assert(cElems.size() == 2 * numRepN * numRepM &&
+  assert(cElems.size() == cElemsPerBatch * batchSize &&
          "unexpected C element count");
 
   auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -78,9 +94,10 @@ LogicalResult convertMetalSimdgroupDot(triton::DotOp op,
   auto i8Ty = rewriter.getI8Type();
   auto ptrTy = LLVM::LLVMPointerType::get(ctx, 3); // threadgroup
   auto voidTy = LLVM::LLVMVoidType::get(ctx);
-  auto matTy = VectorType::get({8}, llvmElemTy);
+  auto opMatTy = VectorType::get({8}, llvmOpTy);
+  auto resMatTy = VectorType::get({8}, llvmResTy);
 
-  // Scratch memory base: AllocateSharedMemory sets allocation.offset.
+  // Scratch memory base.
   auto func = op->getParentOfType<FunctionOpInterface>();
   assert(op->hasAttr("allocation.offset") &&
          "DotOp lacks allocation.offset; was AllocateSharedMemory run?");
@@ -102,9 +119,9 @@ LogicalResult convertMetalSimdgroupDot(triton::DotOp op,
   Value warpId = b.udiv(threadId, b.i32_val(32));
   Value laneId = b.urem(threadId, b.i32_val(32));
 
-  // Per-warp scratch: two 8x8 tiles.
-  unsigned elemBytes = elemTy.getIntOrFloatBitWidth() / 8;
-  unsigned tileBytes = 64 * elemBytes;
+  // Per-warp scratch: two tiles sized for the widest type (result type).
+  unsigned resElemBytes = elemTy.getIntOrFloatBitWidth() / 8;
+  unsigned tileBytes = 64 * resElemBytes;
   unsigned scratchPerWarp = 2 * tileBytes;
 
   Value warpByteOff = b.mul(warpId, b.i32_val(scratchPerWarp));
@@ -113,45 +130,47 @@ LogicalResult convertMetalSimdgroupDot(triton::DotOp op,
   Value tileBytesVal = b.i32_val(tileBytes);
   Value scratchB = b.gep(ptrTy, i8Ty, warpScratch, tileBytesVal);
 
-  // Per-thread offsets inside an 8x8 tile (row-major, stride = 8).
-  //
-  // The linear layout for MetalSimdgroupEncoding operands is:
-  //   identity1D(2, register, dimCol) *    // reg bit 0 → col basis 1
-  //   identity1D(8, lane, dimRow)     *    // lane bits 0-2 → row bases 1,2,4
-  //   identity1D(4, lane, dimCol)          // lane bits 3-4 → col bases 2,4
-  //                                        //   (shifted by register's col range)
-  //
-  // So each thread owns two CONSECUTIVE column values:
-  //   row      = lane & 7
-  //   col_base = ((lane >> 3) & 3) * 2    (0, 2, 4, or 6)
-  //   reg 0 → col_base + 0
-  //   reg 1 → col_base + 1
+  // Per-thread element offsets within an 8×8 tile (row-major, stride = 8).
   Value row = b.and_(laneId, b.i32_val(7));
   Value colPartial = b.and_(b.lshr(laneId, b.i32_val(3)), b.i32_val(3));
   Value col = b.mul(colPartial, b.i32_val(2));
   Value elemOff0 = b.add(b.mul(row, b.i32_val(8)), col);
   Value elemOff1 = b.add(elemOff0, b.i32_val(1));
 
-  Value byteOff0 = b.mul(elemOff0, b.i32_val(elemBytes));
-  Value byteOff1 = b.mul(elemOff1, b.i32_val(elemBytes));
+  // Byte offsets for operand stores (may be f16/bf16 = 2 bytes).
+  unsigned opElemBytes = aElemTy.getIntOrFloatBitWidth() / 8;
+  Value opByteOff0 = b.mul(elemOff0, b.i32_val(opElemBytes));
+  Value opByteOff1 = b.mul(elemOff1, b.i32_val(opElemBytes));
+  Value opPtrA0 = b.gep(ptrTy, i8Ty, scratchA, opByteOff0);
+  Value opPtrA1 = b.gep(ptrTy, i8Ty, scratchA, opByteOff1);
+  Value opPtrB0 = b.gep(ptrTy, i8Ty, scratchB, opByteOff0);
+  Value opPtrB1 = b.gep(ptrTy, i8Ty, scratchB, opByteOff1);
 
-  Value ptrA0 = b.gep(ptrTy, i8Ty, scratchA, byteOff0);
-  Value ptrA1 = b.gep(ptrTy, i8Ty, scratchA, byteOff1);
-  Value ptrB0 = b.gep(ptrTy, i8Ty, scratchB, byteOff0);
-  Value ptrB1 = b.gep(ptrTy, i8Ty, scratchB, byteOff1);
+  // Byte offsets for result (accumulator) stores (always f32).
+  Value resByteOff0 = b.mul(elemOff0, b.i32_val(resElemBytes));
+  Value resByteOff1 = b.mul(elemOff1, b.i32_val(resElemBytes));
+  Value resPtrA0 = b.gep(ptrTy, i8Ty, scratchA, resByteOff0);
+  Value resPtrA1 = b.gep(ptrTy, i8Ty, scratchA, resByteOff1);
 
-  // Declare simdgroup intrinsics with type suffix for LLVM IR uniqueness.
-  std::string ts = mangleTypeForSymbol(llvmElemTy);
+  // Declare simdgroup intrinsics.
+  std::string opTs = mangleTypeForSymbol(llvmOpTy);
+  std::string resTs = mangleTypeForSymbol(llvmResTy);
 
-  auto loadTgFn = getOrInsertExternFunc(
-      mod, rewriter, "__metal_simdgroup_load_tg_" + ts, matTy,
+  auto loadTgOpFn = getOrInsertExternFunc(
+      mod, rewriter, "__metal_simdgroup_load_tg_" + opTs, opMatTy,
       {ptrTy, i32Ty});
-  auto storeTgFn = getOrInsertExternFunc(
-      mod, rewriter, "__metal_simdgroup_store_tg_" + ts, voidTy,
-      {matTy, ptrTy, i32Ty});
+  auto loadTgResFn = getOrInsertExternFunc(
+      mod, rewriter, "__metal_simdgroup_load_tg_" + resTs, resMatTy,
+      {ptrTy, i32Ty});
+  auto storeTgResFn = getOrInsertExternFunc(
+      mod, rewriter, "__metal_simdgroup_store_tg_" + resTs, voidTy,
+      {resMatTy, ptrTy, i32Ty});
+
+  std::string mmaSuffix = isMixedPrecision ? resTs + "_" + opTs : resTs;
   auto mmaFn = getOrInsertExternFunc(
-      mod, rewriter, "__metal_simdgroup_multiply_accumulate_" + ts, matTy,
-      {matTy, matTy, matTy});
+      mod, rewriter, "__metal_simdgroup_multiply_accumulate_" + mmaSuffix,
+      resMatTy, {opMatTy, opMatTy, resMatTy});
+
   auto barrierFn = getOrInsertExternFunc(
       mod, rewriter, "__metal_simdgroup_barrier", voidTy, {i32Ty});
 
@@ -160,48 +179,50 @@ LogicalResult convertMetalSimdgroupDot(triton::DotOp op,
 
   SmallVector<Value> resultElems(cElems.size());
 
-  // Ensure prior shared-memory consumers (e.g. ConvertLayoutOps that
-  // populate this DotOp's operands) have finished reading before we
-  // overwrite the scratch region that may alias their allocations.
+  // Pre-barrier to protect against aliased shared memory.
   b.call(barrierFn, ValueRange{barrierFlags});
 
-  for (unsigned mRep = 0; mRep < numRepM; ++mRep) {
-    for (unsigned nRep = 0; nRep < numRepN; ++nRep) {
-      unsigned cBase = 2 * (nRep + numRepN * mRep);
+  for (unsigned bRep = 0; bRep < batchSize; ++bRep) {
+    for (unsigned mRep = 0; mRep < numRepM; ++mRep) {
+      for (unsigned nRep = 0; nRep < numRepN; ++nRep) {
+        unsigned cBase =
+            regsPerTile * (nRep + numRepN * mRep) + bRep * cElemsPerBatch;
 
-      // Load accumulator C into a simdgroup matrix via scratch.
-      b.store(cElems[cBase + 0], ptrA0);
-      b.store(cElems[cBase + 1], ptrA1);
-      b.call(barrierFn, ValueRange{barrierFlags});
-      Value cMat =
-          b.call(loadTgFn, ValueRange{scratchA, stride})->getResult(0);
+        // Load accumulator C via scratch (always f32).
+        b.store(cElems[cBase + 0], resPtrA0);
+        b.store(cElems[cBase + 1], resPtrA1);
+        b.call(barrierFn, ValueRange{barrierFlags});
+        Value cMat =
+            b.call(loadTgResFn, ValueRange{scratchA, stride})->getResult(0);
 
-      // K-reduction: load each A and B tile, accumulate.
-      for (unsigned kRep = 0; kRep < numRepK; ++kRep) {
-        unsigned aBase = 2 * (kRep + numRepK * mRep);
-        unsigned bBase = 2 * (kRep + numRepK * nRep);
+        for (unsigned kRep = 0; kRep < numRepK; ++kRep) {
+          unsigned aBase =
+              regsPerTile * (kRep + numRepK * mRep) + bRep * aElemsPerBatch;
+          unsigned bBase =
+              regsPerTile * (kRep + numRepK * nRep) + bRep * bElemsPerBatch;
 
-        b.store(aElems[aBase + 0], ptrA0);
-        b.store(aElems[aBase + 1], ptrA1);
-        b.store(bElems[bBase + 0], ptrB0);
-        b.store(bElems[bBase + 1], ptrB1);
+          // Store A and B operands via scratch (may be f16/bf16).
+          b.store(aElems[aBase + 0], opPtrA0);
+          b.store(aElems[aBase + 1], opPtrA1);
+          b.store(bElems[bBase + 0], opPtrB0);
+          b.store(bElems[bBase + 1], opPtrB1);
+          b.call(barrierFn, ValueRange{barrierFlags});
 
+          Value aMat =
+              b.call(loadTgOpFn, ValueRange{scratchA, stride})->getResult(0);
+          Value bMat =
+              b.call(loadTgOpFn, ValueRange{scratchB, stride})->getResult(0);
+          cMat =
+              b.call(mmaFn, ValueRange{aMat, bMat, cMat})->getResult(0);
+        }
+
+        // Write result and read back per-thread values (always f32).
+        b.call(storeTgResFn, ValueRange{cMat, scratchA, stride});
         b.call(barrierFn, ValueRange{barrierFlags});
 
-        Value aMat =
-            b.call(loadTgFn, ValueRange{scratchA, stride})->getResult(0);
-        Value bMat =
-            b.call(loadTgFn, ValueRange{scratchB, stride})->getResult(0);
-
-        cMat = b.call(mmaFn, ValueRange{aMat, bMat, cMat})->getResult(0);
+        resultElems[cBase + 0] = b.load(llvmResTy, resPtrA0);
+        resultElems[cBase + 1] = b.load(llvmResTy, resPtrA1);
       }
-
-      // Write result matrix to scratch and read back per-thread values.
-      b.call(storeTgFn, ValueRange{cMat, scratchA, stride});
-      b.call(barrierFn, ValueRange{barrierFlags});
-
-      resultElems[cBase + 0] = b.load(llvmElemTy, ptrA0);
-      resultElems[cBase + 1] = b.load(llvmElemTy, ptrA1);
     }
   }
 

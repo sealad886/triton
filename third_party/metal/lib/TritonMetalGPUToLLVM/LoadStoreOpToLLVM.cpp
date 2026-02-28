@@ -16,6 +16,8 @@ std::string mangleTypeForSymbol(Type ty) {
     return "i" + std::to_string(intTy.getWidth());
   if (ty.isF16())
     return "f16";
+  if (ty.isBF16())
+    return "bf16";
   if (ty.isF32())
     return "f32";
   if (ty.isF64())

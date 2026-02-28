@@ -24,11 +24,20 @@ constexpr unsigned kSimdgroupM = 8;
 constexpr unsigned kSimdgroupN = 8;
 constexpr unsigned kSimdgroupK = 8;
 
-static bool isSimdgroupDTypeSupported(Type elemType, StringRef gpuFamily) {
-  // Only f32 accumulator is supported in the current lowering.
-  // fp16/bf16 support can be added once the intrinsic codegen handles
-  // mixed-precision operand types.
+static bool isSimdgroupAccumTypeSupported(Type elemType) {
   return elemType.isF32();
+}
+
+static bool isSimdgroupOperandTypeSupported(Type elemType,
+                                            StringRef gpuFamily) {
+  if (elemType.isF32() || elemType.isF16())
+    return true;
+  if (elemType.isBF16()) {
+    // BFloat16 requires Apple GPU family 9+ (M3/M4).
+    return gpuFamily.starts_with("apple") &&
+           gpuFamily.compare("apple9") >= 0;
+  }
+  return false;
 }
 
 static SmallVector<unsigned> computeWarpsPerCTA(int64_t M, int64_t N,
@@ -92,15 +101,17 @@ public:
       return failure();
 
     auto elemType = oldRetType.getElementType();
-    if (!isSimdgroupDTypeSupported(elemType, gpuFamily))
+    if (!isSimdgroupAccumTypeSupported(elemType))
       return failure();
 
-    // All operand types must also be supported (mixed-precision lowering is
-    // not yet implemented, so reject e.g. f16×f16→f32).
     {
+      auto aElemType = aType.getElementType();
       auto bTy = cast<RankedTensorType>(dotOp.getB().getType());
-      if (!isSimdgroupDTypeSupported(aType.getElementType(), gpuFamily) ||
-          !isSimdgroupDTypeSupported(bTy.getElementType(), gpuFamily))
+      auto bElemType = bTy.getElementType();
+      if (!isSimdgroupOperandTypeSupported(aElemType, gpuFamily) ||
+          !isSimdgroupOperandTypeSupported(bElemType, gpuFamily))
+        return failure();
+      if (aElemType != bElemType)
         return failure();
     }
 
@@ -197,16 +208,17 @@ struct TritonMetalGPUAccelerateMatmulPass
         continue;
 
       auto elemType = oldRetType.getElementType();
-      if (!isSimdgroupDTypeSupported(elemType, gpuFamily))
+      if (!isSimdgroupAccumTypeSupported(elemType))
         continue;
 
-      // All operand types must also be supported (mixed-precision lowering is
-      // not yet implemented, so reject e.g. f16×f16→f32).
-      if (!isSimdgroupDTypeSupported(aType.getElementType(), gpuFamily))
-        continue;
       {
+        auto aElemType = aType.getElementType();
         auto bTy = cast<RankedTensorType>(dotOp.getB().getType());
-        if (!isSimdgroupDTypeSupported(bTy.getElementType(), gpuFamily))
+        auto bElemType = bTy.getElementType();
+        if (!isSimdgroupOperandTypeSupported(aElemType, gpuFamily) ||
+            !isSimdgroupOperandTypeSupported(bElemType, gpuFamily))
+          continue;
+        if (aElemType != bElemType)
           continue;
       }
 

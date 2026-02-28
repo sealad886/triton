@@ -1368,6 +1368,7 @@ class MetalBackend(BaseBackend):
         passes.ttir.add_loop_aware_cse(pm)
         passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
+        passes.ttgpuir.add_prefetch(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_reduce_data_duplication(pm)
         passes.ttgpuir.add_reorder_instructions(pm)
@@ -1707,12 +1708,9 @@ class MetalBackend(BaseBackend):
                         continue
                     ret_type = ctx.extract_call_ret_type(inst.ret_type)
                     fn_name = inst.fn_name
-                    if (
-                        fn_name.startswith("__metal_simdgroup_load")
-                        or fn_name.startswith(
-                            "__metal_simdgroup_multiply_accumulate"
-                        )
-                    ):
+                    if fn_name.startswith(
+                        "__metal_simdgroup_load"
+                    ) or fn_name.startswith("__metal_simdgroup_multiply_accumulate"):
                         elem_ty = "float"
                         vec_m = _RE_VEC_TYPE.match(ret_type)
                         if vec_m:
@@ -1723,10 +1721,10 @@ class MetalBackend(BaseBackend):
                                 msl_ty=f"simdgroup_matrix<{elem_ty}, 8, 8>",
                             )
                         else:
-                            if elem_ty not in ("float", "half"):
+                            if elem_ty not in ("float", "half", "bfloat"):
                                 raise RuntimeError(
                                     "Software simdgroup fallback only supports "
-                                    f"float/half elements, got {elem_ty!r}"
+                                    f"float/half/bfloat elements, got {elem_ty!r}"
                                 )
                             ctx.fallback_simdgroup_elem_types.add(elem_ty)
                             ctx.record_ssa_decl(

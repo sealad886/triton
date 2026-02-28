@@ -5778,6 +5778,783 @@ class TestMetalRuntimeMLCorrectness:
         assert torch.allclose(y_cpu, expected, atol=2e-4, rtol=2e-4)
 
 
+# ── Execute-and-verify runtime correctness ──────────────────────────
+
+
+class TestMetalRuntimeExecuteVerify:
+    """Execute-and-verify tests for operations beyond matmul.
+
+    Each test compiles a Triton kernel, runs it on MPS, and checks
+    against a CPU/PyTorch reference.
+    """
+
+    # ── Atomic operations ─────────────────────────────────────────
+
+    @skip_non_darwin
+    @skip_no_mps
+    @pytest.mark.skip(reason="Metal backend does not yet legalize tt.atomic_rmw")
+    def test_runtime_atomic_add_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _atomic_add_kernel(
+            x_ptr, out_ptr, n, BLOCK: tl.constexpr
+        ):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            block_sum = tl.sum(x, axis=0)
+            tl.atomic_add(out_ptr, block_sum)
+
+        torch.manual_seed(100)
+        n = 256
+        x_cpu = torch.randn((n,), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.zeros((1,), device="mps", dtype=torch.float32)
+
+        _atomic_add_kernel[(triton.cdiv(n, 64),)](
+            x_mps, out_mps, n, BLOCK=64
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = x_cpu.sum().unsqueeze(0)
+        assert torch.allclose(out_cpu, expected, atol=1e-2, rtol=1e-2)
+
+    @skip_non_darwin
+    @skip_no_mps
+    @pytest.mark.skip(reason="Metal backend does not yet legalize tt.atomic_rmw")
+    def test_runtime_atomic_add_per_bin(self):
+        """Histogram-style atomic add into multiple bins."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _bin_atomic_add(
+            vals_ptr, bins_ptr, out_ptr, n, BLOCK: tl.constexpr
+        ):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            vals = tl.load(vals_ptr + offs, mask=mask, other=0.0)
+            bin_ids = tl.load(bins_ptr + offs, mask=mask, other=0)
+            tl.atomic_add(out_ptr + bin_ids, vals, mask=mask)
+
+        torch.manual_seed(101)
+        n, num_bins = 512, 8
+        vals_cpu = torch.randn((n,), dtype=torch.float32)
+        bins_cpu = torch.randint(0, num_bins, (n,), dtype=torch.int32)
+
+        vals_mps = vals_cpu.to("mps")
+        bins_mps = bins_cpu.to("mps")
+        out_mps = torch.zeros((num_bins,), device="mps", dtype=torch.float32)
+
+        _bin_atomic_add[(triton.cdiv(n, 64),)](
+            vals_mps, bins_mps, out_mps, n, BLOCK=64
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.zeros(num_bins, dtype=torch.float32)
+        for i in range(n):
+            expected[bins_cpu[i]] += vals_cpu[i]
+        assert torch.allclose(out_cpu, expected, atol=1e-2, rtol=1e-2)
+
+    # ── Reduction operations ──────────────────────────────────────
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_reduce_sum_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _reduce_sum(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            s = tl.sum(x, axis=0)
+            tl.store(out_ptr + pid, s)
+
+        torch.manual_seed(102)
+        n = 512
+        block = 64
+        x_cpu = torch.randn((n,), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.empty((n // block,), device="mps", dtype=torch.float32)
+
+        _reduce_sum[(n // block,)](x_mps, out_mps, n, BLOCK=block)
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = x_cpu.view(-1, block).sum(dim=1)
+        assert torch.allclose(out_cpu, expected, atol=1e-4, rtol=1e-4)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_reduce_max_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _reduce_max(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=float("-inf"))
+            m = tl.max(x, axis=0)
+            tl.store(out_ptr + pid, m)
+
+        torch.manual_seed(103)
+        n = 256
+        block = 32
+        x_cpu = torch.randn((n,), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.empty((n // block,), device="mps", dtype=torch.float32)
+
+        _reduce_max[(n // block,)](x_mps, out_mps, n, BLOCK=block)
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = x_cpu.view(-1, block).max(dim=1).values
+        assert torch.allclose(out_cpu, expected, atol=1e-5, rtol=1e-5)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_reduce_min_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _reduce_min(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=float("inf"))
+            m = tl.min(x, axis=0)
+            tl.store(out_ptr + pid, m)
+
+        torch.manual_seed(104)
+        n = 256
+        block = 32
+        x_cpu = torch.randn((n,), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.empty((n // block,), device="mps", dtype=torch.float32)
+
+        _reduce_min[(n // block,)](x_mps, out_mps, n, BLOCK=block)
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = x_cpu.view(-1, block).min(dim=1).values
+        assert torch.allclose(out_cpu, expected, atol=1e-5, rtol=1e-5)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_2d_reduce_sum_axis0(self):
+        """Reduce along axis=0 of a 2D block (column-wise sum)."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _reduce_sum_2d(
+            x_ptr, out_ptr, rows, cols, stride, BLOCK_R: tl.constexpr, BLOCK_C: tl.constexpr
+        ):
+            pid = tl.program_id(axis=0)
+            offs_r = tl.arange(0, BLOCK_R)
+            offs_c = pid * BLOCK_C + tl.arange(0, BLOCK_C)
+            mask = (offs_r[:, None] < rows) & (offs_c[None, :] < cols)
+            x = tl.load(
+                x_ptr + offs_r[:, None] * stride + offs_c[None, :],
+                mask=mask,
+                other=0.0,
+            )
+            s = tl.sum(x, axis=0)
+            tl.store(out_ptr + offs_c, s, mask=offs_c < cols)
+
+        torch.manual_seed(105)
+        rows, cols = 16, 64
+        x_cpu = torch.randn((rows, cols), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.empty((cols,), device="mps", dtype=torch.float32)
+
+        _reduce_sum_2d[(triton.cdiv(cols, 64),)](
+            x_mps, out_mps, rows, cols, x_mps.stride(0), BLOCK_R=16, BLOCK_C=64
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = x_cpu.sum(dim=0)
+        assert torch.allclose(out_cpu, expected, atol=1e-4, rtol=1e-4)
+
+    # ── Scan (prefix sum) ────────────────────────────────────────
+
+    @skip_non_darwin
+    @skip_no_mps
+    @pytest.mark.skip(reason="Metal translator missing 'samesign' icmp predicate")
+    def test_runtime_scan_cumsum_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _cumsum(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            cs = tl.cumsum(x, axis=0)
+            tl.store(out_ptr + offs, cs, mask=mask)
+
+        torch.manual_seed(106)
+        n = 128
+        x_cpu = torch.randn((n,), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.empty_like(x_mps)
+
+        _cumsum[(n // 32,)](x_mps, out_mps, n, BLOCK=32)
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        # Each block produces an independent prefix sum.
+        expected = x_cpu.view(-1, 32).cumsum(dim=1).view(-1)
+        assert torch.allclose(out_cpu, expected, atol=1e-4, rtol=1e-4)
+
+    # ── Where / select ────────────────────────────────────────────
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_where_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _where_kernel(
+            cond_ptr, a_ptr, b_ptr, out_ptr, n, BLOCK: tl.constexpr
+        ):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            cond = tl.load(cond_ptr + offs, mask=mask, other=0)
+            a = tl.load(a_ptr + offs, mask=mask, other=0.0)
+            b = tl.load(b_ptr + offs, mask=mask, other=0.0)
+            out = tl.where(cond != 0, a, b)
+            tl.store(out_ptr + offs, out, mask=mask)
+
+        torch.manual_seed(107)
+        n = 512
+        cond_cpu = torch.randint(0, 2, (n,), dtype=torch.int32)
+        a_cpu = torch.randn((n,), dtype=torch.float32)
+        b_cpu = torch.randn((n,), dtype=torch.float32)
+
+        cond_mps = cond_cpu.to("mps")
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        out_mps = torch.empty_like(a_mps)
+
+        _where_kernel[(triton.cdiv(n, 128),)](
+            cond_mps, a_mps, b_mps, out_mps, n, BLOCK=128
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.where(cond_cpu.bool(), a_cpu, b_cpu)
+        assert torch.allclose(out_cpu, expected, atol=1e-5, rtol=1e-5)
+
+    # ── Element-wise unary operations ─────────────────────────────
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_exp_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _exp_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            tl.store(out_ptr + offs, tl.exp(x), mask=mask)
+
+        torch.manual_seed(108)
+        n = 1024
+        x_cpu = torch.randn((n,), dtype=torch.float32).clamp(-5, 5)
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.empty_like(x_mps)
+
+        _exp_kernel[(triton.cdiv(n, 256),)](x_mps, out_mps, n, BLOCK=256)
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.exp(x_cpu)
+        assert torch.allclose(out_cpu, expected, atol=1e-5, rtol=1e-5)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_log_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _log_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=1.0)
+            tl.store(out_ptr + offs, tl.log(x), mask=mask)
+
+        torch.manual_seed(109)
+        n = 1024
+        x_cpu = torch.rand((n,), dtype=torch.float32) + 0.01
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.empty_like(x_mps)
+
+        _log_kernel[(triton.cdiv(n, 256),)](x_mps, out_mps, n, BLOCK=256)
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = torch.log(x_cpu)
+        assert torch.allclose(out_cpu, expected, atol=1e-5, rtol=1e-5)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_abs_neg_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _abs_neg_kernel(x_ptr, abs_ptr, neg_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            tl.store(abs_ptr + offs, tl.abs(x), mask=mask)
+            tl.store(neg_ptr + offs, -x, mask=mask)
+
+        torch.manual_seed(110)
+        n = 512
+        x_cpu = torch.randn((n,), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        abs_mps = torch.empty_like(x_mps)
+        neg_mps = torch.empty_like(x_mps)
+
+        _abs_neg_kernel[(triton.cdiv(n, 128),)](
+            x_mps, abs_mps, neg_mps, n, BLOCK=128
+        )
+        torch.mps.synchronize()
+        abs_cpu = abs_mps.cpu()
+        neg_cpu = neg_mps.cpu()
+        torch.mps.synchronize()
+
+        assert torch.allclose(abs_cpu, torch.abs(x_cpu), atol=1e-6, rtol=1e-6)
+        assert torch.allclose(neg_cpu, -x_cpu, atol=1e-6, rtol=1e-6)
+
+    # ── Transpose ─────────────────────────────────────────────────
+
+    @skip_non_darwin
+    @skip_no_mps
+    @pytest.mark.skip(reason="Metal translator missing vector select support")
+    def test_runtime_transpose_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _transpose(
+            x_ptr, out_ptr, rows, cols, stride_xr, stride_xc,
+            stride_or, stride_oc,
+            BLOCK_R: tl.constexpr, BLOCK_C: tl.constexpr,
+        ):
+            pid_r = tl.program_id(axis=0)
+            pid_c = tl.program_id(axis=1)
+            offs_r = pid_r * BLOCK_R + tl.arange(0, BLOCK_R)
+            offs_c = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
+            mask = (offs_r[:, None] < rows) & (offs_c[None, :] < cols)
+            x = tl.load(
+                x_ptr + offs_r[:, None] * stride_xr + offs_c[None, :] * stride_xc,
+                mask=mask, other=0.0,
+            )
+            tl.store(
+                out_ptr + offs_c[:, None] * stride_or + offs_r[None, :] * stride_oc,
+                tl.trans(x),
+                mask=(offs_c[:, None] < cols) & (offs_r[None, :] < rows),
+            )
+
+        torch.manual_seed(111)
+        rows, cols = 32, 64
+        x_cpu = torch.randn((rows, cols), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.empty((cols, rows), device="mps", dtype=torch.float32)
+
+        _transpose[(triton.cdiv(rows, 16), triton.cdiv(cols, 16), 1)](
+            x_mps, out_mps, rows, cols,
+            x_mps.stride(0), x_mps.stride(1),
+            out_mps.stride(0), out_mps.stride(1),
+            BLOCK_R=16, BLOCK_C=16,
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = x_cpu.T
+        assert torch.allclose(out_cpu, expected, atol=1e-6, rtol=1e-6)
+
+    # ── Mixed-precision matmul verification ───────────────────────
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_fp16_matmul_f32_accum_matches_cpu(self):
+        """Verify f16×f16→f32 accumulation is actually precise (not truncated)."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _matmul_f16_f32_accum(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            # Store as f32 to preserve full precision of accumulator.
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(112)
+        m, n, k = 32, 32, 64
+        a_cpu = torch.randn((m, k), dtype=torch.float16)
+        b_cpu = torch.randn((k, n), dtype=torch.float16)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        # Output is f32 to test that accumulation was in f32.
+        c_mps = torch.empty((m, n), device="mps", dtype=torch.float32)
+
+        _matmul_f16_f32_accum[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
+            a_mps, b_mps, c_mps,
+            m, n, k,
+            a_mps.stride(0), a_mps.stride(1),
+            b_mps.stride(0), b_mps.stride(1),
+            c_mps.stride(0), c_mps.stride(1),
+            BLOCK_M=16, BLOCK_N=16, BLOCK_K=16,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = a_cpu.float() @ b_cpu.float()
+        assert torch.allclose(c_cpu, expected, atol=2e-2, rtol=2e-2)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_fp16_matmul_larger_k(self):
+        """Larger K to exercise multi-tile K-loop in mixed-precision path."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _matmul_f16_f32(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(113)
+        m, n, k = 32, 32, 128
+        a_cpu = torch.randn((m, k), dtype=torch.float16)
+        b_cpu = torch.randn((k, n), dtype=torch.float16)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((m, n), device="mps", dtype=torch.float32)
+
+        _matmul_f16_f32[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
+            a_mps, b_mps, c_mps,
+            m, n, k,
+            a_mps.stride(0), a_mps.stride(1),
+            b_mps.stride(0), b_mps.stride(1),
+            c_mps.stride(0), c_mps.stride(1),
+            BLOCK_M=16, BLOCK_N=16, BLOCK_K=16,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = a_cpu.float() @ b_cpu.float()
+        assert torch.allclose(c_cpu, expected, atol=5e-2, rtol=5e-2)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_bf16_matmul_f32_accum_matches_cpu(self):
+        """bf16×bf16→f32 matmul, output stored as f32."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        try:
+            torch.empty((1,), device="mps", dtype=torch.bfloat16)
+        except Exception:
+            pytest.skip("MPS bfloat16 runtime is unavailable on this host")
+
+        @triton.jit
+        def _matmul_bf16_f32(
+            a_ptr, b_ptr, c_ptr,
+            m, n, k,
+            stride_am, stride_ak,
+            stride_bk, stride_bn,
+            stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(axis=0)
+            pid_n = tl.program_id(axis=1)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, k, BLOCK_K):
+                a = tl.load(
+                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < m) & (offs_n[None, :] < n))
+
+        torch.manual_seed(114)
+        m, n, k = 32, 32, 64
+        a_cpu = torch.randn((m, k), dtype=torch.bfloat16)
+        b_cpu = torch.randn((k, n), dtype=torch.bfloat16)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((m, n), device="mps", dtype=torch.float32)
+
+        _matmul_bf16_f32[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
+            a_mps, b_mps, c_mps,
+            m, n, k,
+            a_mps.stride(0), a_mps.stride(1),
+            b_mps.stride(0), b_mps.stride(1),
+            c_mps.stride(0), c_mps.stride(1),
+            BLOCK_M=16, BLOCK_N=16, BLOCK_K=16,
+        )
+        torch.mps.synchronize()
+        c_cpu = c_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = a_cpu.float() @ b_cpu.float()
+        assert torch.allclose(c_cpu, expected, atol=5e-2, rtol=5e-2)
+
+    # ── Type cast / conversion ────────────────────────────────────
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_cast_fp32_to_fp16_roundtrip(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _cast_f32_f16_f32(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            y = x.to(tl.float16).to(tl.float32)
+            tl.store(out_ptr + offs, y, mask=mask)
+
+        torch.manual_seed(115)
+        n = 1024
+        x_cpu = torch.randn((n,), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        out_mps = torch.empty_like(x_mps)
+
+        _cast_f32_f16_f32[(triton.cdiv(n, 256),)](
+            x_mps, out_mps, n, BLOCK=256
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = x_cpu.half().float()
+        assert torch.allclose(out_cpu, expected, atol=1e-6, rtol=1e-6)
+
+    # ── Fused multiply-add pattern ────────────────────────────────
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_fma_pattern_matches_cpu(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _fma_kernel(a_ptr, b_ptr, c_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            a = tl.load(a_ptr + offs, mask=mask, other=0.0)
+            b = tl.load(b_ptr + offs, mask=mask, other=0.0)
+            c = tl.load(c_ptr + offs, mask=mask, other=0.0)
+            tl.store(out_ptr + offs, a * b + c, mask=mask)
+
+        torch.manual_seed(116)
+        n = 1024
+        a_cpu = torch.randn((n,), dtype=torch.float32)
+        b_cpu = torch.randn((n,), dtype=torch.float32)
+        c_cpu = torch.randn((n,), dtype=torch.float32)
+
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = c_cpu.to("mps")
+        out_mps = torch.empty_like(a_mps)
+
+        _fma_kernel[(triton.cdiv(n, 256),)](
+            a_mps, b_mps, c_mps, out_mps, n, BLOCK=256
+        )
+        torch.mps.synchronize()
+        out_cpu = out_mps.cpu()
+        torch.mps.synchronize()
+
+        expected = a_cpu * b_cpu + c_cpu
+        assert torch.allclose(out_cpu, expected, atol=1e-5, rtol=1e-5)
+
+    # ── Multi-output kernel ───────────────────────────────────────
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_mean_var_matches_cpu(self):
+        """A single kernel computing both mean and variance."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _mean_var(
+            x_ptr, mean_ptr, var_ptr, n_cols, BLOCK: tl.constexpr
+        ):
+            pid = tl.program_id(axis=0)
+            offs = tl.arange(0, BLOCK)
+            mask = offs < n_cols
+            x = tl.load(x_ptr + pid * n_cols + offs, mask=mask, other=0.0)
+            mean = tl.sum(x, axis=0) / n_cols
+            centered = x - mean
+            var = tl.sum(centered * centered, axis=0) / n_cols
+            tl.store(mean_ptr + pid, mean)
+            tl.store(var_ptr + pid, var)
+
+        torch.manual_seed(117)
+        rows, cols = 8, 64
+        x_cpu = torch.randn((rows, cols), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        mean_mps = torch.empty((rows,), device="mps", dtype=torch.float32)
+        var_mps = torch.empty((rows,), device="mps", dtype=torch.float32)
+
+        _mean_var[(rows,)](x_mps, mean_mps, var_mps, cols, BLOCK=64)
+        torch.mps.synchronize()
+        mean_cpu = mean_mps.cpu()
+        var_cpu = var_mps.cpu()
+        torch.mps.synchronize()
+
+        expected_mean = x_cpu.mean(dim=1)
+        expected_var = x_cpu.var(dim=1, correction=0)
+        assert torch.allclose(mean_cpu, expected_mean, atol=1e-4, rtol=1e-4)
+        assert torch.allclose(var_cpu, expected_var, atol=1e-3, rtol=1e-3)
+
+
 # ── LLVM vector-constant lowering regressions ───────────────────────
 
 

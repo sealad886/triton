@@ -471,18 +471,18 @@ class MetalUtils:
             max_threads = 1024  # Common default for Apple Silicon
 
         max_threadgroup_memory_length = int(dev.maxThreadgroupMemoryLength())
+        gpu_family = _detect_gpu_family(dev)
+        mem_info = _gpu_memory_specs(gpu_family, str(dev.name()))
         return {
             "name": str(dev.name()),
             "max_shared_mem": max_threadgroup_memory_length,
             "max_buffer_length": int(dev.maxBufferLength()),
             "max_threads_per_threadgroup": max_threads,
             "max_threadgroup_memory_length": max_threadgroup_memory_length,
-            "gpu_family": _detect_gpu_family(dev),
-            # Metal does not expose DRAM clocks/bus width through the public API.
-            # We provide stable sentinel values for shared utility compatibility.
-            "mem_clock_rate": 0,
-            "mem_bus_width": 0,
-            "multiprocessor_count": 0,
+            "gpu_family": gpu_family,
+            "mem_clock_rate": mem_info["mem_clock_rate"],
+            "mem_bus_width": mem_info["mem_bus_width"],
+            "multiprocessor_count": mem_info["multiprocessor_count"],
         }
 
     def _load_metallib_handle(self, binary_bytes, metadata=None):
@@ -969,6 +969,57 @@ def _detect_gpu_family(device):
         return "apple7"
     else:
         return "apple8"  # Safe default for modern Apple Silicon
+
+
+# Publicly documented Apple Silicon memory specs.
+# mem_clock_rate is the base memory clock in kHz (Triton's bandwidth formula
+# applies a 2× DDR multiplier: BW = 2 * clock * bus_width / 8).
+# LPDDR4X-4266 base clock = 2133 MHz, LPDDR5-6400 = 3200 MHz,
+# LPDDR5X-7500 = 3750 MHz.
+_APPLE_GPU_SPECS = {
+    "m1":          {"mem_clock_rate": 2133000, "mem_bus_width": 128, "gpu_cores": 8},
+    "m1 pro":      {"mem_clock_rate": 3200000, "mem_bus_width": 256, "gpu_cores": 16},
+    "m1 max":      {"mem_clock_rate": 3200000, "mem_bus_width": 512, "gpu_cores": 32},
+    "m1 ultra":    {"mem_clock_rate": 3200000, "mem_bus_width": 1024, "gpu_cores": 64},
+    "m2":          {"mem_clock_rate": 3200000, "mem_bus_width": 128, "gpu_cores": 10},
+    "m2 pro":      {"mem_clock_rate": 3200000, "mem_bus_width": 256, "gpu_cores": 19},
+    "m2 max":      {"mem_clock_rate": 3200000, "mem_bus_width": 512, "gpu_cores": 38},
+    "m2 ultra":    {"mem_clock_rate": 3200000, "mem_bus_width": 1024, "gpu_cores": 76},
+    "m3":          {"mem_clock_rate": 3200000, "mem_bus_width": 128, "gpu_cores": 10},
+    "m3 pro":      {"mem_clock_rate": 3200000, "mem_bus_width": 192, "gpu_cores": 18},
+    "m3 max":      {"mem_clock_rate": 3200000, "mem_bus_width": 512, "gpu_cores": 40},
+    "m3 ultra":    {"mem_clock_rate": 3200000, "mem_bus_width": 1024, "gpu_cores": 80},
+    "m4":          {"mem_clock_rate": 3750000, "mem_bus_width": 128, "gpu_cores": 10},
+    "m4 pro":      {"mem_clock_rate": 3750000, "mem_bus_width": 256, "gpu_cores": 20},
+    "m4 max":      {"mem_clock_rate": 3750000, "mem_bus_width": 512, "gpu_cores": 40},
+}
+
+# Fallback specs by GPU family when exact chip isn't identified.
+_FAMILY_DEFAULTS = {
+    "apple7": {"mem_clock_rate": 2133000, "mem_bus_width": 128, "gpu_cores": 8},
+    "apple8": {"mem_clock_rate": 3200000, "mem_bus_width": 128, "gpu_cores": 10},
+    "apple9": {"mem_clock_rate": 3200000, "mem_bus_width": 128, "gpu_cores": 10},
+}
+
+
+def _gpu_memory_specs(gpu_family, device_name=""):
+    """Return memory clock rate (kHz), bus width (bits), and GPU core count."""
+    name_lower = device_name.lower()
+    # Check longer (more specific) chip names first to avoid partial matches.
+    for chip_key in sorted(_APPLE_GPU_SPECS, key=len, reverse=True):
+        if chip_key in name_lower:
+            specs = _APPLE_GPU_SPECS[chip_key]
+            return {
+                "mem_clock_rate": specs["mem_clock_rate"],
+                "mem_bus_width": specs["mem_bus_width"],
+                "multiprocessor_count": specs["gpu_cores"],
+            }
+    defaults = _FAMILY_DEFAULTS.get(gpu_family, _FAMILY_DEFAULTS["apple8"])
+    return {
+        "mem_clock_rate": defaults["mem_clock_rate"],
+        "mem_bus_width": defaults["mem_bus_width"],
+        "multiprocessor_count": defaults["gpu_cores"],
+    }
 
 
 class MetalLauncher:

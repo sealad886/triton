@@ -90,11 +90,11 @@ third_party/metal/
 
 ## GPU Family Mapping
 
-| Apple Silicon | GPU Family | Metal Feature Set |
-|--------------|------------|-------------------|
-| M1           | apple7     | Metal 2.4         |
-| M2           | apple8     | Metal 2.5         |
-| M3, M4       | apple9     | Metal 2.6+        |
+| Apple Silicon | GPU Family | Metal Feature Set | Notable Features |
+|--------------|------------|-------------------|------------------|
+| M1           | apple7     | Metal 2.4         | simdgroup matrix (f32, f16) |
+| M2           | apple8     | Metal 2.5         | simdgroup matrix (f32, f16) |
+| M3, M4       | apple9     | Metal 2.6+        | simdgroup matrix (f32, f16, bf16) |
 
 ## Usage
 
@@ -123,8 +123,13 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
   are handled, including fp8e5m2 compile-path lowering for casts and dot/matmul
   kernels. fp8 runtime numerics and broader quantized-path validation still
   require additional coverage.
-- **Tensor cores**: Apple's matrix multiply accelerator is not yet
-  integrated into the pass pipeline.
+- **Atomic operations**: `tt.atomic_rmw` is not yet legalized in the Metal
+  lowering pipeline. Kernels using `tl.atomic_add`, `tl.atomic_max`, etc.
+  will fail during compilation.
+- **Scan operations**: `tl.cumsum` and related scans hit an unsupported
+  `icmp samesign` predicate in the LLVM IR→MSL translator.
+- **Transpose**: `tl.trans` on 2D tensors generates vector-select LLVM IR
+  that the translator does not yet support.
 - **Cross-backend numerics**: deterministic CPU-reference comparisons are
   implemented for MPS and optional CUDA via a dedicated harness; HIP parity and
   CI-backed multi-backend coverage remain pending.
@@ -181,16 +186,37 @@ this silently degrades performance via memory spilling.
 - Coalesce global memory loads: access patterns where consecutive threads
   read consecutive addresses perform best on Apple GPUs.
 
-### Matrix multiplication
+### Matrix Multiplication
 
-The current implementation uses FMA (fused multiply-add) fallback for
-`tt.dot` operations by default. LLVM->MSL now supports a selectable simdgroup
-matmul strategy (`auto`/`native`/`fallback`) in the Metal backend translator,
-but pass-level `accelerate_matmul` integration is still not Metal-native. For
-now:
-- Use smaller tile sizes (e.g. 16×16 instead of 32×32).
-- `accelerate_matmul` is enabled in the pipeline but currently no-ops for
-  non-CUDA targets; `optimize_dot_operands` remains enabled.
+The Metal backend uses Apple's simdgroup matrix intrinsics for
+hardware-accelerated matrix multiplication. The `AccelerateMetalMatmul`
+pass (`TritonMetalGPUAccelerateMatmul`) converts `tt.DotOp` with
+`BlockedEncoding` to `MetalSimdgroupEncoding`, which the
+`MetalSimdgroupDot` lowering then emits as simdgroup load/store/MMA
+intrinsics.
+
+**Supported configurations:**
+
+| Operand Type | Accumulator | GPU Family | Notes |
+|-------------|-------------|------------|-------|
+| f32×f32     | f32         | apple7+    | Standard precision |
+| f16×f16     | f32         | apple7+    | Mixed-precision, best performance |
+| bf16×bf16   | f32         | apple9+    | M3/M4 only |
+
+Operand A and B must have the same element type. The accumulator is
+always f32. Matrices that don't meet the minimum size (16×16) or
+alignment (multiples of 8 in M, N, K) fall back to the FMA path.
+
+**Batched matmul** (rank-3 tensors) is supported: the lowering wraps
+the 2D simdgroup MMA in an outer batch loop indexed by the batch
+dimension.
+
+**Tuning recommendations:**
+- Use f16 operands with f32 accumulation for best throughput.
+- Block sizes of 16×16 are a good starting point; 32×32 is supported
+  given sufficient M, N dimensions.
+- The pipeline includes a prefetch pass for loop-carried data movement
+  optimization.
 
 ## Compatibility Notes
 
@@ -199,6 +225,9 @@ now:
 - **PyTorch 2.1+** for `torch.mps.compile_shader` support.
 - **Apple GPU family**: `apple7` (M1) minimum. `apple9` (M3/M4) required
   for bf16 support.
+- **Device properties**: per-chip memory bandwidth, clock rates, and GPU
+  core counts are reported via `get_device_properties()` for all M1–M4
+  and A-series chips.
 - See [compatibility-matrix.md](compatibility-matrix.md) for the
   full compatibility matrix.
 

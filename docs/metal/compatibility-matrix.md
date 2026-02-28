@@ -1,6 +1,6 @@
 # Metal Backend Compatibility Matrix
 
-Last updated: 2026-02-27
+Last updated: 2026-07-02
 
 ## Supported Configurations
 
@@ -14,24 +14,29 @@ Last updated: 2026-02-27
 
 ## GPU Family Feature Support
 
-| Feature | apple7 (M1) | apple8 (M2) | apple9 (M3) |
-|---------|-------------|-------------|-------------|
+| Feature | apple7 (M1) | apple8 (M2) | apple9 (M3/M4) |
+|---------|-------------|-------------|----------------|
 | fp32 compute | ✅ | ✅ | ✅ |
 | fp16 compute | ✅ | ✅ | ✅ |
 | bf16 compute | ❌ | ❌ | ✅ |
-| simdgroup_matrix | ✅ | ✅ | ✅ |
+| simdgroup_matrix (f32) | ✅ | ✅ | ✅ |
+| simdgroup_matrix (f16→f32) | ✅ | ✅ | ✅ |
+| simdgroup_matrix (bf16→f32) | ❌ | ❌ | ✅ |
+| Batched matmul (rank-3) | ✅ | ✅ | ✅ |
 | Shared memory (32KB) | ✅ | ✅ | ✅ |
 | Threadgroup size (1024) | ✅ | ✅ | ✅ |
+| Device property reporting | ✅ | ✅ | ✅ |
 
 ## Known Limitations
 
 | Limitation | Status | Workaround |
 |-----------|--------|------------|
-| Matmul uses generic FMA path (Metal-native simdgroup matmul acceleration added) | **Mitigated** | Metal-native matmul acceleration strategy with simdgroup dispatch added (`matmul_accel.py`); use `simdgroup_matmul_strategy=native` for simdgroup path |
-| `accelerate_matmul` is currently CUDA-only optimization and no-ops on Metal | **Mitigated** | Metal-specific matmul acceleration module provides equivalent strategy selection and tile dispatch |
+| Atomic operations (`tl.atomic_add`, etc.) | **Open** | Not yet legalized in Metal lowering |
+| Scan ops (`tl.cumsum`) hit unsupported `icmp samesign` | **Open** | Use explicit reduction loops |
+| Transpose (`tl.trans`) generates unsupported vector select | **Open** | Manual transpose via indexing |
 | Throughput guardrails across Apple7/8/9 are not yet automated | **Partial** | CI workflow includes throughput guardrail job stub; requires self-hosted Metal GPU runner |
 | fp8 and int8 matmul-class runtime validation | **Mitigated** | fp8e5m2 runtime matmul + int8 blocked matmul + boundary saturation tests added; FP8 software converters available |
-| Cross-backend CUDA/HIP numerical comparison harness is not yet in place | Open | Use deterministic CPU-reference validation |
+| Cross-backend CUDA/HIP numerical comparison harness is not yet in place | **Open** | Use deterministic CPU-reference validation |
 
 ## Execution Modes
 
@@ -43,10 +48,11 @@ Last updated: 2026-02-27
 
 ## Validated Branch Snapshot
 
-Validated on branch `feat/metal-support` (2026-02-27):
+Validated on branch `feat/metal-support` (2026-07-02):
 
-- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
-  - `337 passed, 1 skipped`
+- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py python/test/backend/test_ir_types.py`
+  - `531 passed, 5 skipped`
+  - Skipped: 2× atomic ops (not legalized), 1× scan/cumsum (`samesign` icmp), 1× transpose (vector select)
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
   - all smoke checks passed (including transfer/project/training harnesses in CPU and MPS modes)
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
