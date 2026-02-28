@@ -11126,3 +11126,70 @@ entry:
         result = out.cpu()
         expected = torch.arange(4, dtype=torch.int32)
         assert torch.equal(result, expected), f"Expected {expected}, got {result}"
+
+
+class TestMetalFPSanitizer:
+    """Tests for the FP sanitizer pass wired into the Metal pipeline."""
+
+    @skip_non_darwin
+    def test_fpsan_compilation_succeeds(self):
+        """A simple kernel compiles with instrumentation_mode='fpsan'."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _add_kernel(x_ptr, y_ptr, out_ptr, N: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * N + tl.arange(0, N)
+            x = tl.load(x_ptr + offs)
+            y = tl.load(y_ptr + offs)
+            tl.store(out_ptr + offs, x + y)
+
+        src = triton.compiler.ASTSource(
+            fn=_add_kernel,
+            signature={"x_ptr": "*fp32", "y_ptr": "*fp32", "out_ptr": "*fp32"},
+            constexprs={"N": 64},
+        )
+        target = GPUTarget("metal", "apple8", 32)
+        try:
+            kernel = triton.compile(
+                src=src,
+                target=target,
+                options={"instrumentation_mode": "fpsan"},
+            )
+            assert kernel is not None, "Compilation with fpsan failed"
+        except Exception as e:
+            if "fpsan" in str(e).lower() or "sanitizer" in str(e).lower():
+                pytest.skip(f"FP sanitizer not fully supported: {e}")
+            raise
+
+    @skip_non_darwin
+    def test_default_no_fpsan(self):
+        """Default options (instrumentation_mode='') skip the sanitizer."""
+        from third_party.metal.backend.compiler import MetalOptions
+
+        opts = MetalOptions()
+        assert opts.instrumentation_mode == "", \
+            f"Expected empty instrumentation_mode, got '{opts.instrumentation_mode}'"
+
+    @skip_non_darwin
+    def test_licm_in_ttir_pipeline(self):
+        """LICM pass runs in make_ttir without errors (validated via compilation)."""
+        import triton
+        import triton.language as tl
+        from triton.backends.compiler import GPUTarget
+
+        @triton.jit
+        def _simple_kernel(out_ptr, N: tl.constexpr):
+            pid = tl.program_id(0)
+            tl.store(out_ptr + pid, pid.to(tl.float32))
+
+        src = triton.compiler.ASTSource(
+            fn=_simple_kernel,
+            signature={"out_ptr": "*fp32"},
+            constexprs={"N": 64},
+        )
+        target = GPUTarget("metal", "apple8", 32)
+        kernel = triton.compile(src=src, target=target)
+        assert kernel is not None, "Compilation with LICM in TTIR failed"

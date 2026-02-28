@@ -1353,6 +1353,7 @@ class MetalBackend(BaseBackend):
         passes.ttir.add_combine(pm)
         passes.ttir.add_reorder_broadcast(pm)
         passes.common.add_cse(pm)
+        passes.ttir.add_triton_licm(pm)
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
         pm.run(mod, "make_ttir")
@@ -1380,6 +1381,8 @@ class MetalBackend(BaseBackend):
         passes.gluon.add_canonicalizer(pm)
         if hasattr(passes.ttgpuir, "add_combine_tensor_select_and_if"):
             passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+        if opt.instrumentation_mode == "fpsan":
+            passes.ttgpuir.add_fp_sanitizer(pm)
 
         pm.run(mod, "gluon_to_ttgir")
         if hasattr(mod, "get_tensordesc_metadata"):
@@ -1424,6 +1427,8 @@ class MetalBackend(BaseBackend):
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
         passes.common.add_canonicalizer(pm)
+        if opt.instrumentation_mode == "fpsan":
+            passes.ttgpuir.add_fp_sanitizer(pm)
         pm.run(mod, "make_ttgir")
         return mod
 
