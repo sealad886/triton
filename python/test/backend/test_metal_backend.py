@@ -5800,9 +5800,7 @@ class TestMetalRuntimeExecuteVerify:
         import triton.language as tl
 
         @triton.jit
-        def _atomic_add_kernel(
-            x_ptr, out_ptr, n, BLOCK: tl.constexpr
-        ):
+        def _atomic_add_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
             pid = tl.program_id(axis=0)
             offs = pid * BLOCK + tl.arange(0, BLOCK)
             mask = offs < n
@@ -5816,9 +5814,7 @@ class TestMetalRuntimeExecuteVerify:
         x_mps = x_cpu.to("mps")
         out_mps = torch.zeros((1,), device="mps", dtype=torch.float32)
 
-        _atomic_add_kernel[(triton.cdiv(n, 64),)](
-            x_mps, out_mps, n, BLOCK=64
-        )
+        _atomic_add_kernel[(triton.cdiv(n, 64),)](x_mps, out_mps, n, BLOCK=64)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5837,9 +5833,7 @@ class TestMetalRuntimeExecuteVerify:
         import triton.language as tl
 
         @triton.jit
-        def _bin_atomic_add(
-            vals_ptr, bins_ptr, out_ptr, n, BLOCK: tl.constexpr
-        ):
+        def _bin_atomic_add(vals_ptr, bins_ptr, out_ptr, n, BLOCK: tl.constexpr):
             pid = tl.program_id(axis=0)
             offs = pid * BLOCK + tl.arange(0, BLOCK)
             mask = offs < n
@@ -5856,9 +5850,7 @@ class TestMetalRuntimeExecuteVerify:
         bins_mps = bins_cpu.to("mps")
         out_mps = torch.zeros((num_bins,), device="mps", dtype=torch.float32)
 
-        _bin_atomic_add[(triton.cdiv(n, 64),)](
-            vals_mps, bins_mps, out_mps, n, BLOCK=64
-        )
+        _bin_atomic_add[(triton.cdiv(n, 64),)](vals_mps, bins_mps, out_mps, n, BLOCK=64)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5977,7 +5969,13 @@ class TestMetalRuntimeExecuteVerify:
 
         @triton.jit
         def _reduce_sum_2d(
-            x_ptr, out_ptr, rows, cols, stride, BLOCK_R: tl.constexpr, BLOCK_C: tl.constexpr
+            x_ptr,
+            out_ptr,
+            rows,
+            cols,
+            stride,
+            BLOCK_R: tl.constexpr,
+            BLOCK_C: tl.constexpr,
         ):
             pid = tl.program_id(axis=0)
             offs_r = tl.arange(0, BLOCK_R)
@@ -6053,9 +6051,7 @@ class TestMetalRuntimeExecuteVerify:
         import triton.language as tl
 
         @triton.jit
-        def _where_kernel(
-            cond_ptr, a_ptr, b_ptr, out_ptr, n, BLOCK: tl.constexpr
-        ):
+        def _where_kernel(cond_ptr, a_ptr, b_ptr, out_ptr, n, BLOCK: tl.constexpr):
             pid = tl.program_id(axis=0)
             offs = pid * BLOCK + tl.arange(0, BLOCK)
             mask = offs < n
@@ -6172,9 +6168,7 @@ class TestMetalRuntimeExecuteVerify:
         abs_mps = torch.empty_like(x_mps)
         neg_mps = torch.empty_like(x_mps)
 
-        _abs_neg_kernel[(triton.cdiv(n, 128),)](
-            x_mps, abs_mps, neg_mps, n, BLOCK=128
-        )
+        _abs_neg_kernel[(triton.cdiv(n, 128),)](x_mps, abs_mps, neg_mps, n, BLOCK=128)
         torch.mps.synchronize()
         abs_cpu = abs_mps.cpu()
         neg_cpu = neg_mps.cpu()
@@ -6196,9 +6190,16 @@ class TestMetalRuntimeExecuteVerify:
 
         @triton.jit
         def _transpose(
-            x_ptr, out_ptr, rows, cols, stride_xr, stride_xc,
-            stride_or, stride_oc,
-            BLOCK_R: tl.constexpr, BLOCK_C: tl.constexpr,
+            x_ptr,
+            out_ptr,
+            rows,
+            cols,
+            stride_xr,
+            stride_xc,
+            stride_or,
+            stride_oc,
+            BLOCK_R: tl.constexpr,
+            BLOCK_C: tl.constexpr,
         ):
             pid_r = tl.program_id(axis=0)
             pid_c = tl.program_id(axis=1)
@@ -6207,7 +6208,8 @@ class TestMetalRuntimeExecuteVerify:
             mask = (offs_r[:, None] < rows) & (offs_c[None, :] < cols)
             x = tl.load(
                 x_ptr + offs_r[:, None] * stride_xr + offs_c[None, :] * stride_xc,
-                mask=mask, other=0.0,
+                mask=mask,
+                other=0.0,
             )
             tl.store(
                 out_ptr + offs_c[:, None] * stride_or + offs_r[None, :] * stride_oc,
@@ -6222,10 +6224,16 @@ class TestMetalRuntimeExecuteVerify:
         out_mps = torch.empty((cols, rows), device="mps", dtype=torch.float32)
 
         _transpose[(triton.cdiv(rows, 16), triton.cdiv(cols, 16), 1)](
-            x_mps, out_mps, rows, cols,
-            x_mps.stride(0), x_mps.stride(1),
-            out_mps.stride(0), out_mps.stride(1),
-            BLOCK_R=16, BLOCK_C=16,
+            x_mps,
+            out_mps,
+            rows,
+            cols,
+            x_mps.stride(0),
+            x_mps.stride(1),
+            out_mps.stride(0),
+            out_mps.stride(1),
+            BLOCK_R=16,
+            BLOCK_C=16,
         )
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
@@ -6247,12 +6255,21 @@ class TestMetalRuntimeExecuteVerify:
 
         @triton.jit
         def _matmul_f16_f32_accum(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6263,12 +6280,16 @@ class TestMetalRuntimeExecuteVerify:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -6288,12 +6309,21 @@ class TestMetalRuntimeExecuteVerify:
         c_mps = torch.empty((m, n), device="mps", dtype=torch.float32)
 
         _matmul_f16_f32_accum[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
-            a_mps, b_mps, c_mps,
-            m, n, k,
-            a_mps.stride(0), a_mps.stride(1),
-            b_mps.stride(0), b_mps.stride(1),
-            c_mps.stride(0), c_mps.stride(1),
-            BLOCK_M=16, BLOCK_N=16, BLOCK_K=16,
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=16,
         )
         torch.mps.synchronize()
         c_cpu = c_mps.cpu()
@@ -6313,12 +6343,21 @@ class TestMetalRuntimeExecuteVerify:
 
         @triton.jit
         def _matmul_f16_f32(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6329,12 +6368,16 @@ class TestMetalRuntimeExecuteVerify:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -6352,12 +6395,21 @@ class TestMetalRuntimeExecuteVerify:
         c_mps = torch.empty((m, n), device="mps", dtype=torch.float32)
 
         _matmul_f16_f32[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
-            a_mps, b_mps, c_mps,
-            m, n, k,
-            a_mps.stride(0), a_mps.stride(1),
-            b_mps.stride(0), b_mps.stride(1),
-            c_mps.stride(0), c_mps.stride(1),
-            BLOCK_M=16, BLOCK_N=16, BLOCK_K=16,
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=16,
         )
         torch.mps.synchronize()
         c_cpu = c_mps.cpu()
@@ -6382,12 +6434,21 @@ class TestMetalRuntimeExecuteVerify:
 
         @triton.jit
         def _matmul_bf16_f32(
-            a_ptr, b_ptr, c_ptr,
-            m, n, k,
-            stride_am, stride_ak,
-            stride_bk, stride_bn,
-            stride_cm, stride_cn,
-            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            m,
+            n,
+            k,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
         ):
             pid_m = tl.program_id(axis=0)
             pid_n = tl.program_id(axis=1)
@@ -6398,12 +6459,16 @@ class TestMetalRuntimeExecuteVerify:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -6421,12 +6486,21 @@ class TestMetalRuntimeExecuteVerify:
         c_mps = torch.empty((m, n), device="mps", dtype=torch.float32)
 
         _matmul_bf16_f32[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
-            a_mps, b_mps, c_mps,
-            m, n, k,
-            a_mps.stride(0), a_mps.stride(1),
-            b_mps.stride(0), b_mps.stride(1),
-            c_mps.stride(0), c_mps.stride(1),
-            BLOCK_M=16, BLOCK_N=16, BLOCK_K=16,
+            a_mps,
+            b_mps,
+            c_mps,
+            m,
+            n,
+            k,
+            a_mps.stride(0),
+            a_mps.stride(1),
+            b_mps.stride(0),
+            b_mps.stride(1),
+            c_mps.stride(0),
+            c_mps.stride(1),
+            BLOCK_M=16,
+            BLOCK_N=16,
+            BLOCK_K=16,
         )
         torch.mps.synchronize()
         c_cpu = c_mps.cpu()
@@ -6460,9 +6534,7 @@ class TestMetalRuntimeExecuteVerify:
         x_mps = x_cpu.to("mps")
         out_mps = torch.empty_like(x_mps)
 
-        _cast_f32_f16_f32[(triton.cdiv(n, 256),)](
-            x_mps, out_mps, n, BLOCK=256
-        )
+        _cast_f32_f16_f32[(triton.cdiv(n, 256),)](x_mps, out_mps, n, BLOCK=256)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -6501,9 +6573,7 @@ class TestMetalRuntimeExecuteVerify:
         c_mps = c_cpu.to("mps")
         out_mps = torch.empty_like(a_mps)
 
-        _fma_kernel[(triton.cdiv(n, 256),)](
-            a_mps, b_mps, c_mps, out_mps, n, BLOCK=256
-        )
+        _fma_kernel[(triton.cdiv(n, 256),)](a_mps, b_mps, c_mps, out_mps, n, BLOCK=256)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -6523,9 +6593,7 @@ class TestMetalRuntimeExecuteVerify:
         import triton.language as tl
 
         @triton.jit
-        def _mean_var(
-            x_ptr, mean_ptr, var_ptr, n_cols, BLOCK: tl.constexpr
-        ):
+        def _mean_var(x_ptr, mean_ptr, var_ptr, n_cols, BLOCK: tl.constexpr):
             pid = tl.program_id(axis=0)
             offs = tl.arange(0, BLOCK)
             mask = offs < n_cols
