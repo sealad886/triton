@@ -325,6 +325,8 @@ def _emit_call(ctx: "TranslatorContext", inst: _Call) -> bool:
         ctx.emit(f"{out} = simd_shuffle_down({args[0]}, {args[1]});")
     elif fn == "__metal_simd_shuffle" and len(args) == 2:
         ctx.emit(f"{out} = simd_shuffle({args[0]}, {args[1]});")
+    elif fn in ("__metal_mulhi_u32", "__metal_mulhi_u64") and len(args) == 2:
+        ctx.emit(f"{out} = mulhi({args[0]}, {args[1]});")
     elif fn.startswith("__metal_simdgroup_load_tg") and len(args) == 2:
         elem_ty = ctx.simdgroup_elem_for_msl_value(out)
         if ctx.use_native_simdgroup:
@@ -1800,7 +1802,9 @@ class MetalBackend(BaseBackend):
                     vec_m = re.match(r"<\s*(\d+)\s+x", inst.llvm_ty)
                     if vec_m:
                         width = int(vec_m.group(1))
-                        ctx.record_ssa_decl(inst.out_ssa, msl_ty=f"bool{width}" if width > 1 else "bool")
+                        ctx.record_ssa_decl(
+                            inst.out_ssa, msl_ty=f"bool{width}" if width > 1 else "bool"
+                        )
                     else:
                         ctx.record_ssa_decl(inst.out_ssa, msl_ty="bool")
 

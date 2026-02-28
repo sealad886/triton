@@ -11303,3 +11303,866 @@ class TestMetalRegisterReporting:
         # in the load_binary return tuple. Test the estimate boundary:
         assert _estimate_registers_from_occupancy(1024, 1024) == 0
         assert _estimate_registers_from_occupancy(0, 1024) == 256
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Phase 13 — Test Coverage Expansion
+# ══════════════════════════════════════════════════════════════════════
+
+
+class TestMetalHistogram:
+    """Test tl.histogram runtime correctness on Metal."""
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_histogram_basic(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _histogram(input_ptr, output_ptr, N: tl.constexpr, NUM_BINS: tl.constexpr):
+            offs = tl.arange(0, N)
+            vals = tl.load(input_ptr + offs)
+            hist = tl.histogram(vals, NUM_BINS)
+            tl.store(output_ptr + tl.arange(0, NUM_BINS), hist)
+
+        N, NUM_BINS = 128, 8
+        x = torch.randint(0, NUM_BINS, (N,), dtype=torch.int32, device="mps")
+        out = torch.zeros(NUM_BINS, dtype=torch.int32, device="mps")
+        _histogram[(1,)](x, out, N=N, NUM_BINS=NUM_BINS)
+        torch.mps.synchronize()
+
+        expected = torch.histc(x.float().cpu(), bins=NUM_BINS, min=0, max=NUM_BINS - 1).int()
+        assert torch.equal(out.cpu(), expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_histogram_all_same_bin(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _histogram(input_ptr, output_ptr, N: tl.constexpr, NUM_BINS: tl.constexpr):
+            offs = tl.arange(0, N)
+            vals = tl.load(input_ptr + offs)
+            hist = tl.histogram(vals, NUM_BINS)
+            tl.store(output_ptr + tl.arange(0, NUM_BINS), hist)
+
+        N, NUM_BINS = 64, 4
+        x = torch.full((N,), 2, dtype=torch.int32, device="mps")
+        out = torch.zeros(NUM_BINS, dtype=torch.int32, device="mps")
+        _histogram[(1,)](x, out, N=N, NUM_BINS=NUM_BINS)
+        torch.mps.synchronize()
+
+        expected = torch.tensor([0, 0, N, 0], dtype=torch.int32)
+        assert torch.equal(out.cpu(), expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_histogram_with_mask(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _histogram_masked(input_ptr, output_ptr, n_elements, N: tl.constexpr, NUM_BINS: tl.constexpr):
+            offs = tl.arange(0, N)
+            mask = offs < n_elements
+            vals = tl.load(input_ptr + offs, mask=mask, other=0)
+            hist = tl.histogram(vals, NUM_BINS, mask=mask)
+            tl.store(output_ptr + tl.arange(0, NUM_BINS), hist)
+
+        N, NUM_BINS = 128, 4
+        n_elements = 80
+        x = torch.randint(0, NUM_BINS, (N,), dtype=torch.int32, device="mps")
+        out = torch.zeros(NUM_BINS, dtype=torch.int32, device="mps")
+        _histogram_masked[(1,)](x, out, n_elements, N=N, NUM_BINS=NUM_BINS)
+        torch.mps.synchronize()
+
+        x_cpu = x.cpu()[:n_elements]
+        expected = torch.histc(x_cpu.float(), bins=NUM_BINS, min=0, max=NUM_BINS - 1).int()
+        assert torch.equal(out.cpu(), expected)
+
+
+class TestMetalJoinSplitInterleave:
+    """Test tl.join, tl.split, tl.interleave on Metal."""
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_join_1d(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _join(a_ptr, b_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            a = tl.load(a_ptr + offs)
+            b = tl.load(b_ptr + offs)
+            c = tl.join(a, b)
+            # c has shape (N, 2) — store with 2D indexing
+            tl.store(out_ptr + offs[:, None] * 2 + tl.arange(0, 2)[None, :], c)
+
+        N = 64
+        a = torch.arange(0, N, dtype=torch.float32, device="mps")
+        b = torch.arange(N, 2 * N, dtype=torch.float32, device="mps")
+        out = torch.empty(N * 2, dtype=torch.float32, device="mps")
+        _join[(1,)](a, b, out, N=N)
+        torch.mps.synchronize()
+
+        expected = torch.stack([a.cpu(), b.cpu()], dim=1).reshape(-1)
+        assert torch.equal(out.cpu(), expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_split_2d(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _split(input_ptr, out_a_ptr, out_b_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            # Load as (N, 2) then split
+            data = tl.load(input_ptr + offs[:, None] * 2 + tl.arange(0, 2)[None, :])
+            a, b = tl.split(data)
+            tl.store(out_a_ptr + offs, a)
+            tl.store(out_b_ptr + offs, b)
+
+        N = 64
+        data = torch.arange(0, N * 2, dtype=torch.float32, device="mps")
+        out_a = torch.empty(N, dtype=torch.float32, device="mps")
+        out_b = torch.empty(N, dtype=torch.float32, device="mps")
+        _split[(1,)](data, out_a, out_b, N=N)
+        torch.mps.synchronize()
+
+        data_cpu = data.cpu().reshape(N, 2)
+        assert torch.equal(out_a.cpu(), data_cpu[:, 0])
+        assert torch.equal(out_b.cpu(), data_cpu[:, 1])
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_interleave(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _interleave(a_ptr, b_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            a = tl.load(a_ptr + offs)
+            b = tl.load(b_ptr + offs)
+            c = tl.interleave(a, b)
+            tl.store(out_ptr + tl.arange(0, 2 * N), c)
+
+        N = 64
+        a = torch.arange(0, N, dtype=torch.float32, device="mps")
+        b = torch.arange(N, 2 * N, dtype=torch.float32, device="mps")
+        out = torch.empty(2 * N, dtype=torch.float32, device="mps")
+        _interleave[(1,)](a, b, out, N=N)
+        torch.mps.synchronize()
+
+        expected = torch.stack([a.cpu(), b.cpu()], dim=-1).reshape(-1)
+        assert torch.equal(out.cpu(), expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_join_split_roundtrip(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _roundtrip(a_ptr, b_ptr, out_a_ptr, out_b_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            a = tl.load(a_ptr + offs)
+            b = tl.load(b_ptr + offs)
+            joined = tl.join(a, b)
+            ra, rb = tl.split(joined)
+            tl.store(out_a_ptr + offs, ra)
+            tl.store(out_b_ptr + offs, rb)
+
+        N = 64
+        a = torch.randn(N, dtype=torch.float32, device="mps")
+        b = torch.randn(N, dtype=torch.float32, device="mps")
+        out_a = torch.empty(N, dtype=torch.float32, device="mps")
+        out_b = torch.empty(N, dtype=torch.float32, device="mps")
+        _roundtrip[(1,)](a, b, out_a, out_b, N=N)
+        torch.mps.synchronize()
+
+        assert torch.equal(out_a.cpu(), a.cpu())
+        assert torch.equal(out_b.cpu(), b.cpu())
+
+
+class TestMetalCat:
+    """Test tl.cat on Metal."""
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_cat_1d(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _cat(a_ptr, b_ptr, out_ptr, N: tl.constexpr):
+            offs_a = tl.arange(0, N)
+            offs_b = tl.arange(0, N)
+            a = tl.load(a_ptr + offs_a)
+            b = tl.load(b_ptr + offs_b)
+            c = tl.cat(a, b)
+            tl.store(out_ptr + tl.arange(0, 2 * N), c)
+
+        N = 64
+        a = torch.arange(0, N, dtype=torch.float32, device="mps")
+        b = torch.arange(N, 2 * N, dtype=torch.float32, device="mps")
+        out = torch.empty(2 * N, dtype=torch.float32, device="mps")
+        _cat[(1,)](a, b, out, N=N)
+        torch.mps.synchronize()
+
+        expected = torch.cat([a.cpu(), b.cpu()])
+        assert torch.equal(out.cpu(), expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_cat_reorder_reduction(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _cat_sum(a_ptr, b_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            a = tl.load(a_ptr + offs)
+            b = tl.load(b_ptr + offs)
+            c = tl.cat(a, b, can_reorder=True)
+            s = tl.sum(c, axis=0)
+            tl.store(out_ptr, s)
+
+        N = 128
+        a = torch.ones(N, dtype=torch.float32, device="mps")
+        b = torch.ones(N, dtype=torch.float32, device="mps") * 2
+        out = torch.zeros(1, dtype=torch.float32, device="mps")
+        _cat_sum[(1,)](a, b, out, N=N)
+        torch.mps.synchronize()
+
+        expected = N * 1.0 + N * 2.0
+        assert abs(out.cpu().item() - expected) < 1e-3
+
+
+class TestMetal3DGrid:
+    """Test 3D grid launch and tl.program_id(axis) for axis=0,1,2."""
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_3d_grid_program_ids(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _ids(out_ptr, G0: tl.constexpr, G1: tl.constexpr, G2: tl.constexpr):
+            pid0 = tl.program_id(0)
+            pid1 = tl.program_id(1)
+            pid2 = tl.program_id(2)
+            idx = pid0 * G1 * G2 + pid1 * G2 + pid2
+            tl.store(out_ptr + idx * 3, pid0)
+            tl.store(out_ptr + idx * 3 + 1, pid1)
+            tl.store(out_ptr + idx * 3 + 2, pid2)
+
+        G0, G1, G2 = 3, 4, 2
+        total = G0 * G1 * G2
+        out = torch.zeros(total * 3, dtype=torch.int32, device="mps")
+        _ids[(G0, G1, G2)](out, G0=G0, G1=G1, G2=G2)
+        torch.mps.synchronize()
+
+        result = out.cpu().reshape(total, 3)
+        for i in range(G0):
+            for j in range(G1):
+                for k in range(G2):
+                    idx = i * G1 * G2 + j * G2 + k
+                    assert result[idx, 0].item() == i
+                    assert result[idx, 1].item() == j
+                    assert result[idx, 2].item() == k
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_3d_matmul_batch(self):
+        """3D grid: batch dimension on axis 2."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _bmm(
+            a_ptr, b_ptr, c_ptr,
+            M, N, K,
+            stride_ab, stride_am, stride_ak,
+            stride_bb, stride_bk, stride_bn,
+            stride_cb, stride_cm, stride_cn,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        ):
+            pid_m = tl.program_id(0)
+            pid_n = tl.program_id(1)
+            batch = tl.program_id(2)
+            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, K, BLOCK_K):
+                a = tl.load(
+                    a_ptr + batch * stride_ab
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
+                    mask=(offs_m[:, None] < M) & (offs_k[None, :] + kk < K),
+                    other=0.0,
+                )
+                b = tl.load(
+                    b_ptr + batch * stride_bb
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
+                    mask=(offs_k[:, None] + kk < K) & (offs_n[None, :] < N),
+                    other=0.0,
+                )
+                acc += tl.dot(a, b)
+
+            c_ptrs = (
+                c_ptr + batch * stride_cb
+                + offs_m[:, None] * stride_cm
+                + offs_n[None, :] * stride_cn
+            )
+            tl.store(c_ptrs, acc, mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
+
+        torch.manual_seed(42)
+        B, M, N, K = 3, 32, 32, 16
+        BM, BN, BK = 16, 16, 16
+        a_cpu = torch.randn((B, M, K), dtype=torch.float32)
+        b_cpu = torch.randn((B, K, N), dtype=torch.float32)
+        a_mps = a_cpu.to("mps")
+        b_mps = b_cpu.to("mps")
+        c_mps = torch.empty((B, M, N), dtype=torch.float32, device="mps")
+
+        grid = (triton.cdiv(M, BM), triton.cdiv(N, BN), B)
+        _bmm[grid](
+            a_mps, b_mps, c_mps,
+            M, N, K,
+            a_mps.stride(0), a_mps.stride(1), a_mps.stride(2),
+            b_mps.stride(0), b_mps.stride(1), b_mps.stride(2),
+            c_mps.stride(0), c_mps.stride(1), c_mps.stride(2),
+            BLOCK_M=BM, BLOCK_N=BN, BLOCK_K=BK,
+        )
+        torch.mps.synchronize()
+
+        expected = torch.bmm(a_cpu, b_cpu)
+        assert torch.allclose(c_mps.cpu(), expected, atol=1e-3, rtol=1e-3)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_num_programs_all_axes(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _nprog(out_ptr):
+            np0 = tl.num_programs(0)
+            np1 = tl.num_programs(1)
+            np2 = tl.num_programs(2)
+            pid = tl.program_id(0)
+            tl.store(out_ptr + pid * 3, np0)
+            tl.store(out_ptr + pid * 3 + 1, np1)
+            tl.store(out_ptr + pid * 3 + 2, np2)
+
+        G0, G1, G2 = 5, 7, 3
+        out = torch.zeros(G0 * 3, dtype=torch.int32, device="mps")
+        _nprog[(G0, G1, G2)](out)
+        torch.mps.synchronize()
+
+        result = out.cpu().reshape(G0, 3)
+        for i in range(G0):
+            assert result[i, 0].item() == G0
+            assert result[i, 1].item() == G1
+            assert result[i, 2].item() == G2
+
+
+class TestMetalClampPropagateNan:
+    """Test tl.clamp and propagate_nan semantics on Metal."""
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_clamp_basic(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _clamp(x_ptr, out_ptr, lo, hi, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            x = tl.load(x_ptr + offs)
+            c = tl.clamp(x, lo, hi)
+            tl.store(out_ptr + offs, c)
+
+        N = 128
+        x = torch.randn(N, dtype=torch.float32, device="mps") * 10
+        out = torch.empty(N, dtype=torch.float32, device="mps")
+        _clamp[(1,)](x, out, -2.0, 2.0, N=N)
+        torch.mps.synchronize()
+
+        expected = torch.clamp(x.cpu(), -2.0, 2.0)
+        assert torch.allclose(out.cpu(), expected, atol=1e-6)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_clamp_symmetric(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _clamp_sym(x_ptr, out_ptr, limit, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            x = tl.load(x_ptr + offs)
+            c = tl.clamp(x, -limit, limit)
+            tl.store(out_ptr + offs, c)
+
+        N = 256
+        x = torch.randn(N, dtype=torch.float32, device="mps") * 5
+        out = torch.empty(N, dtype=torch.float32, device="mps")
+        _clamp_sym[(1,)](x, out, 1.5, N=N)
+        torch.mps.synchronize()
+
+        expected = torch.clamp(x.cpu(), -1.5, 1.5)
+        assert torch.allclose(out.cpu(), expected, atol=1e-6)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_propagate_nan_minimum(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _min_nan(a_ptr, b_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            a = tl.load(a_ptr + offs)
+            b = tl.load(b_ptr + offs)
+            result = tl.minimum(a, b, propagate_nan=tl.PropagateNan.ALL)
+            tl.store(out_ptr + offs, result)
+
+        N = 64
+        a = torch.tensor([1.0, float("nan"), 3.0, float("nan")] * (N // 4), device="mps")
+        b = torch.tensor([2.0, 2.0, float("nan"), float("nan")] * (N // 4), device="mps")
+        out = torch.empty(N, dtype=torch.float32, device="mps")
+        _min_nan[(1,)](a, b, out, N=N)
+        torch.mps.synchronize()
+
+        result = out.cpu()
+        a_cpu, b_cpu = a.cpu(), b.cpu()
+        for i in range(N):
+            if torch.isnan(a_cpu[i]) or torch.isnan(b_cpu[i]):
+                assert torch.isnan(result[i]), f"Expected NaN at index {i}"
+            else:
+                assert result[i].item() == min(a_cpu[i].item(), b_cpu[i].item())
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_propagate_nan_maximum(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _max_nan(a_ptr, b_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            a = tl.load(a_ptr + offs)
+            b = tl.load(b_ptr + offs)
+            result = tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
+            tl.store(out_ptr + offs, result)
+
+        N = 64
+        a = torch.tensor([1.0, float("nan"), 3.0, float("nan")] * (N // 4), device="mps")
+        b = torch.tensor([2.0, 2.0, float("nan"), float("nan")] * (N // 4), device="mps")
+        out = torch.empty(N, dtype=torch.float32, device="mps")
+        _max_nan[(1,)](a, b, out, N=N)
+        torch.mps.synchronize()
+
+        result = out.cpu()
+        a_cpu, b_cpu = a.cpu(), b.cpu()
+        for i in range(N):
+            if torch.isnan(a_cpu[i]) or torch.isnan(b_cpu[i]):
+                assert torch.isnan(result[i]), f"Expected NaN at index {i}"
+            else:
+                assert result[i].item() == max(a_cpu[i].item(), b_cpu[i].item())
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_clamp_propagate_nan_all(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _clamp_nan(x_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            x = tl.load(x_ptr + offs)
+            c = tl.clamp(x, -1.0, 1.0, propagate_nan=tl.PropagateNan.ALL)
+            tl.store(out_ptr + offs, c)
+
+        N = 64
+        x = torch.tensor([0.5, float("nan"), -0.5, 2.0] * (N // 4), device="mps")
+        out = torch.empty(N, dtype=torch.float32, device="mps")
+        _clamp_nan[(1,)](x, out, N=N)
+        torch.mps.synchronize()
+
+        result = out.cpu()
+        x_cpu = x.cpu()
+        for i in range(N):
+            if torch.isnan(x_cpu[i]):
+                assert torch.isnan(result[i]), f"Expected NaN at index {i}"
+            else:
+                expected_val = max(-1.0, min(1.0, x_cpu[i].item()))
+                assert abs(result[i].item() - expected_val) < 1e-6
+
+
+class TestMetalProgramIdNumPrograms:
+    """Comprehensive tests for tl.program_id and tl.num_programs on Metal."""
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_program_id_axis0_only(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _pid0(out_ptr, N: tl.constexpr):
+            pid = tl.program_id(0)
+            tl.store(out_ptr + pid, pid)
+
+        N = 16
+        out = torch.full((N,), -1, dtype=torch.int32, device="mps")
+        _pid0[(N,)](out, N=N)
+        torch.mps.synchronize()
+
+        expected = torch.arange(N, dtype=torch.int32)
+        assert torch.equal(out.cpu(), expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_program_id_2d_grid(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _pid2d(out_ptr, G0: tl.constexpr, G1: tl.constexpr):
+            pid0 = tl.program_id(0)
+            pid1 = tl.program_id(1)
+            idx = pid0 * G1 + pid1
+            tl.store(out_ptr + idx * 2, pid0)
+            tl.store(out_ptr + idx * 2 + 1, pid1)
+
+        G0, G1 = 4, 8
+        out = torch.zeros(G0 * G1 * 2, dtype=torch.int32, device="mps")
+        _pid2d[(G0, G1)](out, G0=G0, G1=G1)
+        torch.mps.synchronize()
+
+        result = out.cpu().reshape(G0 * G1, 2)
+        for i in range(G0):
+            for j in range(G1):
+                idx = i * G1 + j
+                assert result[idx, 0].item() == i
+                assert result[idx, 1].item() == j
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_num_programs_matches_grid(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _check_nprog(out_ptr, expected0, expected1, expected2):
+            pid = tl.program_id(0)
+            if pid == 0:
+                tl.store(out_ptr + 0, tl.num_programs(0))
+                tl.store(out_ptr + 1, tl.num_programs(1))
+                tl.store(out_ptr + 2, tl.num_programs(2))
+
+        out = torch.zeros(3, dtype=torch.int32, device="mps")
+        _check_nprog[(10, 20, 5)](out, 10, 20, 5)
+        torch.mps.synchronize()
+
+        result = out.cpu()
+        assert result[0].item() == 10
+        assert result[1].item() == 20
+        assert result[2].item() == 5
+
+
+class TestMetalRNG:
+    """Test random number generation (Philox CBRNG) on Metal."""
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_rand_uniform_range(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _rand(seed, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            r = tl.rand(seed, offs)
+            tl.store(out_ptr + offs, r)
+
+        N = 1024
+        out = torch.empty(N, dtype=torch.float32, device="mps")
+        _rand[(1,)](12345, out, N=N)
+        torch.mps.synchronize()
+
+        result = out.cpu()
+        assert (result >= 0.0).all(), "rand() produced values < 0"
+        assert (result < 1.0).all(), "rand() produced values >= 1"
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_rand_different_seeds(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _rand(seed, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            r = tl.rand(seed, offs)
+            tl.store(out_ptr + offs, r)
+
+        N = 256
+        out1 = torch.empty(N, dtype=torch.float32, device="mps")
+        out2 = torch.empty(N, dtype=torch.float32, device="mps")
+        _rand[(1,)](42, out1, N=N)
+        _rand[(1,)](43, out2, N=N)
+        torch.mps.synchronize()
+
+        assert not torch.equal(out1.cpu(), out2.cpu()), "Different seeds should produce different values"
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_rand_deterministic(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _rand(seed, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            r = tl.rand(seed, offs)
+            tl.store(out_ptr + offs, r)
+
+        N = 256
+        out1 = torch.empty(N, dtype=torch.float32, device="mps")
+        out2 = torch.empty(N, dtype=torch.float32, device="mps")
+        _rand[(1,)](99, out1, N=N)
+        _rand[(1,)](99, out2, N=N)
+        torch.mps.synchronize()
+
+        assert torch.equal(out1.cpu(), out2.cpu()), "Same seed should produce identical values"
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_randn_normal_distribution(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _randn(seed, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            r = tl.randn(seed, offs)
+            tl.store(out_ptr + offs, r)
+
+        N = 4096
+        out = torch.empty(N, dtype=torch.float32, device="mps")
+        _randn[(1,)](7, out, N=N)
+        torch.mps.synchronize()
+
+        result = out.cpu()
+        # For N=4096 from N(0,1), mean ~0, std ~1 with generous tolerance
+        assert abs(result.mean().item()) < 0.15, f"Mean {result.mean().item()} too far from 0"
+        assert abs(result.std().item() - 1.0) < 0.15, f"Std {result.std().item()} too far from 1"
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_randint_range(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _randint(seed, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            r = tl.randint(seed, offs)
+            tl.store(out_ptr + offs, r)
+
+        N = 1024
+        out = torch.empty(N, dtype=torch.int32, device="mps")
+        _randint[(1,)](555, out, N=N)
+        torch.mps.synchronize()
+
+        result = out.cpu()
+        # randint returns int32 — should have variety
+        unique_count = len(torch.unique(result))
+        assert unique_count > N // 2, f"Too few unique values: {unique_count}/{N}"
+
+
+class TestMetalTypeConversion:
+    """Test tl.cast / .to() type conversions on Metal."""
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_cast_f32_to_f16(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _cast(x_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            x = tl.load(x_ptr + offs)
+            y = x.to(tl.float16)
+            tl.store(out_ptr + offs, y)
+
+        N = 256
+        x = torch.randn(N, dtype=torch.float32, device="mps")
+        out = torch.empty(N, dtype=torch.float16, device="mps")
+        _cast[(1,)](x, out, N=N)
+        torch.mps.synchronize()
+
+        expected = x.cpu().half()
+        assert torch.allclose(out.cpu().float(), expected.float(), atol=1e-3)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_cast_f16_to_f32(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _cast(x_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            x = tl.load(x_ptr + offs)
+            y = x.to(tl.float32)
+            tl.store(out_ptr + offs, y)
+
+        N = 256
+        x = torch.randn(N, dtype=torch.float16, device="mps")
+        out = torch.empty(N, dtype=torch.float32, device="mps")
+        _cast[(1,)](x, out, N=N)
+        torch.mps.synchronize()
+
+        expected = x.cpu().float()
+        assert torch.allclose(out.cpu(), expected, atol=1e-6)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_cast_int32_to_float32(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _cast(x_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            x = tl.load(x_ptr + offs)
+            y = x.to(tl.float32)
+            tl.store(out_ptr + offs, y)
+
+        N = 128
+        x = torch.arange(-64, 64, dtype=torch.int32, device="mps")
+        out = torch.empty(N, dtype=torch.float32, device="mps")
+        _cast[(1,)](x, out, N=N)
+        torch.mps.synchronize()
+
+        expected = x.cpu().float()
+        assert torch.equal(out.cpu(), expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_cast_float32_to_int32(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _cast(x_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            x = tl.load(x_ptr + offs)
+            y = x.to(tl.int32)
+            tl.store(out_ptr + offs, y)
+
+        N = 128
+        x = torch.linspace(-10.0, 10.0, N, dtype=torch.float32, device="mps")
+        out = torch.empty(N, dtype=torch.int32, device="mps")
+        _cast[(1,)](x, out, N=N)
+        torch.mps.synchronize()
+
+        expected = x.cpu().int()
+        assert torch.equal(out.cpu(), expected)
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_cast_bf16_to_f32_roundtrip(self):
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _rt(x_ptr, out_ptr, N: tl.constexpr):
+            offs = tl.arange(0, N)
+            x = tl.load(x_ptr + offs)
+            y = x.to(tl.bfloat16)
+            z = y.to(tl.float32)
+            tl.store(out_ptr + offs, z)
+
+        N = 256
+        x = torch.randn(N, dtype=torch.float32, device="mps")
+        out = torch.empty(N, dtype=torch.float32, device="mps")
+        _rt[(1,)](x, out, N=N)
+        torch.mps.synchronize()
+
+        expected = x.cpu().bfloat16().float()
+        assert torch.allclose(out.cpu(), expected, atol=1e-2)
