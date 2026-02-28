@@ -1,4 +1,5 @@
 #include "TritonMetalGPUToLLVM/Passes.h"
+#include "BarrierOpToLLVM.h"
 #include "DotOpToLLVM.h"
 #include "FpToFpOpToLLVM.h"
 #include "LoadStoreOpToLLVM.h"
@@ -127,6 +128,7 @@ struct ConvertTritonMetalGPUToLLVM
     Metal::populateFpToFpOpToLLVMPatterns(typeConverter, patterns, benefit);
     Metal::populateDotOpToLLVMPatterns(typeConverter, patterns, benefit);
     Metal::populateLoadStoreOpToLLVMPatterns(typeConverter, patterns, benefit);
+    Metal::populateBarrierOpToLLVMPatterns(typeConverter, patterns, benefit, targetInfo);
     mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo, patterns, benefit);
     mlir::triton::populateAssertOpToLLVMPattern(typeConverter, patterns, targetInfo, benefit);
     mlir::triton::populateMakeRangeOpToLLVMPattern(typeConverter, targetInfo, patterns, benefit);

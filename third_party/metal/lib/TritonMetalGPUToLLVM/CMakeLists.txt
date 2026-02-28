@@ -1,4 +1,5 @@
 add_triton_library(TritonMetalGPUToLLVM
+  BarrierOpToLLVM.cpp
   DotOpToLLVM.cpp
   DotOpToLLVM/MetalSimdgroupDot.cpp
   FpToFpOpToLLVM.cpp

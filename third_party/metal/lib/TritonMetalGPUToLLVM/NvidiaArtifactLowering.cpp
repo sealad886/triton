@@ -120,6 +120,32 @@ static void rewriteWarpId(ModuleOp mod) {
   }
 }
 
+static void rewriteNVVMBarrier(ModuleOp mod) {
+  SmallVector<Operation *> barrierOps;
+  mod.walk([&](Operation *op) {
+    if (op->getName().getStringRef() == "nvvm.barrier0")
+      barrierOps.push_back(op);
+  });
+
+  if (barrierOps.empty())
+    return;
+
+  OpBuilder builder(mod.getContext());
+  Type i32Ty = builder.getI32Type();
+  auto barrierFn = triton::Metal::getOrInsertExternFunc(
+      mod, builder, "__metal_simdgroup_barrier", LLVM::LLVMVoidType::get(mod.getContext()),
+      {i32Ty});
+
+  for (Operation *op : barrierOps) {
+    builder.setInsertionPoint(op);
+    // flags = 1 (mem_threadgroup) — default full barrier
+    Value flags = LLVM::ConstantOp::create(builder, op->getLoc(), i32Ty,
+                                           builder.getI32IntegerAttr(1));
+    LLVM::CallOp::create(builder, op->getLoc(), barrierFn, ValueRange{flags});
+    op->erase();
+  }
+}
+
 static void rewriteGlobalInlineAsm(ModuleOp mod) {
   SmallVector<LLVM::InlineAsmOp> inlineAsmOps;
   mod.walk([&](LLVM::InlineAsmOp op) { inlineAsmOps.push_back(op); });
@@ -175,6 +201,7 @@ static void rewriteGlobalInlineAsm(ModuleOp mod) {
 void mlir::triton::Metal::lowerNvidiaArtifactsToMetal(ModuleOp mod) {
   stripNVVMAttrs(mod);
   rewriteNVVMSRegs(mod);
+  rewriteNVVMBarrier(mod);
   rewriteWarpId(mod);
   rewriteGlobalInlineAsm(mod);
 }
