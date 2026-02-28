@@ -1520,6 +1520,69 @@ AMDWmmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
 }
 
 //===----------------------------------------------------------------------===//
+// MetalSimdgroup encoding
+//===----------------------------------------------------------------------===//
+
+Attribute MetalSimdgroupEncodingAttr::parse(AsmParser &parser, Type type) {
+  if (parser.parseLess().failed())
+    return {};
+  DictionaryAttr dict;
+  if (parser.parseAttribute(dict).failed())
+    return {};
+  if (parser.parseGreater().failed())
+    return {};
+
+  SmallVector<unsigned> warpsPerCTA;
+  SmallVector<unsigned> instrShape;
+  Attribute cgaAttr = nullptr;
+
+  for (const NamedAttribute &attr : dict) {
+    if (attr.getName() == "warpsPerCTA") {
+      if (parseIntArrayAttr(parser, attr, warpsPerCTA, "warpsPerCTA").failed())
+        return {};
+    }
+    if (attr.getName() == "instrShape") {
+      if (parseIntArrayAttr(parser, attr, instrShape, "instrShape").failed())
+        return {};
+    }
+    if (attr.getName() == "CGALayout") {
+      cgaAttr = attr.getValue();
+      continue;
+    }
+  }
+
+  std::optional<CGAEncodingAttr> CGALayout =
+      parseCGAAttr(parser, cgaAttr, /*rank=*/warpsPerCTA.size());
+  if (!CGALayout.has_value())
+    return {};
+
+  return parser.getChecked<MetalSimdgroupEncodingAttr>(
+      parser.getContext(), warpsPerCTA, instrShape, *CGALayout);
+}
+
+void MetalSimdgroupEncodingAttr::print(AsmPrinter &printer) const {
+  printer << "<{warpsPerCTA = [" << getWarpsPerCTA()
+          << "], instrShape = [" << getInstrShape() << "]";
+  maybePrintCGALayout(getContext(), printer, getCGALayout());
+  printer << "}>";
+}
+
+LogicalResult MetalSimdgroupEncodingAttr::verify(
+    function_ref<mlir::InFlightDiagnostic()> emitError,
+    ArrayRef<unsigned> warpsPerCTA, ArrayRef<unsigned> instrShape,
+    CGAEncodingAttr CGALayout) {
+  if (warpsPerCTA.size() < 2)
+    return emitError() << "warpsPerCTA must have at least 2 dimensions";
+  if (instrShape.size() != 3)
+    return emitError() << "instrShape must have 3 dimensions [M, N, K]";
+  // Apple simdgroup_matrix supports only 8x8x8
+  if (instrShape[0] != 8 || instrShape[1] != 8 || instrShape[2] != 8)
+    return emitError()
+        << "Metal simdgroup_matrix instrShape must be [8, 8, 8]";
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Sliced Encoding
 //===----------------------------------------------------------------------===//
 
@@ -2501,6 +2564,43 @@ bool AMDWmmaEncodingAttr::isEqualIgnoringCGALayout(
 }
 
 //===----------------------------------------------------------------------===//
+// MetalSimdgroupEncodingAttr
+//===----------------------------------------------------------------------===//
+
+SmallVector<unsigned> MetalSimdgroupEncodingAttr::getRepOrder() const {
+  return getMatrixOrder(getRank(), /*rowMajor=*/true);
+}
+
+SmallVector<unsigned>
+MetalSimdgroupEncodingAttr::getRepOrderForOperand(int opIdx) const {
+  return getOrderForDotOperand(opIdx, getRank(), /*kContig=*/true);
+}
+
+SmallVector<int64_t> MetalSimdgroupEncodingAttr::getRepForOperand(
+    ArrayRef<int64_t> operandShape, int kWidth, int opIdx) const {
+  auto instrShape = getInstrShape();
+  auto warpsPerCTA = getWarpsPerCTA();
+  int rank = operandShape.size();
+  bool hasBatch = rank == 3;
+  int mIdx = hasBatch ? 1 : 0;
+  int nIdx = hasBatch ? 2 : 1;
+
+  SmallVector<int64_t> rep(rank, 1);
+  if (opIdx == 0) {
+    // A operand: [M, K]
+    rep[mIdx] = operandShape[mIdx] / (instrShape[0] * warpsPerCTA[0]);
+    rep[rank - 1] = operandShape[rank - 1] / instrShape[2];
+  } else {
+    // B operand: [K, N]
+    rep[rank - 2] = operandShape[rank - 2] / instrShape[2];
+    rep[nIdx] = operandShape[nIdx] / (instrShape[1] * warpsPerCTA[1]);
+  }
+  if (hasBatch)
+    rep[0] = operandShape[0];
+  return rep;
+}
+
+//===----------------------------------------------------------------------===//
 // Mma encoding
 //===----------------------------------------------------------------------===//
 
@@ -2646,6 +2746,10 @@ LogicalResult DotOperandEncodingAttr::verify(
     if (kWidth != 0)
       return emitError() << "ttg.dot_op kWidth parameter is not supported "
                             "when the parent is a blocked layout";
+    return success();
+  }
+
+  if (auto parentAttr = mlir::dyn_cast<MetalSimdgroupEncodingAttr>(parent)) {
     return success();
   }
 

@@ -1310,6 +1310,8 @@ class MetalBackend(BaseBackend):
 
     @staticmethod
     def make_ttgir(mod, metadata, opt):
+        import triton._C.libtriton.metal as metal
+
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.ttir.add_convert_to_ttgpuir(
@@ -1318,6 +1320,15 @@ class MetalBackend(BaseBackend):
         passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
+        # Metal simdgroup matmul acceleration: infrastructure is in place
+        # (MetalSimdgroupEncodingAttr, LinearLayout, pass, Python binding) but
+        # the LLVM IR lowering for simdgroup dot ops is not yet complete.
+        # Enable with TRITON_METAL_ENABLE_SIMDGROUP=1 once the lowering lands.
+        import os
+        if os.environ.get("TRITON_METAL_ENABLE_SIMDGROUP"):
+            metal.passes.ttgpuir.add_accelerate_matmul(
+                pm, opt.arch, opt.num_warps
+            )
         passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)

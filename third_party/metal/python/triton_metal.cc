@@ -3,7 +3,9 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/GPU/GPUToLLVMIRTranslation.h"
+#include "passes.h"
 #include "TritonMetalGPUToLLVM/Passes.h"
+#include "TritonMetalGPUTransforms/Passes.h"
 
 namespace py = pybind11;
 
@@ -13,6 +15,9 @@ void init_triton_metal_passes_ttgpuir(py::module &&m) {
   m.def("add_to_llvmir", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::createConvertTritonMetalGPUToLLVM());
   });
+  ADD_PASS_OPTION_WRAPPER_2("add_accelerate_matmul",
+                            mlir::createTritonMetalGPUAccelerateMatmul,
+                            std::string, int);
 }
 
 void init_triton_metal(py::module &&m) {

@@ -13,7 +13,7 @@ if(TRITON_BUILD_PYTHON_MODULE AND APPLE)
     message(STATUS "Foundation framework found: ${FOUNDATION_FRAMEWORK}")
 
     # Build the metal_utils Python C extension
-    add_triton_plugin(TritonMetal ${CMAKE_CURRENT_SOURCE_DIR}/backend/driver.c ${CMAKE_CURRENT_SOURCE_DIR}/python/triton_metal.cc LINK_LIBS MetalGPUIR TritonMetalGPUToLLVM)
+    add_triton_plugin(TritonMetal ${CMAKE_CURRENT_SOURCE_DIR}/backend/driver.c ${CMAKE_CURRENT_SOURCE_DIR}/python/triton_metal.cc LINK_LIBS MetalGPUIR TritonMetalGPUToLLVM TritonMetalGPUTransforms)
     target_link_libraries(TritonMetal PRIVATE
       ${METAL_FRAMEWORK}
       ${FOUNDATION_FRAMEWORK}

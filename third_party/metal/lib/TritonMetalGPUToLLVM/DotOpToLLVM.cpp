@@ -1,4 +1,5 @@
 #include "DotOpToLLVM.h"
+#include "DotOpToLLVM/MetalSimdgroupDot.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -22,6 +23,11 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
     if (!isa<triton::gpu::DistributedEncodingTrait>(dEncoding))
       return rewriter.notifyMatchFailure(
           op, "tt.dot result encoding is not distributed");
+
+    if (isa<triton::gpu::MetalSimdgroupEncodingAttr>(dEncoding))
+      return Metal::convertMetalSimdgroupDot(op, adaptor, getTypeConverter(),
+                                              rewriter);
+
     return convertFMADot(op, adaptor, getTypeConverter(), rewriter);
   }
 };

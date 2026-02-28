@@ -830,6 +830,146 @@ LinearLayout wmmaDotOperandToLinearLayout(DotOperandEncodingAttr dotWmmaLayout,
                                 shape);
 }
 
+//===----------------------------------------------------------------------===//
+// MetalSimdgroupEncodingAttr
+//===----------------------------------------------------------------------===//
+
+LinearLayout
+MetalSimdgroupEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
+  auto ctx = getContext();
+  int rank = shape.size();
+  bool hasBatch = rank == 3;
+  int mIdx = hasBatch ? 1 : 0;
+  int nIdx = hasBatch ? 2 : 1;
+
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+  StringAttr kWarp = S("warp");
+
+  auto dimM = outDimNames[mIdx];
+  auto dimN = outDimNames[nIdx];
+
+  unsigned mDim = getInstrShape()[0]; // 8
+  unsigned nDim = getInstrShape()[1]; // 8
+  constexpr unsigned warpSize = 32;
+
+  // Within a single simdgroup 8x8 tile:
+  // - 8 rows (M) mapped to lane bits 0-2
+  // - 4 columns mapped to lane bits 3-4
+  // - 2 columns mapped to register bit 0
+  // Total: 8 * 4 * 2 = 64 = 8 * 8
+  // Thread count: 8 * 4 = 32 (lanes)
+  // Registers per thread: 2
+  //
+  // NOTE: "register" must be the first input dimension (Triton convention).
+  LinearLayout tileLayout =
+      LinearLayout::identity1D(2, kRegister, dimN) *       // reg 0 -> col {0,4}
+      LinearLayout::identity1D(mDim, kLane, dimM) *        // lane 0-2 -> row 0-7
+      LinearLayout::identity1D(nDim / 2, kLane, dimN);     // lane 3-4 -> col 0-3
+
+  // Tile across warps
+  auto warpsPerCTA = getWarpsPerCTA();
+  unsigned warpsN = warpsPerCTA[hasBatch ? 2 : 1];
+  unsigned warpsM = warpsPerCTA[hasBatch ? 1 : 0];
+
+  tileLayout *= LinearLayout::identity1D(warpsN, kWarp, dimN);
+  tileLayout *= LinearLayout::identity1D(warpsM, kWarp, dimM);
+
+  // Rep over remaining shape
+  unsigned repM = shape[mIdx] / (mDim * warpsM);
+  unsigned repN = shape[nIdx] / (nDim * warpsN);
+  if (repN > 1)
+    tileLayout *= LinearLayout::identity1D(repN, kRegister, dimN);
+  if (repM > 1)
+    tileLayout *= LinearLayout::identity1D(repM, kRegister, dimM);
+
+  // Handle batch dimension
+  if (hasBatch) {
+    auto dimBatch = outDimNames[0];
+    tileLayout *= LinearLayout::identity1D(shape[0], kRegister, dimBatch);
+  }
+
+  return combineCtaCgaWithShape(tileLayout, getCGALayout(), shape);
+}
+
+static LinearLayout
+metalSimdgroupDotToLinearLayout(DotOperandEncodingAttr dotEnc,
+                                ArrayRef<int64_t> shape) {
+  auto ctx = dotEnc.getContext();
+  auto parent = cast<MetalSimdgroupEncodingAttr>(dotEnc.getParent());
+  int opIdx = dotEnc.getOpIdx();
+  int rank = shape.size();
+  bool hasBatch = rank == 3;
+
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+  StringAttr kWarp = S("warp");
+
+  int mIdx = hasBatch ? 1 : 0;
+  int nIdx = hasBatch ? 2 : 1;
+  int kIdx = rank - 1;
+
+  auto instrShape = parent.getInstrShape();
+  unsigned mDim = instrShape[0]; // 8
+  unsigned nDim = instrShape[1]; // 8
+  unsigned kDim = instrShape[2]; // 8
+
+  auto warpsPerCTA = parent.getWarpsPerCTA();
+
+  LinearLayout tileLayout;
+  if (opIdx == 0) {
+    // A operand: [M, K] tile
+    // 32 lanes -> 8 M x 4 partial K; 2 registers -> complete K
+    // NOTE: "register" must be the first input dimension (Triton convention).
+    auto dimM = outDimNames[mIdx];
+    auto dimK = outDimNames[kIdx];
+    tileLayout = LinearLayout::identity1D(2, kRegister, dimK) *
+                 LinearLayout::identity1D(mDim, kLane, dimM) *
+                 LinearLayout::identity1D(kDim / 2, kLane, dimK);
+    // Rep for remaining shape
+    unsigned warpsM = warpsPerCTA[hasBatch ? 1 : 0];
+    unsigned repM = shape[mIdx] / (mDim * warpsM);
+    unsigned repK = shape[kIdx] / kDim;
+    if (repK > 1)
+      tileLayout *= LinearLayout::identity1D(repK, kRegister, dimK);
+    if (repM > 1)
+      tileLayout *= LinearLayout::identity1D(repM, kRegister, dimM);
+  } else {
+    // B operand: [K, N] tile
+    // 32 lanes -> 8 K x 4 partial N; 2 registers -> complete N
+    // NOTE: "register" must be the first input dimension (Triton convention).
+    auto dimK = outDimNames[rank - 2];
+    auto dimN = outDimNames[nIdx];
+    tileLayout = LinearLayout::identity1D(2, kRegister, dimN) *
+                 LinearLayout::identity1D(kDim, kLane, dimK) *
+                 LinearLayout::identity1D(nDim / 2, kLane, dimN);
+    unsigned warpsN = warpsPerCTA[hasBatch ? 2 : 1];
+    unsigned repN = shape[nIdx] / (nDim * warpsN);
+    unsigned repK = shape[rank - 2] / kDim;
+    if (repK > 1)
+      tileLayout *= LinearLayout::identity1D(repK, kRegister, dimK);
+    if (repN > 1)
+      tileLayout *= LinearLayout::identity1D(repN, kRegister, dimN);
+  }
+
+  // Map ALL warps using identityStandardND so the layout covers the full
+  // warp count. combineCtaCgaWithShape will clamp excess warps to broadcasts
+  // via ensureLayoutNotLargerThan.
+  auto warpOrder = getMatrixOrder(rank, /*rowMajor=*/true);
+  LinearLayout warpLayout =
+      identityStandardND(kWarp, warpsPerCTA, warpOrder);
+  tileLayout = tileLayout * warpLayout;
+
+  if (hasBatch) {
+    tileLayout *=
+        LinearLayout::identity1D(shape[0], kRegister, outDimNames[0]);
+  }
+
+  return combineCtaCgaWithShape(tileLayout, parent.getCGALayout(), shape);
+}
+
 LinearLayout
 BlockedEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   MLIRContext *ctx = getContext();
@@ -989,6 +1129,9 @@ DotOperandEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
     return mfmaDotToLinearLayout(*this, shape);
   } else if (auto wmmaLayout = mlir::dyn_cast<AMDWmmaEncodingAttr>(parent)) {
     return wmmaDotOperandToLinearLayout(*this, shape);
+  } else if (auto metalLayout =
+                 mlir::dyn_cast<MetalSimdgroupEncodingAttr>(parent)) {
+    return metalSimdgroupDotToLinearLayout(*this, shape);
   } else {
     auto mma = mlir::cast<NvidiaMmaEncodingAttr>(parent);
     return nvidiaDotToLinearLayout(shape, *this);

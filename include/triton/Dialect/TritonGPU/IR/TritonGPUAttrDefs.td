@@ -1330,6 +1330,53 @@ This simplifies both WMMA and dotOperand layouts lowering to linear layout.
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// Metal Simdgroup Layout Encoding
+//===----------------------------------------------------------------------===//
+
+def MetalSimdgroupEncodingAttr : DistributedEncoding<"MetalSimdgroupEncoding", "metal_simdgroup_encoding", [MmaEncodingTrait]> {
+  let mnemonic = "metal_simdgroup";
+
+  let description = [{
+An encoding for tensors produced by Apple Metal simdgroup_matrix operations,
+available on Apple Silicon GPUs (apple8 and later).
+
+Characterized by:
+- `warpsPerCTA`: Simdgroup layout within the threadgroup [M-simdgroups, N-simdgroups]
+- `instrShape`: Shape of a single simdgroup_matrix operation [M, N, K] (always [8, 8, 8])
+- `CGALayout`: CGA encoding (always trivial for Metal — single CTA)
+
+Apple Silicon simdgroup_matrix<T, 8, 8> performs an 8x8x8 MMA within a single
+32-thread SIMD group. Multiple simdgroups tile the output MxN dimensions.
+
+Example:
+Suppose we have a tensor with shape [16, 16], warpsPerCTA set to [2, 2],
+instrShape = [8, 8, 8]. Each simdgroup owns an 8x8 tile. With 32 threads
+per simdgroup and 64 elements per tile, each thread owns 2 elements.
+
+                simdgroup 0              simdgroup 1
+              (8x8 tile, 32 lanes)    (8x8 tile, 32 lanes)
+M  [ row 0-7,  col 0-7 ]   [ row 0-7,  col 8-15 ]
+                simdgroup 2              simdgroup 3
+   [ row 8-15, col 0-7 ]   [ row 8-15, col 8-15 ]
+  }];
+
+  let parameters = (
+    ins
+    ArrayRefParameter<"unsigned">:$warpsPerCTA,
+    ArrayRefParameter<"unsigned">:$instrShape,
+    "CGAEncodingAttr":$CGALayout
+  );
+
+  let extraClassDeclaration = extraDistributedDeclaration # [{
+    SmallVector<int64_t> getRepForOperand(ArrayRef<int64_t> operandShape, int kWidth, int opIdx) const;
+    SmallVector<unsigned> getRepOrderForOperand(int opIdx) const;
+  }];
+
+  let genVerifyDecl = 1;
+  let hasCustomAssemblyFormat = 1;
+}
+
 def NvidiaMmaEncodingAttr : DistributedEncoding<"NvidiaMmaEncoding", "nvidia_mma_encoding", [MmaEncodingTrait]> {
   let mnemonic = "nvidia_mma";
 
