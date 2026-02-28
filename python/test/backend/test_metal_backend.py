@@ -8627,6 +8627,102 @@ class TestMetalDriverFeatures:
         assert len(metal_ext.METAL_BUILTINS) >= 6
 
 
+# ── GPU profiling / timing tests ────────────────────────────────────
+
+
+class TestMetalGPUProfiling:
+    """Tests for Metal GPU-side timing via gpuStartTime/gpuEndTime."""
+
+    @skip_non_darwin
+    def test_timing_event_returns_positive_time(self):
+        """A kernel execution should produce a positive elapsed time."""
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _nop_kernel(out_ptr, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            tl.store(out_ptr + pid, pid)
+
+        from third_party.metal.backend.driver import _MetalTimingEvent
+
+        start = _MetalTimingEvent()
+        out = torch.zeros(128, dtype=torch.int32, device="mps")
+        start.record()
+        _nop_kernel[(128,)](out, BLOCK=1)
+        end = _MetalTimingEvent()
+        end.record()
+        elapsed = start.elapsed_time(end)
+        assert elapsed > 0, f"Expected positive elapsed time, got {elapsed}"
+        assert elapsed < 60000, f"Unreasonable elapsed time: {elapsed}ms"
+
+    @skip_non_darwin
+    def test_gpu_timing_less_than_or_equal_host_timing(self):
+        """GPU-side timing should be ≤ host-side (synchronize overhead)."""
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _work_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offsets = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offsets < n
+            x = tl.load(x_ptr + offsets, mask=mask)
+            tl.store(out_ptr + offsets, x * 2.0, mask=mask)
+
+        from third_party.metal.backend.driver import (
+            _MetalTimingEvent,
+            _gpu_elapsed_ms,
+        )
+
+        n = 4096
+        x = torch.randn(n, dtype=torch.float32, device="mps")
+        out = torch.zeros(n, dtype=torch.float32, device="mps")
+
+        start = _MetalTimingEvent()
+        start.record()
+        _work_kernel[(16,)](x, out, n, BLOCK=256)
+        end = _MetalTimingEvent()
+        end.record()
+
+        host_ms = (end._host_timestamp - start._host_timestamp) * 1000.0
+        gpu_ms = _gpu_elapsed_ms(start._cmd_buf, end._cmd_buf)
+
+        assert host_ms > 0
+        if gpu_ms is not None:
+            assert gpu_ms <= host_ms * 1.5, (
+                f"GPU time ({gpu_ms:.3f}ms) much larger than host time ({host_ms:.3f}ms)"
+            )
+
+    @skip_non_darwin
+    def test_fallback_when_no_cmd_buf(self):
+        """Timing falls back to host timing when no command buffer captured."""
+        from third_party.metal.backend.driver import _MetalTimingEvent
+
+        start = _MetalTimingEvent()
+        start._host_timestamp = 1.0
+        start._cmd_buf = None
+
+        end = _MetalTimingEvent()
+        end._host_timestamp = 1.5
+        end._cmd_buf = None
+
+        elapsed = start.elapsed_time(end)
+        assert abs(elapsed - 500.0) < 0.1, f"Expected ~500ms, got {elapsed}"
+
+    @skip_non_darwin
+    def test_device_interface_uses_gpu_timing_event(self):
+        """_MetalDeviceInterface.Event returns GPU-timing-aware event class."""
+        from third_party.metal.backend.driver import _MetalDeviceInterface
+
+        event = _MetalDeviceInterface.Event()
+        assert hasattr(event, "_cmd_buf"), (
+            "Event should have _cmd_buf attribute for GPU timing"
+        )
+
+
 # ── Barrier insertion pass tests ────────────────────────────────────
 
 
@@ -8932,6 +9028,7 @@ entry:
         the C++ lowering + Python barrier pass pipeline is functioning.
         """
         import torch
+
         import triton
         import triton.language as tl
 
@@ -8993,6 +9090,7 @@ class TestMetalSPMDOpLowering:
     def test_num_programs_compilation(self):
         """Kernel using tl.num_programs() compiles without error."""
         import torch
+
         import triton
         import triton.language as tl
 
@@ -9012,6 +9110,7 @@ class TestMetalSPMDOpLowering:
     def test_num_programs_axis1(self):
         """tl.num_programs(1) returns correct grid size on axis 1."""
         import torch
+
         import triton
         import triton.language as tl
 
@@ -9032,6 +9131,7 @@ class TestMetalSPMDOpLowering:
     def test_grid_stride_loop_pattern(self):
         """Grid-stride loop using program_id + num_programs produces correct results."""
         import torch
+
         import triton
         import triton.language as tl
 
@@ -9061,6 +9161,7 @@ class TestMetalSPMDOpLowering:
     def test_num_programs_ir_contains_metal_builtin(self):
         """Compiled IR for num_programs kernel contains Metal grid size builtin."""
         import torch
+
         import triton
         import triton.language as tl
 
@@ -9081,7 +9182,10 @@ class TestMetalSPMDOpLowering:
         llir_found = False
         for key in asm_keys:
             content = compiled.asm[key]
-            if isinstance(content, str) and "__metal_get_threadgroups_per_grid" in content:
+            if (
+                isinstance(content, str)
+                and "__metal_get_threadgroups_per_grid" in content
+            ):
                 llir_found = True
                 break
         assert llir_found, (
@@ -10809,7 +10913,6 @@ class TestMetalBufferPool:
         from unittest.mock import MagicMock
 
         import numpy as np
-
         from third_party.metal.backend.driver import MetalBufferPool, _bind_argument
 
         pool = MetalBufferPool()
@@ -10844,9 +10947,7 @@ class TestMetalBufferPool:
 
         handle = MetalKernelHandle(device, queue, library, metadata={})
 
-        with patch(
-            "third_party.metal.backend.driver._bind_argument"
-        ) as mock_bind:
+        with patch("third_party.metal.backend.driver._bind_argument") as mock_bind:
             handle.launch_kernel(
                 "test_fn",
                 args=[42],

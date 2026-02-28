@@ -326,15 +326,20 @@ def _normalize_scalar_arg(sig, arg):
 
 
 class _MetalTimingEvent:
-    """Best-effort timing event implementation for Metal benchmark paths."""
+    """GPU-aware timing event for Metal using gpuStartTime/gpuEndTime.
+
+    Captures the most recently committed MTLCommandBuffer (stored in
+    _metal_last_cmd_buf thread-local by launch_kernel) for accurate
+    GPU-side timestamps. Falls back to host-side timing when GPU
+    timestamps are unavailable.
+    """
 
     def __init__(self, enable_timing=True):
         self.enable_timing = enable_timing
-        self._timestamp = None
+        self._host_timestamp = None
+        self._cmd_buf = None
 
     def record(self):
-        # Keep timing deterministic for async MPS execution by synchronizing
-        # before taking host-side timestamps.
         torch = _get_torch_module()
         if (
             torch is not None
@@ -342,12 +347,35 @@ class _MetalTimingEvent:
             and hasattr(torch.mps, "synchronize")
         ):
             torch.mps.synchronize()
-        self._timestamp = time.perf_counter()
+        self._host_timestamp = time.perf_counter()
+        self._cmd_buf = getattr(_metal_last_cmd_buf, "cmd_buf", None)
 
     def elapsed_time(self, end_event):
-        if self._timestamp is None or end_event._timestamp is None:
+        if self._host_timestamp is None or end_event._host_timestamp is None:
             raise RuntimeError("Event timing requested before record()")
-        return (end_event._timestamp - self._timestamp) * 1000.0
+        gpu_ms = _gpu_elapsed_ms(self._cmd_buf, end_event._cmd_buf)
+        if gpu_ms is not None:
+            return gpu_ms
+        return (end_event._host_timestamp - self._host_timestamp) * 1000.0
+
+
+def _gpu_elapsed_ms(start_buf, end_buf):
+    """Return GPU elapsed time in ms, or None if unavailable."""
+    if start_buf is None or end_buf is None:
+        return None
+    try:
+        t0 = start_buf.gpuStartTime()
+        t1 = end_buf.gpuEndTime()
+        if t0 > 0 and t1 > 0 and t1 >= t0:
+            return (t1 - t0) * 1000.0
+    except Exception:
+        pass
+    return None
+
+
+import threading
+
+_metal_last_cmd_buf = threading.local()
 
 
 class _MetalDeviceInterface:
@@ -1005,6 +1033,7 @@ class MetalKernelHandle:
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(threadgroups, block)
         encoder.endEncoding()
         cmd_buf.commit()
+        _metal_last_cmd_buf.cmd_buf = cmd_buf
 
         if sync:
             cmd_buf.waitUntilCompleted()
