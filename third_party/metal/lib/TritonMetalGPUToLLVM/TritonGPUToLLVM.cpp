@@ -1,6 +1,7 @@
 #include "TritonMetalGPUToLLVM/Passes.h"
 #include "BarrierOpToLLVM.h"
 #include "DotOpToLLVM.h"
+#include "SPMDOpToLLVM.h"
 #include "FpToFpOpToLLVM.h"
 #include "LoadStoreOpToLLVM.h"
 #include "NvidiaArtifactLowering.h"
@@ -129,6 +130,7 @@ struct ConvertTritonMetalGPUToLLVM
     Metal::populateDotOpToLLVMPatterns(typeConverter, patterns, benefit);
     Metal::populateLoadStoreOpToLLVMPatterns(typeConverter, patterns, benefit);
     Metal::populateBarrierOpToLLVMPatterns(typeConverter, patterns, benefit, targetInfo);
+    Metal::populateSPMDOpToLLVMPattern(typeConverter, patterns, benefit);
     mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo, patterns, benefit);
     mlir::triton::populateAssertOpToLLVMPattern(typeConverter, patterns, targetInfo, benefit);
     mlir::triton::populateMakeRangeOpToLLVMPattern(typeConverter, targetInfo, patterns, benefit);

@@ -8979,6 +8979,117 @@ entry:
         assert "nvvm" not in msl.lower()
 
 
+# ── SPMD op lowering tests ───────────────────────────────────────────
+
+
+class TestMetalSPMDOpLowering:
+    """Tests for the Metal-specific GetNumProgramsOp C++ lowering.
+
+    The generic SPMD pattern only handles GetProgramIdOp. Metal adds
+    GetNumProgramsOp → __metal_get_threadgroups_per_grid_{x,y,z}.
+    """
+
+    @skip_non_darwin
+    def test_num_programs_compilation(self):
+        """Kernel using tl.num_programs() compiles without error."""
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _num_programs_kernel(out_ptr, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            n_progs = tl.num_programs(0)
+            if pid == 0:
+                tl.store(out_ptr, n_progs)
+
+        out = torch.zeros(1, dtype=torch.int32, device="mps")
+        _num_programs_kernel[(4,)](out, BLOCK=1)
+        result = out.cpu().item()
+        assert result == 4, f"Expected num_programs=4, got {result}"
+
+    @skip_non_darwin
+    def test_num_programs_axis1(self):
+        """tl.num_programs(1) returns correct grid size on axis 1."""
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _np_axis1_kernel(out_ptr, BLOCK: tl.constexpr):
+            pid_x = tl.program_id(0)
+            pid_y = tl.program_id(1)
+            n_progs_y = tl.num_programs(1)
+            if pid_x == 0 and pid_y == 0:
+                tl.store(out_ptr, n_progs_y)
+
+        out = torch.zeros(1, dtype=torch.int32, device="mps")
+        _np_axis1_kernel[(2, 3)](out, BLOCK=1)
+        result = out.cpu().item()
+        assert result == 3, f"Expected num_programs(1)=3, got {result}"
+
+    @skip_non_darwin
+    def test_grid_stride_loop_pattern(self):
+        """Grid-stride loop using program_id + num_programs produces correct results."""
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _grid_stride_kernel(x_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            n_progs = tl.num_programs(0)
+            for start in range(pid * BLOCK, n_elements, n_progs * BLOCK):
+                offsets = start + tl.arange(0, BLOCK)
+                mask = offsets < n_elements
+                x = tl.load(x_ptr + offsets, mask=mask)
+                tl.store(out_ptr + offsets, x * 2.0, mask=mask)
+
+        n = 512
+        x = torch.arange(n, dtype=torch.float32, device="mps")
+        out = torch.zeros(n, dtype=torch.float32, device="mps")
+
+        _grid_stride_kernel[(4,)](x, out, n, BLOCK=64)
+        expected = x * 2.0
+        result = out.cpu()
+        assert torch.allclose(result.cpu(), expected.cpu(), atol=1e-5), (
+            f"Grid-stride loop with num_programs failed: "
+            f"max diff = {(result - expected).abs().max().item()}"
+        )
+
+    @skip_non_darwin
+    def test_num_programs_ir_contains_metal_builtin(self):
+        """Compiled IR for num_programs kernel contains Metal grid size builtin."""
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _np_ir_kernel(out_ptr, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            n = tl.num_programs(0)
+            tl.store(out_ptr + pid, n)
+
+        src = triton.compiler.ASTSource(
+            fn=_np_ir_kernel,
+            signature={"out_ptr": "*i32"},
+            constexprs={"BLOCK": 32},
+        )
+        target = triton.runtime.driver.active.get_current_target()
+        compiled = triton.compile(src, target=target)
+        asm_keys = compiled.asm.keys()
+        llir_found = False
+        for key in asm_keys:
+            content = compiled.asm[key]
+            if isinstance(content, str) and "__metal_get_threadgroups_per_grid" in content:
+                llir_found = True
+                break
+        assert llir_found, (
+            "Expected __metal_get_threadgroups_per_grid in compiled output. "
+            f"Available keys: {list(asm_keys)}"
+        )
+
+
 # ── Matmul acceleration strategy tests ───────────────────────────────
 
 
