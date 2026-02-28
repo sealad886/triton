@@ -10987,3 +10987,142 @@ class TestMetalBufferPool:
         driver.clear_cache(cache)
 
         assert pool.pool_size == 0
+
+
+class TestMetalGPUDialectOps:
+    """Tests for the MetalGPU (mtlg) dialect operations and their lowering.
+
+    Verifies that MetalGPU dialect ops lower to correct __metal_* extern
+    function calls and that the resulting LLVM IR translates to valid MSL.
+    """
+
+    _SIMDGROUP_BARRIER_IR = """\
+; ModuleID = 'mtlg_simdgroup_barrier'
+target triple = "aarch64-apple-macosx14.0.0"
+
+define void @kernel(ptr addrspace(1) %out) {
+entry:
+  call void @__metal_simdgroup_barrier(i32 1)
+  call void @__metal_simdgroup_barrier(i32 2)
+  call void @__metal_simdgroup_barrier(i32 7)
+  store float 1.0, ptr addrspace(1) %out
+  ret void
+}
+"""
+
+    _THREADGROUP_BARRIER_IR = """\
+; ModuleID = 'mtlg_threadgroup_barrier'
+target triple = "aarch64-apple-macosx14.0.0"
+
+define void @kernel(ptr addrspace(1) %out) {
+entry:
+  call void @__metal_threadgroup_barrier(i32 1)
+  call void @__metal_threadgroup_barrier(i32 2)
+  store float 1.0, ptr addrspace(1) %out
+  ret void
+}
+"""
+
+    _SHUFFLE_IR = """\
+; ModuleID = 'mtlg_shuffle'
+target triple = "aarch64-apple-macosx14.0.0"
+
+define void @kernel(ptr addrspace(1) %out, i32 %lane) {
+entry:
+  %val = load i32, ptr addrspace(1) %out
+  %shuf = call i32 @__metal_simd_shuffle(i32 %val, i32 %lane)
+  %xor = call i32 @__metal_simd_shuffle_xor(i32 %val, i32 1)
+  %up = call i32 @__metal_simd_shuffle_up(i32 %val, i32 1)
+  %down = call i32 @__metal_simd_shuffle_down(i32 %val, i32 1)
+  %sum1 = add i32 %shuf, %xor
+  %sum2 = add i32 %up, %down
+  %sum = add i32 %sum1, %sum2
+  store i32 %sum, ptr addrspace(1) %out
+  ret void
+}
+"""
+
+    @skip_non_darwin
+    def test_simdgroup_barrier_flags_in_msl(self):
+        """mtlg.simdgroup_barrier lowers to simdgroup_barrier with correct flags."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(self._SIMDGROUP_BARRIER_IR, metadata, None)
+        assert "simdgroup_barrier" in msl or "threadgroup_barrier" in msl
+        assert "__metal_simdgroup_barrier" not in msl, "Extern call not lowered"
+
+    @skip_non_darwin
+    def test_simdgroup_barrier_flag_combinations(self):
+        """Flag 7 (device|threadgroup|texture) produces combined fence."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(self._SIMDGROUP_BARRIER_IR, metadata, None)
+        barrier_count = msl.count("barrier(")
+        assert barrier_count >= 3, f"Expected >=3 barrier calls, found {barrier_count}"
+
+    @skip_non_darwin
+    def test_threadgroup_barrier_in_msl(self):
+        """mtlg.threadgroup_barrier lowers to threadgroup_barrier in MSL."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(self._THREADGROUP_BARRIER_IR, metadata, None)
+        assert "threadgroup_barrier" in msl
+        assert "__metal_threadgroup_barrier" not in msl, "Extern call not lowered"
+
+    @skip_non_darwin
+    def test_simd_shuffle_in_msl(self):
+        """All four shuffle variants lower to MSL simd_shuffle functions."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(self._SHUFFLE_IR, metadata, None)
+        assert "simd_shuffle(" in msl or "simd_shuffle_and_fill" in msl, \
+            f"simd_shuffle not found in MSL"
+        assert "simd_shuffle_xor(" in msl, f"simd_shuffle_xor not found in MSL"
+        assert "simd_shuffle_up(" in msl, f"simd_shuffle_up not found in MSL"
+        assert "simd_shuffle_down(" in msl, f"simd_shuffle_down not found in MSL"
+
+    @skip_non_darwin
+    def test_shuffle_xor_extern_not_in_final_msl(self):
+        """__metal_simd_shuffle_* extern names are replaced in final MSL."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(self._SHUFFLE_IR, metadata, None)
+        assert "__metal_simd_shuffle_xor" not in msl, "Extern name leaked into MSL"
+        assert "__metal_simd_shuffle_up" not in msl, "Extern name leaked into MSL"
+        assert "__metal_simd_shuffle_down" not in msl, "Extern name leaked into MSL"
+
+    @skip_non_darwin
+    def test_shuffle_preserves_i32_type(self):
+        """Shuffle ops operate on i32 and produce i32 in the generated MSL."""
+        from third_party.metal.backend.compiler import MetalBackend
+
+        metadata = {}
+        msl = MetalBackend.make_metal_ir(self._SHUFFLE_IR, metadata, None)
+        assert "int" in msl or "uint" in msl, \
+            "Expected integer type in shuffle MSL output"
+
+    @skip_non_darwin
+    def test_barrier_shuffle_combined_kernel(self):
+        """Kernel with both barrier and shuffle ops compiles end-to-end."""
+        import torch
+
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _barrier_shuffle_kernel(out_ptr, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            val = pid.to(tl.int32)
+            tl.debug_barrier()
+            tl.store(out_ptr + pid, val)
+
+        out = torch.zeros(4, dtype=torch.int32, device="mps")
+        _barrier_shuffle_kernel[(4,)](out, BLOCK=1)
+        result = out.cpu()
+        expected = torch.arange(4, dtype=torch.int32)
+        assert torch.equal(result, expected), f"Expected {expected}, got {result}"

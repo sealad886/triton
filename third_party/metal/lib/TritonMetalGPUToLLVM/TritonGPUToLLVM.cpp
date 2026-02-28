@@ -1,6 +1,7 @@
 #include "TritonMetalGPUToLLVM/Passes.h"
 #include "BarrierOpToLLVM.h"
 #include "DotOpToLLVM.h"
+#include "MetalGPUOpsToLLVM.h"
 #include "SPMDOpToLLVM.h"
 #include "FpToFpOpToLLVM.h"
 #include "LoadStoreOpToLLVM.h"
@@ -24,6 +25,7 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "Dialect/MetalGPU/IR/Dialect.h"
 
 namespace mlir {
 namespace triton {
@@ -54,6 +56,7 @@ public:
     addLegalDialect<LLVM::LLVMDialect>();
     addLegalDialect<NVVM::NVVMDialect>();
     addIllegalDialect<triton::TritonDialect>();
+    addIllegalDialect<triton::metalgpu::MetalGPUDialect>();
     addDynamicallyLegalDialect<triton::gpu::TritonGPUDialect>(
         [](Operation *op) { return isa<triton::gpu::WarpIdOp>(op); });
     addIllegalDialect<mlir::gpu::GPUDialect>();
@@ -71,7 +74,8 @@ struct ConvertTritonMetalGPUToLLVM
       ConvertTritonMetalGPUToLLVM>::ConvertTritonMetalGPUToLLVMBase;
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<LLVM::LLVMDialect, NVVM::NVVMDialect, mlir::gpu::GPUDialect>();
+    registry.insert<LLVM::LLVMDialect, NVVM::NVVMDialect, mlir::gpu::GPUDialect,
+                    triton::metalgpu::MetalGPUDialect>();
   }
 
   void runOnOperation() override {
@@ -131,6 +135,7 @@ struct ConvertTritonMetalGPUToLLVM
     Metal::populateLoadStoreOpToLLVMPatterns(typeConverter, patterns, benefit);
     Metal::populateBarrierOpToLLVMPatterns(typeConverter, patterns, benefit, targetInfo);
     Metal::populateSPMDOpToLLVMPattern(typeConverter, patterns, benefit);
+    Metal::populateMetalGPUOpsToLLVMPatterns(typeConverter, patterns, benefit);
     mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo, patterns, benefit);
     mlir::triton::populateAssertOpToLLVMPattern(typeConverter, patterns, targetInfo, benefit);
     mlir::triton::populateMakeRangeOpToLLVMPattern(typeConverter, targetInfo, patterns, benefit);

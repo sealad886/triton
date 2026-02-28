@@ -4,6 +4,7 @@ add_triton_library(TritonMetalGPUToLLVM
   DotOpToLLVM/MetalSimdgroupDot.cpp
   FpToFpOpToLLVM.cpp
   LoadStoreOpToLLVM.cpp
+  MetalGPUOpsToLLVM.cpp
   NvidiaArtifactLowering.cpp
   SPMDOpToLLVM.cpp
   TargetInfo.cpp
@@ -14,6 +15,7 @@ add_triton_library(TritonMetalGPUToLLVM
   TritonMetalGPUConversionPassIncGen
 
   LINK_LIBS PUBLIC
+  MetalGPUIR
   MLIRIR
   MLIRPass
   MLIRGPUDialect

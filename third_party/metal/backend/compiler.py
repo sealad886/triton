@@ -321,6 +321,8 @@ def _emit_call(ctx: "TranslatorContext", inst: _Call) -> bool:
         ctx.emit(f"{out} = simd_shuffle_xor({args[0]}, {args[1]});")
     elif fn == "__metal_simd_shuffle_up" and len(args) == 2:
         ctx.emit(f"{out} = simd_shuffle_up({args[0]}, {args[1]});")
+    elif fn == "__metal_simd_shuffle_down" and len(args) == 2:
+        ctx.emit(f"{out} = simd_shuffle_down({args[0]}, {args[1]});")
     elif fn == "__metal_simd_shuffle" and len(args) == 2:
         ctx.emit(f"{out} = simd_shuffle({args[0]}, {args[1]});")
     elif fn.startswith("__metal_simdgroup_load_tg") and len(args) == 2:
@@ -390,6 +392,29 @@ def _emit_void_call(ctx: "TranslatorContext", inst: _Call) -> bool:
                     barrier_flags = parts[0]
                 else:
                     barrier_flags = f"({parts[0]} | {parts[1]})"
+            else:
+                barrier_flags = "mem_flags::mem_threadgroup"
+        ctx.emit(f"threadgroup_barrier({barrier_flags});")
+    elif fn == "__metal_threadgroup_barrier":
+        barrier_flags = "mem_flags::mem_none"
+        if len(args) >= 1:
+            raw_flag = args[0].strip()
+            if _RE_CONST_INT.match(raw_flag):
+                flag_val = int(raw_flag)
+                parts: list[str] = []
+                if flag_val & 1:
+                    parts.append("mem_flags::mem_threadgroup")
+                if flag_val & 2:
+                    parts.append("mem_flags::mem_device")
+                if flag_val & 4:
+                    parts.append("mem_flags::mem_texture")
+                if not parts:
+                    barrier_flags = "mem_flags::mem_none"
+                elif len(parts) == 1:
+                    barrier_flags = parts[0]
+                else:
+                    barrier_flags = " | ".join(parts)
+                    barrier_flags = f"({barrier_flags})"
             else:
                 barrier_flags = "mem_flags::mem_threadgroup"
         ctx.emit(f"threadgroup_barrier({barrier_flags});")
