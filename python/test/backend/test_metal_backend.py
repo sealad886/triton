@@ -3655,9 +3655,13 @@ class TestMetalMatmulRegression:
             msl_text = msl_text.decode("utf-8", errors="replace")
 
         fma_count = msl_text.count("fma(")
+        simdgroup_mma_count = msl_text.count("simdgroup_multiply_accumulate(")
+        if simdgroup_mma_count == 0:
+            simdgroup_mma_count = msl_text.count("__metal_sg_mma_")
+        total_matmul_ops = fma_count + simdgroup_mma_count
         assert (
-            fma_count >= 10
-        ), f"Expected at least 10 fma() calls in matmul MSL, got {fma_count}"
+            total_matmul_ops >= 1
+        ), f"Expected matmul ops (fma or simdgroup_multiply_accumulate) in MSL, got 0"
         assert (
             fma_count < 50000
         ), f"fma() count suspiciously high ({fma_count}), possible code bloat"

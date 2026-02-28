@@ -323,6 +323,19 @@ def _emit_call(ctx: "TranslatorContext", inst: _Call) -> bool:
         ctx.emit(f"{out} = simd_shuffle_up({args[0]}, {args[1]});")
     elif fn == "__metal_simd_shuffle" and len(args) == 2:
         ctx.emit(f"{out} = simd_shuffle({args[0]}, {args[1]});")
+    elif fn.startswith("__metal_simdgroup_load_tg") and len(args) == 2:
+        elem_ty = ctx.simdgroup_elem_for_msl_value(out)
+        if ctx.use_native_simdgroup:
+            ctx.emit(
+                f"simdgroup_load({out}, "
+                f"(const threadgroup {elem_ty}*){args[0]}, {args[1]});"
+            )
+        else:
+            fn_tag = elem_ty.replace(" ", "_")
+            ctx.emit(
+                f"{out} = __metal_sg_load_{fn_tag}("
+                f"(const threadgroup {elem_ty}*){args[0]}, {args[1]});"
+            )
     elif fn == "__metal_simdgroup_load" and len(args) == 2:
         elem_ty = ctx.simdgroup_elem_for_msl_value(out)
         if ctx.use_native_simdgroup:
@@ -336,7 +349,7 @@ def _emit_call(ctx: "TranslatorContext", inst: _Call) -> bool:
                 f"{out} = __metal_sg_load_{fn_tag}("
                 f"(const device {elem_ty}*){args[0]}, {args[1]});"
             )
-    elif fn == "__metal_simdgroup_multiply_accumulate" and len(args) == 3:
+    elif fn.startswith("__metal_simdgroup_multiply_accumulate") and len(args) == 3:
         elem_ty = ctx.simdgroup_elem_for_msl_value(out)
         if ctx.use_native_simdgroup:
             ctx.emit(
@@ -380,7 +393,20 @@ def _emit_void_call(ctx: "TranslatorContext", inst: _Call) -> bool:
             else:
                 barrier_flags = "mem_flags::mem_threadgroup"
         ctx.emit(f"threadgroup_barrier({barrier_flags});")
-    elif fn == "__metal_simdgroup_store" and len(args) == 3:
+    elif fn.startswith("__metal_simdgroup_store_tg") and len(args) == 3:
+        elem_ty = ctx.simdgroup_elem_for_msl_value(args[0])
+        if ctx.use_native_simdgroup:
+            ctx.emit(
+                f"simdgroup_store({args[0]}, "
+                f"(threadgroup {elem_ty}*){args[1]}, {args[2]});"
+            )
+        else:
+            fn_tag = elem_ty.replace(" ", "_")
+            ctx.emit(
+                f"__metal_sg_store_{fn_tag}({args[0]}, "
+                f"(threadgroup {elem_ty}*){args[1]}, {args[2]});"
+            )
+    elif fn.startswith("__metal_simdgroup_store") and len(args) == 3:
         elem_ty = ctx.simdgroup_elem_for_msl_value(args[0])
         if ctx.use_native_simdgroup:
             ctx.emit(
@@ -649,14 +675,25 @@ def _emit_aggregate_op(ctx: "TranslatorContext", inst: _AggregateOp) -> bool:
 
 def _emit_atomic(ctx: "TranslatorContext", inst: _AtomicOp) -> bool:
     if inst.atomic_op == "cmpxchg":
-        if inst.ptr is None or inst.val_type is None or inst.expected is None or inst.desired is None:
-            raise RuntimeError(f"Unsupported cmpxchg form in Metal lowering: '{inst.raw_line}'")
+        if (
+            inst.ptr is None
+            or inst.val_type is None
+            or inst.expected is None
+            or inst.desired is None
+        ):
+            raise RuntimeError(
+                f"Unsupported cmpxchg form in Metal lowering: '{inst.raw_line}'"
+            )
         out_ssa = inst.out_ssa
         out = ctx.msl_id(out_ssa)
         ctx.ssa[out_ssa] = out
         msl_ty = ctx.llvm_scalar_to_msl(inst.val_type.strip())
-        msl_success = _MEMORY_ORDER_MAP.get(inst.success_order or inst.ordering, "memory_order_relaxed")
-        msl_fail = _MEMORY_ORDER_MAP.get(inst.fail_order or inst.ordering, "memory_order_relaxed")
+        msl_success = _MEMORY_ORDER_MAP.get(
+            inst.success_order or inst.ordering, "memory_order_relaxed"
+        )
+        msl_fail = _MEMORY_ORDER_MAP.get(
+            inst.fail_order or inst.ordering, "memory_order_relaxed"
+        )
         ctx.emit(f"{out}.field0 = {ctx.to_expr(inst.expected)};")
         ctx.emit(
             f"{out}.field1 = atomic_compare_exchange_weak_explicit("
@@ -666,7 +703,9 @@ def _emit_atomic(ctx: "TranslatorContext", inst: _AtomicOp) -> bool:
         return False
     # atomicrmw
     if inst.ptr is None or inst.val_type is None or inst.val is None:
-        raise RuntimeError(f"Unsupported atomicrmw form in Metal lowering: '{inst.raw_line}'")
+        raise RuntimeError(
+            f"Unsupported atomicrmw form in Metal lowering: '{inst.raw_line}'"
+        )
     out_ssa = inst.out_ssa
     out = ctx.msl_id(out_ssa)
     ctx.ssa[out_ssa] = out
@@ -1320,15 +1359,7 @@ class MetalBackend(BaseBackend):
         passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
-        # Metal simdgroup matmul acceleration: infrastructure is in place
-        # (MetalSimdgroupEncodingAttr, LinearLayout, pass, Python binding) but
-        # the LLVM IR lowering for simdgroup dot ops is not yet complete.
-        # Enable with TRITON_METAL_ENABLE_SIMDGROUP=1 once the lowering lands.
-        import os
-        if os.environ.get("TRITON_METAL_ENABLE_SIMDGROUP"):
-            metal.passes.ttgpuir.add_accelerate_matmul(
-                pm, opt.arch, opt.num_warps
-            )
+        metal.passes.ttgpuir.add_accelerate_matmul(pm, opt.arch, opt.num_warps)
         passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
@@ -1676,9 +1707,11 @@ class MetalBackend(BaseBackend):
                         continue
                     ret_type = ctx.extract_call_ret_type(inst.ret_type)
                     fn_name = inst.fn_name
-                    if fn_name in (
-                        "__metal_simdgroup_load",
-                        "__metal_simdgroup_multiply_accumulate",
+                    if (
+                        fn_name.startswith("__metal_simdgroup_load")
+                        or fn_name.startswith(
+                            "__metal_simdgroup_multiply_accumulate"
+                        )
                     ):
                         elem_ty = "float"
                         vec_m = _RE_VEC_TYPE.match(ret_type)
@@ -1752,12 +1785,20 @@ class MetalBackend(BaseBackend):
                 elif isinstance(inst, _AggregateOp):
                     if inst.agg_op == "extractvalue":
                         if inst.agg_type is not None and inst.idx is not None:
-                            _, field_types = ctx.get_aggregate_struct_name(inst.agg_type)
-                            ft = field_types[inst.idx] if inst.idx < len(field_types) else "int"
+                            _, field_types = ctx.get_aggregate_struct_name(
+                                inst.agg_type
+                            )
+                            ft = (
+                                field_types[inst.idx]
+                                if inst.idx < len(field_types)
+                                else "int"
+                            )
                             ctx.record_ssa_decl(inst.out_ssa, msl_ty=ft)
                     elif inst.agg_op == "insertvalue":
                         if inst.agg_type is not None:
-                            struct_name, _ = ctx.get_aggregate_struct_name(inst.agg_type)
+                            struct_name, _ = ctx.get_aggregate_struct_name(
+                                inst.agg_type
+                            )
                             ctx.record_ssa_decl(inst.out_ssa, msl_ty=struct_name)
 
                 elif isinstance(inst, _AtomicOp):
@@ -1827,7 +1868,10 @@ class MetalBackend(BaseBackend):
                         target_id = ctx.block_ids.get(target)
                         if target_id is not None and target_id <= block_id:
                             has_backedge = True
-                    if scan_inst.true_label is not None and scan_inst.false_label is not None:
+                    if (
+                        scan_inst.true_label is not None
+                        and scan_inst.false_label is not None
+                    ):
                         t_lbl = normalize_label(scan_inst.true_label)
                         f_lbl = normalize_label(scan_inst.false_label)
                         t_id = ctx.block_ids.get(t_lbl)
@@ -1843,7 +1887,11 @@ class MetalBackend(BaseBackend):
             for inst in block_insts:
                 line = inst.raw_line
 
-                if isinstance(inst, _Terminator) and inst.term_kind == "ret" and inst.ret_val is None:
+                if (
+                    isinstance(inst, _Terminator)
+                    and inst.term_kind == "ret"
+                    and inst.ret_val is None
+                ):
                     ctx.emit("return;")
                     terminated = True
                     break

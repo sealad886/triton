@@ -121,6 +121,9 @@ struct LLVMDIScopePass : public impl::LLVMDIScopeBase<LLVMDIScopePass> {
         LLVM::DITypeAttr tyAttr =
             convertArrayType(context, arrayTy, fileAttr, dl, line);
         types.push_back(tyAttr);
+      } else if (isa<VectorType>(inTy)) {
+        LLVM::DITypeAttr tyAttr = convertType(context, inTy);
+        types.push_back(tyAttr);
       } else {
         // Here assume remaining inTys are only scalar types
         assert(inTy.isIntOrFloat() && "Expected scalar types");

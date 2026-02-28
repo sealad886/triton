@@ -106,6 +106,24 @@ unsigned defaultAllocationAnalysisScratchSizeFn(Operation *op) {
     return std::max<int>(dstTy.getNumElements(), threadsPerWarp) *
            getBitwidth(dstTy) / 8;
   }
+  if (auto dotOp = dyn_cast<DotOp>(op)) {
+    auto dTy = cast<RankedTensorType>(dotOp.getResult().getType());
+    if (auto metalEnc =
+            dyn_cast<gpu::MetalSimdgroupEncodingAttr>(dTy.getEncoding())) {
+      // Simdgroup matrix intrinsics operate on opaque simdgroup_matrix types
+      // populated via simdgroup_load from threadgroup memory.  We allocate two
+      // 8×8 scratch tiles per warp (one for each operand being loaded) so the
+      // DotOp lowering can spill per-thread register values → threadgroup
+      // memory → simdgroup_load.  Tile size uses the widest participating
+      // element type (the result type) to cover mixed-precision cases.
+      unsigned elemsPerTile =
+          metalEnc.getInstrShape()[0] * metalEnc.getInstrShape()[1]; // 64
+      unsigned numWarps = product(metalEnc.getWarpsPerCTA());
+      unsigned elemBits = dTy.getElementTypeBitWidth();
+      return 2 * numWarps * elemsPerTile * elemBits / 8;
+    }
+    return 0;
+  }
   if (auto cvtLayout = dyn_cast<gpu::ConvertLayoutOp>(op)) {
     auto srcTy = cvtLayout.getSrc().getType();
     auto dstTy = cvtLayout.getType();

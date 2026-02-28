@@ -28,9 +28,7 @@ _LLVM_FLAGS = (
 
 # ── Pre-compiled patterns (previously imported from compiler.py) ───
 _RE_LINE_CLEAN = re.compile(
-    r",\s*!\w+(?:\.\w+)*\s*![0-9]+.*$"
-    r"|\s*;.*$"
-    r"|\s+#\d+\s*$"
+    r",\s*!\w+(?:\.\w+)*\s*![0-9]+.*$" r"|\s*;.*$" r"|\s+#\d+\s*$"
 )
 _RE_CALL_OUT = re.compile(
     r"^("
@@ -90,16 +88,45 @@ _RE_FENCE = re.compile(
 )
 
 # ── Opcode dispatch sets ───────────────────────────────────────────
-_BINOP_OPCODES = frozenset({
-    "add", "sub", "mul", "udiv", "sdiv", "urem", "srem",
-    "shl", "lshr", "ashr", "and", "or", "xor",
-    "fadd", "fsub", "fmul", "fdiv", "frem",
-})
-_CAST_OPCODES = frozenset({
-    "sext", "zext", "trunc", "fptrunc", "fpext",
-    "sitofp", "uitofp", "fptosi", "fptoui",
-    "bitcast", "addrspacecast", "ptrtoint", "inttoptr",
-})
+_BINOP_OPCODES = frozenset(
+    {
+        "add",
+        "sub",
+        "mul",
+        "udiv",
+        "sdiv",
+        "urem",
+        "srem",
+        "shl",
+        "lshr",
+        "ashr",
+        "and",
+        "or",
+        "xor",
+        "fadd",
+        "fsub",
+        "fmul",
+        "fdiv",
+        "frem",
+    }
+)
+_CAST_OPCODES = frozenset(
+    {
+        "sext",
+        "zext",
+        "trunc",
+        "fptrunc",
+        "fpext",
+        "sitofp",
+        "uitofp",
+        "fptosi",
+        "fptoui",
+        "bitcast",
+        "addrspacecast",
+        "ptrtoint",
+        "inttoptr",
+    }
+)
 
 # ── Base class ──────────────────────────────────────────────────────
 
@@ -545,7 +572,7 @@ def parse_instruction(line: str) -> LLVMInstruction:
                     break
             if split_pos >= 0:
                 lhs = rest[:split_pos].strip()
-                rhs = rest[split_pos + 1:].strip()
+                rhs = rest[split_pos + 1 :].strip()
             else:
                 lhs = rest.strip()
                 rhs = ""
@@ -926,16 +953,26 @@ def parse_instruction(line: str) -> LLVMInstruction:
         rest = cleaned[3:].strip()
         if rest == "void":
             return Terminator(
-                raw_line=raw, opcode="ret", term_kind="ret", operands_raw=rest,
+                raw_line=raw,
+                opcode="ret",
+                term_kind="ret",
+                operands_raw=rest,
             )
         parts = rest.split(None, 1)
         if len(parts) == 2:
             return Terminator(
-                raw_line=raw, opcode="ret", term_kind="ret", operands_raw=rest,
-                ret_type=parts[0], ret_val=parts[1],
+                raw_line=raw,
+                opcode="ret",
+                term_kind="ret",
+                operands_raw=rest,
+                ret_type=parts[0],
+                ret_val=parts[1],
             )
         return Terminator(
-            raw_line=raw, opcode="ret", term_kind="ret", operands_raw=rest,
+            raw_line=raw,
+            opcode="ret",
+            term_kind="ret",
+            operands_raw=rest,
         )
 
     if opcode == "unreachable":

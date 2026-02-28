@@ -25,11 +25,10 @@ constexpr unsigned kSimdgroupN = 8;
 constexpr unsigned kSimdgroupK = 8;
 
 static bool isSimdgroupDTypeSupported(Type elemType, StringRef gpuFamily) {
-  if (elemType.isF32() || elemType.isF16())
-    return true;
-  if (elemType.isBF16())
-    return gpuFamily >= "apple9";
-  return false;
+  // Only f32 accumulator is supported in the current lowering.
+  // fp16/bf16 support can be added once the intrinsic codegen handles
+  // mixed-precision operand types.
+  return elemType.isF32();
 }
 
 static SmallVector<unsigned> computeWarpsPerCTA(int64_t M, int64_t N,
@@ -95,6 +94,15 @@ public:
     auto elemType = oldRetType.getElementType();
     if (!isSimdgroupDTypeSupported(elemType, gpuFamily))
       return failure();
+
+    // All operand types must also be supported (mixed-precision lowering is
+    // not yet implemented, so reject e.g. f16×f16→f32).
+    {
+      auto bTy = cast<RankedTensorType>(dotOp.getB().getType());
+      if (!isSimdgroupDTypeSupported(aType.getElementType(), gpuFamily) ||
+          !isSimdgroupDTypeSupported(bTy.getElementType(), gpuFamily))
+        return failure();
+    }
 
     auto warpsPerCTA = computeWarpsPerCTA(M, N, numWarps);
     SmallVector<unsigned> instrShape = {kSimdgroupM, kSimdgroupN, kSimdgroupK};
@@ -191,6 +199,16 @@ struct TritonMetalGPUAccelerateMatmulPass
       auto elemType = oldRetType.getElementType();
       if (!isSimdgroupDTypeSupported(elemType, gpuFamily))
         continue;
+
+      // All operand types must also be supported (mixed-precision lowering is
+      // not yet implemented, so reject e.g. f16×f16→f32).
+      if (!isSimdgroupDTypeSupported(aType.getElementType(), gpuFamily))
+        continue;
+      {
+        auto bTy = cast<RankedTensorType>(dotOp.getB().getType());
+        if (!isSimdgroupDTypeSupported(bTy.getElementType(), gpuFamily))
+          continue;
+      }
 
       auto warpsPerCTA = computeWarpsPerCTA(M, N, numWarps);
       SmallVector<unsigned> instrShape = {kSimdgroupM, kSimdgroupN,
