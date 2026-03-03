@@ -149,7 +149,6 @@ from triton.backends.metal.ir_types import Phi as _Phi
 from triton.backends.metal.ir_types import Select as _Select
 from triton.backends.metal.ir_types import Store as _Store
 from triton.backends.metal.ir_types import Terminator as _Terminator
-from triton.backends.metal.ir_types import UnknownInstruction as _UnknownInstruction
 from triton.backends.metal.ir_types import VectorOp as _VectorOp
 from triton.backends.metal.ir_types import parse_block as _parse_block  # noqa: E402
 
@@ -1295,6 +1294,15 @@ class MetalBackend(BaseBackend):
         self.binary_ext = "metal"
 
     def parse_options(self, opts) -> Any:
+        # Enable debug mode for ConSan/IISan so device-side assertions
+        # are not optimised out.
+        if any(
+            mode in opts.get("instrumentation_mode", "")
+            for mode in ["consan", "iisan"]
+        ):
+            opts["debug"] = True
+            opts["sanitize_overflow"] = False
+
         args = {"arch": self.target.arch}
         if "enable_fp_fusion" not in opts:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
@@ -1401,6 +1409,9 @@ class MetalBackend(BaseBackend):
             pm, f"metal:{opt.arch}", opt.num_warps, 32, opt.num_ctas
         )
         passes.ttgpuir.add_coalesce(pm)
+        # Apple Silicon has no TF32 tensor cores — pass False to explicitly
+        # disable reduced-precision f32 dot products.
+        passes.ttgpuir.add_f32_dot_tc(pm, False)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
         metal.passes.ttgpuir.add_accelerate_matmul(pm, opt.arch, opt.num_warps)
@@ -1432,6 +1443,16 @@ class MetalBackend(BaseBackend):
         if opt.instrumentation_mode == "fpsan":
             passes.ttgpuir.add_fp_sanitizer(pm)
         pm.run(mod, "make_ttgir")
+        # Defensive check: verify add_pipeline did not emit async copy ops
+        # that Metal cannot lower (no async copy hardware).
+        ir_text = str(mod)
+        assert "ttg.async_copy_global_to_local" not in ir_text, (
+            "Metal make_ttgir: add_pipeline emitted "
+            "ttg.async_copy_global_to_local — Metal has no async copy "
+            "hardware and cannot lower this op. This likely means "
+            "add_schedule_loops or add_assign_latencies was enabled "
+            "upstream; those passes must remain excluded for Metal."
+        )
         return mod
 
     def make_llir(self, src, metadata, options):
@@ -1471,6 +1492,14 @@ class MetalBackend(BaseBackend):
         _run_pass(
             passes.ttgpuir.add_allocate_shared_memory, "allocate_shared_memory", pm
         )
+        if "consan" in options.instrumentation_mode:
+            _run_pass(
+                passes.ttgpuir.add_concurrency_sanitizer,
+                "concurrency_sanitizer",
+                pm,
+            )
+            _run_pass(passes.common.add_canonicalizer, "canonicalizer_consan", pm)
+            _run_pass(passes.common.add_cse, "cse_consan", pm)
         _run_pass(
             passes.ttgpuir.add_allocate_global_scratch_memory,
             "allocate_global_scratch_memory",
@@ -1526,6 +1555,12 @@ class MetalBackend(BaseBackend):
         )
         metadata["global_scratch_align"] = (
             src.get_int_attr("ttg.global_scratch_memory_alignment") or 1
+        )
+        metadata["profile_scratch_size"] = (
+            src.get_int_attr("ttg.profile_scratch_memory_size") or 0
+        )
+        metadata["profile_scratch_align"] = (
+            src.get_int_attr("ttg.profile_scratch_memory_alignment") or 1
         )
 
         ret = str(llvm_mod)
