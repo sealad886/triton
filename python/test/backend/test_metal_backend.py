@@ -259,7 +259,7 @@ class TestMetalBackend:
         backend = MetalBackend(target)
         module_map = backend.get_module_map()
         assert "triton.language.extra.libdevice" in module_map
-        from third_party.metal.language import libdevice
+        from third_party.metal.language.metal import libdevice
 
         assert module_map["triton.language.extra.libdevice"] is libdevice
 
@@ -8440,7 +8440,7 @@ class TestMetalDriverFeatures:
 
     @skip_non_darwin
     def test_metal_ext_module_importable(self):
-        from third_party.metal.language import metal_ext
+        from third_party.metal.language.metal import metal_ext
 
         assert hasattr(metal_ext, "thread_position_in_grid")
         assert hasattr(metal_ext, "simdgroup_index")
@@ -8450,7 +8450,7 @@ class TestMetalDriverFeatures:
 
     @skip_non_darwin
     def test_metal_ext_builtins_dict(self):
-        from third_party.metal.language import metal_ext
+        from third_party.metal.language.metal import metal_ext
 
         assert isinstance(metal_ext.METAL_BUILTINS, dict)
         assert "thread_position_in_grid" in metal_ext.METAL_BUILTINS
@@ -9307,7 +9307,7 @@ class TestMetalLibdevice:
 
     def test_libdevice_map_completeness(self):
         """METAL_LIBDEVICE_MAP covers all standard math operations."""
-        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+        from third_party.metal.language.metal.libdevice import METAL_LIBDEVICE_MAP
 
         required_ops = {
             "clz",
@@ -9329,7 +9329,7 @@ class TestMetalLibdevice:
 
     def test_clz_mapping(self):
         """clz maps to MSL clz()."""
-        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+        from third_party.metal.language.metal.libdevice import METAL_LIBDEVICE_MAP
 
         extern_name, msl_fn = METAL_LIBDEVICE_MAP["clz"]
         assert extern_name == "__metal_clz"
@@ -9337,7 +9337,7 @@ class TestMetalLibdevice:
 
     def test_popc_mapping(self):
         """popc maps to MSL popcount()."""
-        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+        from third_party.metal.language.metal.libdevice import METAL_LIBDEVICE_MAP
 
         extern_name, msl_fn = METAL_LIBDEVICE_MAP["popc"]
         assert extern_name == "__metal_popcount"
@@ -9345,7 +9345,7 @@ class TestMetalLibdevice:
 
     def test_trig_mappings(self):
         """sin/cos/exp2/log2 are all present with correct MSL names."""
-        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+        from third_party.metal.language.metal.libdevice import METAL_LIBDEVICE_MAP
 
         for op in ("sin", "cos", "exp2", "log2"):
             assert op in METAL_LIBDEVICE_MAP, f"{op} missing"
@@ -9354,14 +9354,14 @@ class TestMetalLibdevice:
 
     def test_rounding_mappings(self):
         """ceil/floor/trunc/round are present."""
-        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+        from third_party.metal.language.metal.libdevice import METAL_LIBDEVICE_MAP
 
         for op in ("ceil", "floor", "trunc", "round"):
             assert op in METAL_LIBDEVICE_MAP, f"{op} missing"
 
     def test_saturate_is_metal_specific(self):
         """saturate is a Metal-specific operation not found in NVIDIA libdevice."""
-        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+        from third_party.metal.language.metal.libdevice import METAL_LIBDEVICE_MAP
 
         assert "saturate" in METAL_LIBDEVICE_MAP
         _, msl_fn = METAL_LIBDEVICE_MAP["saturate"]
@@ -9369,7 +9369,7 @@ class TestMetalLibdevice:
 
     def test_libdevice_extern_functions_importable(self):
         """All @core.extern libdevice functions are importable."""
-        from third_party.metal.language import libdevice
+        from third_party.metal.language.metal import libdevice
 
         func_names = [
             "clz",
@@ -9396,7 +9396,7 @@ class TestMetalLibdevice:
 
     def test_map_entries_are_string_pairs(self):
         """Every METAL_LIBDEVICE_MAP entry is a (str, str) tuple."""
-        from third_party.metal.language.libdevice import METAL_LIBDEVICE_MAP
+        from third_party.metal.language.metal.libdevice import METAL_LIBDEVICE_MAP
 
         for key, (extern_name, msl_fn) in METAL_LIBDEVICE_MAP.items():
             assert isinstance(key, str)
@@ -9412,7 +9412,7 @@ class TestMetalFP8Converters:
 
     def test_fp8e5m2_to_fp16_roundtrip(self):
         """E5M2 encode → decode round-trips for representable values."""
-        from third_party.metal.language.fp8_utils import (
+        from third_party.metal.language.metal.fp8_utils import (
             convert_fp8e5m2_to_fp16,
             convert_fp16_to_fp8e5m2,
         )
@@ -9425,7 +9425,7 @@ class TestMetalFP8Converters:
 
     def test_fp8e4b15_to_fp16_roundtrip(self):
         """E4B15 encode → decode round-trips for small representable values."""
-        from third_party.metal.language.fp8_utils import (
+        from third_party.metal.language.metal.fp8_utils import (
             convert_fp8e4b15_to_fp16,
             convert_fp16_to_fp8e4b15,
         )
@@ -9442,7 +9442,7 @@ class TestMetalFP8Converters:
         """E5M2 handles NaN and Inf correctly."""
         import math
 
-        from third_party.metal.language.fp8_utils import (
+        from third_party.metal.language.metal.fp8_utils import (
             convert_fp8e5m2_to_fp16,
             convert_fp16_to_fp8e5m2,
         )
@@ -9461,7 +9461,7 @@ class TestMetalFP8Converters:
 
     def test_fp8e5m2_denormals(self):
         """E5M2 denormal (subnormal) values decode correctly."""
-        from third_party.metal.language.fp8_utils import convert_fp8e5m2_to_fp16
+        from third_party.metal.language.metal.fp8_utils import convert_fp8e5m2_to_fp16
 
         # Smallest E5M2 denormal: 0 00000 01 = 2^(1-15) * 0.25 = 2^-16
         smallest_denorm = convert_fp8e5m2_to_fp16(0x01)
@@ -9479,7 +9479,7 @@ class TestMetalFP8Converters:
         """Known E5M2 encodings produce expected values."""
         import math
 
-        from third_party.metal.language.fp8_utils import convert_fp8e5m2_to_fp16
+        from third_party.metal.language.metal.fp8_utils import convert_fp8e5m2_to_fp16
 
         known = {
             0x00: 0.0,  # +0
@@ -9503,7 +9503,7 @@ class TestMetalFP8Converters:
         """E4B15 has no Inf — overflows to NaN."""
         import math
 
-        from third_party.metal.language.fp8_utils import (
+        from third_party.metal.language.metal.fp8_utils import (
             convert_fp8e4b15_to_fp16,
             convert_fp16_to_fp8e4b15,
         )
@@ -9518,7 +9518,7 @@ class TestMetalFP8Converters:
 
     def test_fp8_helper_functions(self):
         """fp16_bits_to_float and float_to_fp16_bits round-trip."""
-        from third_party.metal.language.fp8_utils import (
+        from third_party.metal.language.metal.fp8_utils import (
             float_to_fp16_bits,
             fp16_bits_to_float,
         )
@@ -9642,6 +9642,7 @@ class TestMetalAOTRuntime:
             "third_party",
             "metal",
             "tools",
+            "metal",
             "test_aot_runtime.m",
         ))
     RUNTIME_SCRIPT_PATH = os.path.normpath(

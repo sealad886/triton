@@ -1297,8 +1297,7 @@ class MetalBackend(BaseBackend):
         # Enable debug mode for ConSan/IISan so device-side assertions
         # are not optimised out.
         if any(
-            mode in opts.get("instrumentation_mode", "")
-            for mode in ["consan", "iisan"]
+            mode in opts.get("instrumentation_mode", "") for mode in ["consan", "iisan"]
         ):
             opts["debug"] = True
             opts["sanitize_overflow"] = False
@@ -1342,7 +1341,7 @@ class MetalBackend(BaseBackend):
         return {"min_dot_size": lambda lhs_type, rhs_type: (1, 1, 1)}
 
     def get_module_map(self) -> Dict[str, ModuleType]:
-        from third_party.metal.language import libdevice
+        from third_party.metal.language.metal import libdevice
 
         return {"triton.language.extra.libdevice": libdevice}
 

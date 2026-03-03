@@ -31,6 +31,7 @@ HARNESS_SRC = (
     / "third_party"
     / "metal"
     / "tools"
+    / "metal"
     / "test_aot_runtime.m"
 )
 
