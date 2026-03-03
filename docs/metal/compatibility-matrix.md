@@ -1,6 +1,6 @@
 # Metal Backend Compatibility Matrix
 
-Last updated: 2026-07-03
+Last updated: 2026-03-03
 
 ## Supported Configurations
 
@@ -40,6 +40,11 @@ Last updated: 2026-07-03
 | Join/split/interleave | ✅ | ✅ | ✅ |
 | Clamp + propagate_nan | ✅ | ✅ | ✅ |
 | 3D grid launch | ✅ | ✅ | ✅ |
+| Direct GPU→Metal lowering (no NVVM) | ✅ | ✅ | ✅ |
+| Concurrency sanitizer (consan) | ✅ | ✅ | ✅ |
+| Profile scratch metadata | ✅ | ✅ | ✅ |
+| f32 dot TF32 opt-out | ✅ | ✅ | ✅ |
+| Async copy guard assertion | ✅ | ✅ | ✅ |
 
 ## Known Limitations
 
@@ -63,7 +68,7 @@ Last updated: 2026-07-03
 
 ## Validated Branch Snapshot
 
-Validated on branch `feat/metal-support` (2026-07-03):
+Validated on branch `feat/metal-support` (2026-03-03):
 
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py python/test/backend/test_ir_types.py`
   - `609 passed, 1 skipped`

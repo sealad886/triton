@@ -3,8 +3,19 @@
 **Date**: 2026-02-28
 **Branch**: `feat/metal-support`
 **Baseline**: 531 passed, 5 skipped
-**Final**: 609 passed, 1 skipped (2026-07-03)
-**Status**: ✅ COMPLETE — All 14 phases finished
+**Final**: 609 passed, 1 skipped (2026-03-03)
+**Status**: ✅ COMPLETE — All 14 phases + 6 hardening items finished
+
+### Post-Plan Hardening (2026-03-03)
+
+Six additional actionable items identified and implemented:
+
+1. **profile_scratch metadata** — `profile_scratch_size`/`profile_scratch_align` now emitted in `make_llir`
+2. **Concurrency sanitizer** — `consan` mode wired through `parse_options` and `make_llir`
+3. **Async copy guard** — Defensive assertion after `make_ttgir` verifying no `ttg.async_copy_global_to_local` ops leaked
+4. **NVVM dialect decoupled** — `populateGpuToNVVMConversionPatterns` replaced with direct `GpuToMetalPatterns`; NVVM no longer a required legal dialect
+5. **ir_types cleanup** — Removed unused `_UnknownInstruction` import; confirmed all other dataclasses actively consumed
+6. **f32_dot_tc opt-out** — Explicit `add_f32_dot_tc(pm, False)` added to `make_ttgir`
 
 ---
 

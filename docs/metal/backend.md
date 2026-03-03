@@ -92,8 +92,10 @@ third_party/metal/
 │   └── MetalGPUAttrDefs.td     # Attribute definitions
 └── lib/TritonMetalGPUToLLVM/
     ├── TritonGPUToLLVM.cpp     # Main conversion pass
+    ├── GpuToMetalPatterns.cpp/.h # Direct GPU→Metal op lowering
     ├── TargetInfo.cpp/.h       # Metal target info (shuffles, atomics)
     ├── MetalGPUOpsToLLVM.cpp/.h # MetalGPU ops → LLVM lowering
+    ├── NvidiaArtifactLowering.cpp/.h # Safety-net rewriter for residual NVVM artifacts
     └── Utility.cpp/.h          # Shared lowering utilities
 ```
 
@@ -132,6 +134,19 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
   are handled, including fp8e5m2 compile-path lowering for casts and dot/matmul
   kernels. fp8 runtime numerics and broader quantized-path validation still
   require additional coverage.
+- **NVVM dialect decoupled**: GPU dialect ops (`gpu::ThreadIdOp`,
+  `gpu::BarrierOp`) are now lowered directly to Metal extern calls via
+  `GpuToMetalPatterns` without requiring the NVVM dialect as an intermediate.
+  `NvidiaArtifactLowering` is retained as a safety net for residual
+  `ttg.warp_id` and inline PTX asm patterns.
+- **Concurrency sanitizer**: `consan` instrumentation mode is now wired
+  through `parse_options` and `make_llir`. The pass emits device-side
+  assertions; full runtime validation on Metal requires further testing.
+- **Profiling scratch memory**: `profile_scratch_size` and
+  `profile_scratch_align` metadata are now populated. The driver accepts
+  but discards the value until profiling instrumentation is implemented.
+- **TF32 dot products**: Apple Silicon has no TF32 tensor cores;
+  `add_f32_dot_tc(pm, False)` is explicitly called to opt out.
 - **Warp specialization**: Metal has no hardware equivalent to NVIDIA's
   Hopper async-warp model. There is no Metal API for independent warp
   scheduling.
