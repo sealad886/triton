@@ -3,6 +3,7 @@ add_triton_library(TritonMetalGPUToLLVM
   DotOpToLLVM.cpp
   DotOpToLLVM/MetalSimdgroupDot.cpp
   FpToFpOpToLLVM.cpp
+  GpuToMetalPatterns.cpp
   LoadStoreOpToLLVM.cpp
   MetalGPUOpsToLLVM.cpp
   NvidiaArtifactLowering.cpp

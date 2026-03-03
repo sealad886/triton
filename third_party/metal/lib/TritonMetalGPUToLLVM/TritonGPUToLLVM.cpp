@@ -1,6 +1,7 @@
 #include "TritonMetalGPUToLLVM/Passes.h"
 #include "BarrierOpToLLVM.h"
 #include "DotOpToLLVM.h"
+#include "GpuToMetalPatterns.h"
 #include "MetalGPUOpsToLLVM.h"
 #include "SPMDOpToLLVM.h"
 #include "FpToFpOpToLLVM.h"
@@ -9,14 +10,12 @@
 #include "TargetInfo.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
-#include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "triton/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVMBase.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
@@ -44,7 +43,6 @@ public:
   explicit TritonLLVMFunctionConversionTarget(MLIRContext &ctx)
       : ConversionTarget(ctx) {
     addLegalDialect<LLVM::LLVMDialect>();
-    addLegalDialect<NVVM::NVVMDialect>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
   }
 };
@@ -54,7 +52,6 @@ public:
   explicit TritonLLVMConversionTarget(MLIRContext &ctx)
       : ConversionTarget(ctx) {
     addLegalDialect<LLVM::LLVMDialect>();
-    addLegalDialect<NVVM::NVVMDialect>();
     addIllegalDialect<triton::TritonDialect>();
     addIllegalDialect<triton::metalgpu::MetalGPUDialect>();
     addDynamicallyLegalDialect<triton::gpu::TritonGPUDialect>(
@@ -74,7 +71,7 @@ struct ConvertTritonMetalGPUToLLVM
       ConvertTritonMetalGPUToLLVM>::ConvertTritonMetalGPUToLLVMBase;
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<LLVM::LLVMDialect, NVVM::NVVMDialect, mlir::gpu::GPUDialect,
+    registry.insert<LLVM::LLVMDialect, mlir::gpu::GPUDialect,
                     triton::metalgpu::MetalGPUDialect>();
   }
 
@@ -155,7 +152,7 @@ struct ConvertTritonMetalGPUToLLVM
     mlir::arith::populateCeilFloorDivExpandOpsPatterns(patterns);
     mlir::arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
     mlir::populateMathToLLVMConversionPatterns(typeConverter, patterns);
-    mlir::populateGpuToNVVMConversionPatterns(typeConverter, patterns);
+    Metal::populateGpuToMetalConversionPatterns(typeConverter, patterns, benefit);
     mlir::cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
     mlir::ub::populateUBToLLVMConversionPatterns(typeConverter, patterns);
 
