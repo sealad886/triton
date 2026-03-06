@@ -35,7 +35,10 @@ def _has_mps_runtime() -> bool:
         import torch
 
         return bool(
-            hasattr(torch.backends, "mps") and torch.backends.mps.is_built() and torch.backends.mps.is_available())
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_built()
+            and torch.backends.mps.is_available()
+        )
     except Exception:
         return False
 
@@ -181,13 +184,17 @@ class TestMetalBackend:
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
         with patch(
-                "third_party.metal.backend.compiler._get_metal_sdk_version",
-                return_value="sdk-version",
+            "third_party.metal.backend.compiler._get_metal_sdk_version",
+            return_value="sdk-version",
         ), patch(
-                "third_party.metal.backend.compiler._get_metal_backend_source_hash",
-                return_value="backend-src-hash",
-        ), patch("triton.__version__", "triton-version", create=True):
-            assert (backend.hash() == "sdk-version-apple8-triton-version-backend-src-hash")
+            "third_party.metal.backend.compiler._get_metal_backend_source_hash",
+            return_value="backend-src-hash",
+        ), patch(
+            "triton.__version__", "triton-version", create=True
+        ):
+            assert (
+                backend.hash() == "sdk-version-apple8-triton-version-backend-src-hash"
+            )
 
     def test_parse_options(self):
         from third_party.metal.backend.compiler import MetalBackend
@@ -249,6 +256,30 @@ class TestMetalBackend:
         backend = MetalBackend(target)
         # load_dialects should not raise
         backend.load_dialects(None)
+
+    def test_load_dialects_missing_plugin_raises_clear_error(self, monkeypatch):
+        from third_party.metal.backend import compiler as metal_compiler
+        from third_party.metal.backend.compiler import MetalBackend
+
+        from triton.backends.compiler import GPUTarget
+
+        target = GPUTarget("metal", "apple8", 32)
+        backend = MetalBackend(target)
+
+        def _missing_plugin():
+            raise RuntimeError(
+                "Triton Metal backend requires the compiled "
+                "`triton._C.libtriton.metal` extension."
+            )
+
+        monkeypatch.setattr(
+            metal_compiler, "_load_triton_metal_plugin", _missing_plugin
+        )
+
+        with pytest.raises(
+            RuntimeError, match=r"compiled `triton\._C\.libtriton\.metal` extension"
+        ):
+            backend.load_dialects(None)
 
     def test_get_module_map_has_libdevice(self):
         from third_party.metal.backend.compiler import MetalBackend
@@ -565,7 +596,10 @@ entry:
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
         assert "threadgroup_barrier(mem_flags::mem_threadgroup);" in msl
         assert "threadgroup_barrier(mem_flags::mem_device);" in msl
-        assert ("threadgroup_barrier((mem_flags::mem_threadgroup | mem_flags::mem_device));" in msl)
+        assert (
+            "threadgroup_barrier((mem_flags::mem_threadgroup | mem_flags::mem_device));"
+            in msl
+        )
 
     def test_make_metal_ir_translates_phi_nodes(self):
         from third_party.metal.backend.compiler import MetalBackend
@@ -733,11 +767,17 @@ class TestMetalDriver:
 
         utils = MetalUtils()
         props = utils.get_device_properties()
+        assert "arch" in props
         assert "max_shared_mem" in props
+        assert "max_num_regs" in props
+        assert "warpSize" in props
+        assert "max_threads_per_sm" in props
         assert "max_threadgroup_memory_length" in props
+        assert "sm_clock_rate" in props
         assert "mem_clock_rate" in props
         assert "mem_bus_width" in props
         assert "multiprocessor_count" in props
+        assert props["warpSize"] == 32
 
     def test_load_binary_runtime_contract(self):
         from third_party.metal.backend.driver import MetalUtils
@@ -749,17 +789,20 @@ class TestMetalDriver:
         dummy_metallib = _DummyHandle()
         utils = MetalUtils()
 
-        with patch.object(MetalUtils, "_load_msl_source_handle",
-                          return_value=dummy), patch.object(MetalUtils, "_load_metallib_handle",
-                                                            return_value=dummy_metallib):
+        with patch.object(
+            MetalUtils, "_load_msl_source_handle", return_value=dummy
+        ), patch.object(
+            MetalUtils, "_load_metallib_handle", return_value=dummy_metallib
+        ):
             direct = utils.load_binary("kernel void k() {}")
             assert direct is dummy
 
             direct_metallib = utils.load_binary(b"MTLBdummy")
             assert direct_metallib is dummy_metallib
 
-            module, function, n_regs, n_spills, n_max_threads = utils.load_binary("kernel_name", "kernel void k() {}",
-                                                                                  0, 0)
+            module, function, n_regs, n_spills, n_max_threads = utils.load_binary(
+                "kernel_name", "kernel void k() {}", 0, 0
+            )
             assert module is dummy
             assert function is dummy
             assert n_regs == 0
@@ -940,17 +983,15 @@ class TestMetalKernelLaunch:
         utils = MetalUtils()
         handle = utils.load_binary(binary)
 
-        out = np.zeros(16, dtype=np.float32)
+        out_buf = handle.device.newBufferWithLength_options_(16 * 4, 0)
         handle.launch_kernel(
             name="write_constant",
-            args=[out],
+            args=[out_buf],
             grid=(16, 1, 1),
             block=(16, 1, 1),
         )
-        # After launch, the output buffer should contain 42.0
-        # Note: this test runs on real GPU hardware
-        # We just verify no crash — readback verification depends on
-        # Metal buffer storage mode.
+        results = np.frombuffer(out_buf.contents().as_buffer(16 * 4), dtype=np.float32)
+        assert np.allclose(results, np.full(16, 42.0, dtype=np.float32))
 
 
 # ── Dynamic-loop reduction kernels ──────────────────────────────────
@@ -1157,8 +1198,16 @@ class TestMetalRealWorldCompileCases:
 
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
-                a_ptrs = (a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak)
-                b_ptrs = (b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn)
+                a_ptrs = (
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak
+                )
+                b_ptrs = (
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn
+                )
                 a = tl.load(
                     a_ptrs,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
@@ -1235,12 +1284,16 @@ class TestMetalRealWorldCompileCases:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -1881,7 +1934,9 @@ entry:
 """
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
-        assert ("-INFINITY" in msl), "hex float 0xFFF... (-inf) must become -INFINITY in MSL"
+        assert (
+            "-INFINITY" in msl
+        ), "hex float 0xFFF... (-inf) must become -INFINITY in MSL"
         assert "0xFFF0000000000000" not in msl, "raw hex must not appear in MSL output"
 
     def test_constant_to_msl_hex_pos_inf(self):
@@ -2960,15 +3015,24 @@ pad:
     def test_unsupported_ir_diagnostic_categories(self):
         """Diagnostic entries are classified correctly."""
         from third_party.metal.backend.compiler import (
-            _classify_unsupported_ir, )
+            _classify_unsupported_ir,
+        )
 
         assert _classify_unsupported_ir("invoke void @foo()") == "instruction"
         assert _classify_unsupported_ir("resume { ptr, i32 } %r") == "instruction"
         assert _classify_unsupported_ir("landingpad token cleanup") == "instruction"
-        assert (_classify_unsupported_ir("indirectbr ptr %addr, [label %a]") == "instruction")
+        assert (
+            _classify_unsupported_ir("indirectbr ptr %addr, [label %a]")
+            == "instruction"
+        )
         assert _classify_unsupported_ir("!0 = !{i32 1}") == "metadata"
         assert _classify_unsupported_ir("attributes #0 = { nounwind }") == "metadata"
-        assert (_classify_unsupported_ir("%r = call i32 @llvm.some.unknown.intrinsic(i32 %x)") == "intrinsic")
+        assert (
+            _classify_unsupported_ir(
+                "%r = call i32 @llvm.some.unknown.intrinsic(i32 %x)"
+            )
+            == "intrinsic"
+        )
         assert _classify_unsupported_ir("something completely unknown") == "unknown"
 
     def test_unsupported_ir_artifact_file(self):
@@ -3096,7 +3160,9 @@ pad:
                 with pytest.raises(RuntimeError) as ctx:
                     MetalBackend.make_metal_ir(ir, {}, None)
                 msg = str(ctx.value)
-                assert ("unsupported LLVM IR" in msg.lower() or "unsupported" in msg.lower())
+                assert (
+                    "unsupported LLVM IR" in msg.lower() or "unsupported" in msg.lower()
+                )
                 assert "invoke" in msg
 
     def test_normal_path_zero_overhead(self):
@@ -3161,12 +3227,16 @@ class TestMetalGEMMDtypes:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -3229,12 +3299,16 @@ class TestMetalGEMMDtypes:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -3303,12 +3377,16 @@ class TestMetalGEMMDtypes:
                 a_mask = (offs_m[:, None] < m) & (offs_k[None, :] + kk < k)
                 b_mask = (offs_k[:, None] + kk < k) & (offs_n[None, :] < n)
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=a_mask,
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=b_mask,
                     other=0.0,
                 )
@@ -3371,12 +3449,16 @@ class TestMetalGEMMDtypes:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -3570,12 +3652,16 @@ class TestMetalMatmulRegression:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -3613,8 +3699,12 @@ class TestMetalMatmulRegression:
         if simdgroup_mma_count == 0:
             simdgroup_mma_count = msl_text.count("__metal_sg_mma_")
         total_matmul_ops = fma_count + simdgroup_mma_count
-        assert (total_matmul_ops >= 1), "Expected matmul ops (fma or simdgroup_multiply_accumulate) in MSL, got 0"
-        assert (fma_count < 50000), f"fma() count suspiciously high ({fma_count}), possible code bloat"
+        assert (
+            total_matmul_ops >= 1
+        ), "Expected matmul ops (fma or simdgroup_multiply_accumulate) in MSL, got 0"
+        assert (
+            fma_count < 50000
+        ), f"fma() count suspiciously high ({fma_count}), possible code bloat"
 
     @skip_non_darwin
     @skip_no_xcrun
@@ -3650,12 +3740,16 @@ class TestMetalMatmulRegression:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -3689,8 +3783,12 @@ class TestMetalMatmulRegression:
             msl_text = msl_text.decode("utf-8", errors="replace")
 
         line_count = len(msl_text.splitlines())
-        assert (line_count < 10000), f"Matmul MSL has {line_count} lines - possible code bloat (expected < 10000)"
-        assert (line_count > 20), f"Matmul MSL has only {line_count} lines - suspiciously small"
+        assert (
+            line_count < 10000
+        ), f"Matmul MSL has {line_count} lines - possible code bloat (expected < 10000)"
+        assert (
+            line_count > 20
+        ), f"Matmul MSL has only {line_count} lines - suspiciously small"
 
 
 # ── Runtime Conformance Tests ──────────────────────────────────────
@@ -3823,8 +3921,10 @@ class TestMetalRuntimeConformance:
         # Need a dummy library; use a trivial metallib
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
 
-        source = ("#include <metal_stdlib>\nusing namespace metal;\n"
-                  "kernel void noop(uint id [[thread_position_in_grid]]) {}\n")
+        source = (
+            "#include <metal_stdlib>\nusing namespace metal;\n"
+            "kernel void noop(uint id [[thread_position_in_grid]]) {}\n"
+        )
         opts = MetalOptions(arch="apple8")
         binary = MetalBackend.make_metallib(source, {}, opts)
 
@@ -3888,8 +3988,9 @@ class TestMetalRuntimeConformance:
             utils._execution_mode = None
             utils._Metal = None
             utils._torch = None
-            with patch("third_party.metal.backend.driver._get_torch_module",
-                       return_value=None), patch.dict("sys.modules", {"torch": None}):
+            with patch(
+                "third_party.metal.backend.driver._get_torch_module", return_value=None
+            ), patch.dict("sys.modules", {"torch": None}):
                 mode = utils.resolve_execution_mode()
             assert mode == "unavailable"
         finally:
@@ -3978,15 +4079,20 @@ class TestMetalRuntimeConformance:
 
         utils = MetalUtils()
         dummy_handle = object()
-        with patch.object(utils, "resolve_execution_mode", return_value="pyobjc"), patch.object(
-                utils, "get_device_properties",
-                return_value={"gpu_family":
-                              "apple8"}), patch("third_party.metal.backend.driver._get_torch_module",
-                                                return_value=None), patch.object(utils, "_torch", None), patch(
-                                                    "third_party.metal.backend.compiler.MetalBackend.make_metallib",
-                                                    return_value=b"MTLB",
-                                                ), patch.object(utils, "_load_metallib_handle",
-                                                                return_value=dummy_handle) as load_metallib:
+        with patch.object(
+            utils, "resolve_execution_mode", return_value="pyobjc"
+        ), patch.object(
+            utils, "get_device_properties", return_value={"gpu_family": "apple8"}
+        ), patch(
+            "third_party.metal.backend.driver._get_torch_module", return_value=None
+        ), patch.object(
+            utils, "_torch", None
+        ), patch(
+            "third_party.metal.backend.compiler.MetalBackend.make_metallib",
+            return_value=b"MTLB",
+        ), patch.object(
+            utils, "_load_metallib_handle", return_value=dummy_handle
+        ) as load_metallib:
             handle = utils._load_msl_source_handle("kernel void test_fn() {}")
 
         assert handle is dummy_handle
@@ -4003,8 +4109,9 @@ class TestMetalRuntimeConformance:
         )
         handle.launch_kernel = MagicMock()
         utils = MetalUtils()
-        with patch.object(utils, "activate_stream",
-                          return_value=(0, 9)), patch.object(utils, "restore_stream") as restore_stream:
+        with patch.object(utils, "activate_stream", return_value=(0, 9)), patch.object(
+            utils, "restore_stream"
+        ) as restore_stream:
             utils.launch(
                 1,
                 1,
@@ -4040,8 +4147,9 @@ class TestMetalRuntimeConformance:
         )
         handle.launch_kernel = MagicMock()
         utils = MetalUtils()
-        with patch.object(utils, "activate_stream",
-                          return_value=(0, 1)), patch.object(utils, "restore_stream") as restore_stream:
+        with patch.object(utils, "activate_stream", return_value=(0, 1)), patch.object(
+            utils, "restore_stream"
+        ) as restore_stream:
             with pytest.raises(RuntimeError, match="cooperative-grid"):
                 utils.launch(
                     1,
@@ -4603,8 +4711,8 @@ class TestMetalCrossBackendNumerics:
         """Verify CPU reference generation is deterministic."""
         import numpy as np
 
-        ref1 = MetalTestHarness.create_reference_tensors((128, ), seed=42)
-        ref2 = MetalTestHarness.create_reference_tensors((128, ), seed=42)
+        ref1 = MetalTestHarness.create_reference_tensors((128,), seed=42)
+        ref2 = MetalTestHarness.create_reference_tensors((128,), seed=42)
         np.testing.assert_array_equal(ref1, ref2)
 
     def test_tolerance_bounds(self):
@@ -4626,18 +4734,22 @@ class TestMetalCrossBackendNumerics:
         """Vector add CPU reference matches expected output."""
         import numpy as np
 
-        a = MetalTestHarness.create_reference_tensors((1024, ), seed=1)
-        b = MetalTestHarness.create_reference_tensors((1024, ), seed=2)
+        a = MetalTestHarness.create_reference_tensors((1024,), seed=1)
+        b = MetalTestHarness.create_reference_tensors((1024,), seed=2)
         expected = a + b
-        assert expected.shape == (1024, )
+        assert expected.shape == (1024,)
         assert expected.dtype == np.float32
 
     def test_matmul_numerics_cpu_reference(self):
         """Matmul CPU reference matches numpy."""
         import numpy as np
 
-        a = MetalTestHarness.create_reference_tensors((64, 32), seed=1).astype(np.float32)
-        b = MetalTestHarness.create_reference_tensors((32, 64), seed=2).astype(np.float32)
+        a = MetalTestHarness.create_reference_tensors((64, 32), seed=1).astype(
+            np.float32
+        )
+        b = MetalTestHarness.create_reference_tensors((32, 64), seed=2).astype(
+            np.float32
+        )
         expected = a @ b
         assert expected.shape == (64, 64)
 
@@ -4667,13 +4779,13 @@ class TestMetalRuntimeMLCorrectness:
 
         torch.manual_seed(7)
         n = 4096
-        x_cpu = torch.randn((n, ), dtype=torch.float32)
-        y_cpu = torch.randn((n, ), dtype=torch.float32)
+        x_cpu = torch.randn((n,), dtype=torch.float32)
+        y_cpu = torch.randn((n,), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
         y_mps = y_cpu.to("mps")
         out_mps = torch.empty_like(x_mps)
 
-        _vadd[(triton.cdiv(n, 128), )](x_mps, y_mps, out_mps, n, BLOCK=128)
+        _vadd[(triton.cdiv(n, 128),)](x_mps, y_mps, out_mps, n, BLOCK=128)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -4701,13 +4813,13 @@ class TestMetalRuntimeMLCorrectness:
         torch.manual_seed(17)
         n = 4096
         # Keep values in range to avoid overflow-semantics ambiguity.
-        x_cpu = torch.randint(-32, 32, (n, ), dtype=torch.int8)
-        y_cpu = torch.randint(-32, 32, (n, ), dtype=torch.int8)
+        x_cpu = torch.randint(-32, 32, (n,), dtype=torch.int8)
+        y_cpu = torch.randint(-32, 32, (n,), dtype=torch.int8)
         x_mps = x_cpu.to("mps")
         y_mps = y_cpu.to("mps")
         out_mps = torch.empty_like(x_mps)
 
-        _vadd_i8[(triton.cdiv(n, 256), )](x_mps, y_mps, out_mps, n, BLOCK=256)
+        _vadd_i8[(triton.cdiv(n, 256),)](x_mps, y_mps, out_mps, n, BLOCK=256)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -4833,12 +4945,16 @@ class TestMetalRuntimeMLCorrectness:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -4906,7 +5022,7 @@ class TestMetalRuntimeMLCorrectness:
         x_mps = x_cpu.to("mps")
         y_mps = torch.empty_like(x_mps)
 
-        _row_softmax[(rows, )](x_mps, y_mps, cols, BLOCK=64)
+        _row_softmax[(rows,)](x_mps, y_mps, cols, BLOCK=64)
         torch.mps.synchronize()
         y_cpu = y_mps.cpu()
         torch.mps.synchronize()
@@ -4952,20 +5068,22 @@ class TestMetalRuntimeMLCorrectness:
         rows, cols = 4, 64
         eps = 1e-5
         x_cpu = torch.randn((rows, cols), dtype=torch.float32)
-        w_cpu = torch.randn((cols, ), dtype=torch.float32)
-        b_cpu = torch.randn((cols, ), dtype=torch.float32)
+        w_cpu = torch.randn((cols,), dtype=torch.float32)
+        b_cpu = torch.randn((cols,), dtype=torch.float32)
 
         x_mps = x_cpu.to("mps")
         w_mps = w_cpu.to("mps")
         b_mps = b_cpu.to("mps")
         y_mps = torch.empty_like(x_mps)
 
-        _row_layernorm[(rows, )](x_mps, w_mps, b_mps, y_mps, cols, eps, BLOCK=64)
+        _row_layernorm[(rows,)](x_mps, w_mps, b_mps, y_mps, cols, eps, BLOCK=64)
         torch.mps.synchronize()
         y_cpu = y_mps.cpu()
         torch.mps.synchronize()
 
-        expected = torch.nn.functional.layer_norm(x_cpu, normalized_shape=(cols, ), weight=w_cpu, bias=b_cpu, eps=eps)
+        expected = torch.nn.functional.layer_norm(
+            x_cpu, normalized_shape=(cols,), weight=w_cpu, bias=b_cpu, eps=eps
+        )
         assert torch.allclose(y_cpu, expected, atol=2e-3, rtol=2e-3)
 
     @skip_non_darwin
@@ -5003,12 +5121,16 @@ class TestMetalRuntimeMLCorrectness:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -5094,12 +5216,16 @@ class TestMetalRuntimeMLCorrectness:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_base + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_base
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_base + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_base
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -5170,13 +5296,15 @@ class TestMetalRuntimeMLCorrectness:
         torch.manual_seed(41)
         vocab, dim, n_idx = 128, 64, 32
         table_cpu = torch.randn((vocab, dim), dtype=torch.float32)
-        idx_cpu = torch.randint(0, vocab, (n_idx, ), dtype=torch.int32)
+        idx_cpu = torch.randint(0, vocab, (n_idx,), dtype=torch.int32)
 
         table_mps = table_cpu.to("mps")
         idx_mps = idx_cpu.to("mps")
         out_mps = torch.empty((n_idx, dim), device="mps", dtype=torch.float32)
 
-        _embedding_gather[(n_idx, )](table_mps, idx_mps, out_mps, table_mps.stride(0), dim, BLOCK=64)
+        _embedding_gather[(n_idx,)](
+            table_mps, idx_mps, out_mps, table_mps.stride(0), dim, BLOCK=64
+        )
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5221,12 +5349,16 @@ class TestMetalRuntimeMLCorrectness:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -5278,7 +5410,7 @@ class TestMetalRuntimeMLCorrectness:
             BLOCK_K=16,
         )
         scores_mps = scores_mps * scale
-        _row_softmax[(seq, )](scores_mps, probs_mps, seq, BLOCK=16)
+        _row_softmax[(seq,)](scores_mps, probs_mps, seq, BLOCK=16)
         torch.mps.synchronize()
         probs_cpu = probs_mps.cpu()
         torch.mps.synchronize()
@@ -5321,12 +5453,16 @@ class TestMetalRuntimeMLCorrectness:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -5374,7 +5510,7 @@ class TestMetalRuntimeMLCorrectness:
             BLOCK_N=16,
             BLOCK_K=16,
         )
-        _silu[(triton.cdiv(m * h, 256), )](hidden_mps, act_mps, m * h, BLOCK=256)
+        _silu[(triton.cdiv(m * h, 256),)](hidden_mps, act_mps, m * h, BLOCK=256)
         _matmul[(triton.cdiv(m, 16), triton.cdiv(n, 16), 1)](
             act_mps,
             w2_mps,
@@ -5408,7 +5544,7 @@ class TestMetalRuntimeMLCorrectness:
         import triton.language as tl
 
         try:
-            torch.empty((1, ), device="mps", dtype=torch.bfloat16)
+            torch.empty((1,), device="mps", dtype=torch.bfloat16)
         except Exception:
             pytest.skip("MPS bfloat16 runtime is unavailable on this host")
 
@@ -5439,12 +5575,16 @@ class TestMetalRuntimeMLCorrectness:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -5538,12 +5678,16 @@ class TestMetalRuntimeMLCorrectness:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_base + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_base
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_base + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_base
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -5560,7 +5704,9 @@ class TestMetalRuntimeMLCorrectness:
         b_mps = b_cpu.to("mps")
         c_mps = torch.empty((groups, batch, m, n), device="mps", dtype=torch.float32)
 
-        _grouped_batched_matmul[(triton.cdiv(m, 16), triton.cdiv(n, 16), groups * batch)](
+        _grouped_batched_matmul[
+            (triton.cdiv(m, 16), triton.cdiv(n, 16), groups * batch)
+        ](
             a_mps,
             b_mps,
             c_mps,
@@ -5620,7 +5766,7 @@ class TestMetalRuntimeMLCorrectness:
             offs_c = tl.arange(0, BLOCK_C)
             mask = offs_c < channels
 
-            acc = tl.zeros((BLOCK_C, ), dtype=tl.float32)
+            acc = tl.zeros((BLOCK_C,), dtype=tl.float32)
             for kk in range(KERNEL):
                 x = tl.load(
                     x_ptr + (pid + kk) * stride_xl + offs_c * stride_xc,
@@ -5646,7 +5792,7 @@ class TestMetalRuntimeMLCorrectness:
         w_mps = w_cpu.to("mps")
         y_mps = torch.empty((out_len, channels), device="mps", dtype=torch.float32)
 
-        _depthwise_conv1d[(out_len, )](
+        _depthwise_conv1d[(out_len,)](
             x_mps,
             w_mps,
             y_mps,
@@ -5666,7 +5812,7 @@ class TestMetalRuntimeMLCorrectness:
         torch.mps.synchronize()
 
         expected = torch.stack(
-            [torch.sum(x_cpu[i:i + kernel] * w_cpu, dim=0) for i in range(out_len)],
+            [torch.sum(x_cpu[i : i + kernel] * w_cpu, dim=0) for i in range(out_len)],
             dim=0,
         )
         assert torch.allclose(y_cpu, expected, atol=2e-4, rtol=2e-4)
@@ -5703,11 +5849,11 @@ class TestMetalRuntimeExecuteVerify:
 
         torch.manual_seed(100)
         n = 256
-        x_cpu = torch.randn((n, ), dtype=torch.float32)
+        x_cpu = torch.randn((n,), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
-        out_mps = torch.zeros((1, ), device="mps", dtype=torch.float32)
+        out_mps = torch.zeros((1,), device="mps", dtype=torch.float32)
 
-        _atomic_add_kernel[(triton.cdiv(n, 64), )](x_mps, out_mps, n, BLOCK=64)
+        _atomic_add_kernel[(triton.cdiv(n, 64),)](x_mps, out_mps, n, BLOCK=64)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5735,14 +5881,14 @@ class TestMetalRuntimeExecuteVerify:
 
         torch.manual_seed(101)
         n, num_bins = 512, 8
-        vals_cpu = torch.randn((n, ), dtype=torch.float32)
-        bins_cpu = torch.randint(0, num_bins, (n, ), dtype=torch.int32)
+        vals_cpu = torch.randn((n,), dtype=torch.float32)
+        bins_cpu = torch.randint(0, num_bins, (n,), dtype=torch.int32)
 
         vals_mps = vals_cpu.to("mps")
         bins_mps = bins_cpu.to("mps")
-        out_mps = torch.zeros((num_bins, ), device="mps", dtype=torch.float32)
+        out_mps = torch.zeros((num_bins,), device="mps", dtype=torch.float32)
 
-        _bin_atomic_add[(triton.cdiv(n, 64), )](vals_mps, bins_mps, out_mps, n, BLOCK=64)
+        _bin_atomic_add[(triton.cdiv(n, 64),)](vals_mps, bins_mps, out_mps, n, BLOCK=64)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5774,11 +5920,11 @@ class TestMetalRuntimeExecuteVerify:
         torch.manual_seed(102)
         n = 512
         block = 64
-        x_cpu = torch.randn((n, ), dtype=torch.float32)
+        x_cpu = torch.randn((n,), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
-        out_mps = torch.empty((n // block, ), device="mps", dtype=torch.float32)
+        out_mps = torch.empty((n // block,), device="mps", dtype=torch.float32)
 
-        _reduce_sum[(n // block, )](x_mps, out_mps, n, BLOCK=block)
+        _reduce_sum[(n // block,)](x_mps, out_mps, n, BLOCK=block)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5806,11 +5952,11 @@ class TestMetalRuntimeExecuteVerify:
         torch.manual_seed(103)
         n = 256
         block = 32
-        x_cpu = torch.randn((n, ), dtype=torch.float32)
+        x_cpu = torch.randn((n,), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
-        out_mps = torch.empty((n // block, ), device="mps", dtype=torch.float32)
+        out_mps = torch.empty((n // block,), device="mps", dtype=torch.float32)
 
-        _reduce_max[(n // block, )](x_mps, out_mps, n, BLOCK=block)
+        _reduce_max[(n // block,)](x_mps, out_mps, n, BLOCK=block)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5838,11 +5984,11 @@ class TestMetalRuntimeExecuteVerify:
         torch.manual_seed(104)
         n = 256
         block = 32
-        x_cpu = torch.randn((n, ), dtype=torch.float32)
+        x_cpu = torch.randn((n,), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
-        out_mps = torch.empty((n // block, ), device="mps", dtype=torch.float32)
+        out_mps = torch.empty((n // block,), device="mps", dtype=torch.float32)
 
-        _reduce_min[(n // block, )](x_mps, out_mps, n, BLOCK=block)
+        _reduce_min[(n // block,)](x_mps, out_mps, n, BLOCK=block)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5885,9 +6031,11 @@ class TestMetalRuntimeExecuteVerify:
         rows, cols = 16, 64
         x_cpu = torch.randn((rows, cols), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
-        out_mps = torch.empty((cols, ), device="mps", dtype=torch.float32)
+        out_mps = torch.empty((cols,), device="mps", dtype=torch.float32)
 
-        _reduce_sum_2d[(triton.cdiv(cols, 64), )](x_mps, out_mps, rows, cols, x_mps.stride(0), BLOCK_R=16, BLOCK_C=64)
+        _reduce_sum_2d[(triton.cdiv(cols, 64),)](
+            x_mps, out_mps, rows, cols, x_mps.stride(0), BLOCK_R=16, BLOCK_C=64
+        )
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5916,11 +6064,11 @@ class TestMetalRuntimeExecuteVerify:
 
         torch.manual_seed(106)
         n = 128
-        x_cpu = torch.randn((n, ), dtype=torch.float32)
+        x_cpu = torch.randn((n,), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
         out_mps = torch.empty_like(x_mps)
 
-        _cumsum[(n // 32, )](x_mps, out_mps, n, BLOCK=32)
+        _cumsum[(n // 32,)](x_mps, out_mps, n, BLOCK=32)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5952,16 +6100,18 @@ class TestMetalRuntimeExecuteVerify:
 
         torch.manual_seed(107)
         n = 512
-        cond_cpu = torch.randint(0, 2, (n, ), dtype=torch.int32)
-        a_cpu = torch.randn((n, ), dtype=torch.float32)
-        b_cpu = torch.randn((n, ), dtype=torch.float32)
+        cond_cpu = torch.randint(0, 2, (n,), dtype=torch.int32)
+        a_cpu = torch.randn((n,), dtype=torch.float32)
+        b_cpu = torch.randn((n,), dtype=torch.float32)
 
         cond_mps = cond_cpu.to("mps")
         a_mps = a_cpu.to("mps")
         b_mps = b_cpu.to("mps")
         out_mps = torch.empty_like(a_mps)
 
-        _where_kernel[(triton.cdiv(n, 128), )](cond_mps, a_mps, b_mps, out_mps, n, BLOCK=128)
+        _where_kernel[(triton.cdiv(n, 128),)](
+            cond_mps, a_mps, b_mps, out_mps, n, BLOCK=128
+        )
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -5989,11 +6139,11 @@ class TestMetalRuntimeExecuteVerify:
 
         torch.manual_seed(108)
         n = 1024
-        x_cpu = torch.randn((n, ), dtype=torch.float32).clamp(-5, 5)
+        x_cpu = torch.randn((n,), dtype=torch.float32).clamp(-5, 5)
         x_mps = x_cpu.to("mps")
         out_mps = torch.empty_like(x_mps)
 
-        _exp_kernel[(triton.cdiv(n, 256), )](x_mps, out_mps, n, BLOCK=256)
+        _exp_kernel[(triton.cdiv(n, 256),)](x_mps, out_mps, n, BLOCK=256)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -6019,11 +6169,11 @@ class TestMetalRuntimeExecuteVerify:
 
         torch.manual_seed(109)
         n = 1024
-        x_cpu = torch.rand((n, ), dtype=torch.float32) + 0.01
+        x_cpu = torch.rand((n,), dtype=torch.float32) + 0.01
         x_mps = x_cpu.to("mps")
         out_mps = torch.empty_like(x_mps)
 
-        _log_kernel[(triton.cdiv(n, 256), )](x_mps, out_mps, n, BLOCK=256)
+        _log_kernel[(triton.cdiv(n, 256),)](x_mps, out_mps, n, BLOCK=256)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -6050,12 +6200,12 @@ class TestMetalRuntimeExecuteVerify:
 
         torch.manual_seed(110)
         n = 512
-        x_cpu = torch.randn((n, ), dtype=torch.float32)
+        x_cpu = torch.randn((n,), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
         abs_mps = torch.empty_like(x_mps)
         neg_mps = torch.empty_like(x_mps)
 
-        _abs_neg_kernel[(triton.cdiv(n, 128), )](x_mps, abs_mps, neg_mps, n, BLOCK=128)
+        _abs_neg_kernel[(triton.cdiv(n, 128),)](x_mps, abs_mps, neg_mps, n, BLOCK=128)
         torch.mps.synchronize()
         abs_cpu = abs_mps.cpu()
         neg_cpu = neg_mps.cpu()
@@ -6166,12 +6316,16 @@ class TestMetalRuntimeExecuteVerify:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -6250,12 +6404,16 @@ class TestMetalRuntimeExecuteVerify:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -6306,7 +6464,7 @@ class TestMetalRuntimeExecuteVerify:
         import triton.language as tl
 
         try:
-            torch.empty((1, ), device="mps", dtype=torch.bfloat16)
+            torch.empty((1,), device="mps", dtype=torch.bfloat16)
         except Exception:
             pytest.skip("MPS bfloat16 runtime is unavailable on this host")
 
@@ -6337,12 +6495,16 @@ class TestMetalRuntimeExecuteVerify:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -6404,11 +6566,11 @@ class TestMetalRuntimeExecuteVerify:
 
         torch.manual_seed(115)
         n = 1024
-        x_cpu = torch.randn((n, ), dtype=torch.float32)
+        x_cpu = torch.randn((n,), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
         out_mps = torch.empty_like(x_mps)
 
-        _cast_f32_f16_f32[(triton.cdiv(n, 256), )](x_mps, out_mps, n, BLOCK=256)
+        _cast_f32_f16_f32[(triton.cdiv(n, 256),)](x_mps, out_mps, n, BLOCK=256)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -6438,16 +6600,16 @@ class TestMetalRuntimeExecuteVerify:
 
         torch.manual_seed(116)
         n = 1024
-        a_cpu = torch.randn((n, ), dtype=torch.float32)
-        b_cpu = torch.randn((n, ), dtype=torch.float32)
-        c_cpu = torch.randn((n, ), dtype=torch.float32)
+        a_cpu = torch.randn((n,), dtype=torch.float32)
+        b_cpu = torch.randn((n,), dtype=torch.float32)
+        c_cpu = torch.randn((n,), dtype=torch.float32)
 
         a_mps = a_cpu.to("mps")
         b_mps = b_cpu.to("mps")
         c_mps = c_cpu.to("mps")
         out_mps = torch.empty_like(a_mps)
 
-        _fma_kernel[(triton.cdiv(n, 256), )](a_mps, b_mps, c_mps, out_mps, n, BLOCK=256)
+        _fma_kernel[(triton.cdiv(n, 256),)](a_mps, b_mps, c_mps, out_mps, n, BLOCK=256)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -6482,10 +6644,10 @@ class TestMetalRuntimeExecuteVerify:
         rows, cols = 8, 64
         x_cpu = torch.randn((rows, cols), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
-        mean_mps = torch.empty((rows, ), device="mps", dtype=torch.float32)
-        var_mps = torch.empty((rows, ), device="mps", dtype=torch.float32)
+        mean_mps = torch.empty((rows,), device="mps", dtype=torch.float32)
+        var_mps = torch.empty((rows,), device="mps", dtype=torch.float32)
 
-        _mean_var[(rows, )](x_mps, mean_mps, var_mps, cols, BLOCK=64)
+        _mean_var[(rows,)](x_mps, mean_mps, var_mps, cols, BLOCK=64)
         torch.mps.synchronize()
         mean_cpu = mean_mps.cpu()
         var_cpu = var_mps.cpu()
@@ -6815,7 +6977,9 @@ define void @collision_kernel(ptr %out, i32 %n) {
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
         lines = msl.split("\n")
         int_decls = [l.strip() for l in lines if l.strip().startswith("int x_0")]
-        assert (len(int_decls) >= 2), f"Expected at least 2 distinct x_0* declarations; got: {int_decls}"
+        assert (
+            len(int_decls) >= 2
+        ), f"Expected at least 2 distinct x_0* declarations; got: {int_decls}"
 
 
 class TestMetalAudit2AttrGroupWithDebugMetadata:
@@ -6836,8 +7000,9 @@ define void @attrdbg_kernel(ptr %out) {
 """
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
-        assert ("thread_position_in_threadgroup.x"
-                in msl), "Call with #N before !dbg was not matched after line cleaning"
+        assert (
+            "thread_position_in_threadgroup.x" in msl
+        ), "Call with #N before !dbg was not matched after line cleaning"
 
     def test_void_call_attr_group_before_comment(self):
         """#N before ; comment must be stripped."""
@@ -6854,7 +7019,9 @@ declare void @llvm.lifetime.end.p0(i64, ptr)
 """
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
-        assert ("UNSUPPORTED" not in msl), "Void call with #N before ; comment was not cleaned properly"
+        assert (
+            "UNSUPPORTED" not in msl
+        ), "Void call with #N before ; comment was not cleaned properly"
 
 
 class TestMetalAudit2PowiUsePown:
@@ -6894,7 +7061,9 @@ declare float @llvm.powi.f32.i32(float, i32)
 """
         metadata = {}
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
-        assert ("static_cast<float>" not in msl), "pown() takes integer exponent; float cast is unnecessary"
+        assert (
+            "static_cast<float>" not in msl
+        ), "pown() takes integer exponent; float cast is unnecessary"
 
 
 class TestMetalAudit2Pass2LineClean:
@@ -7135,21 +7304,27 @@ class TestMetalAudit2Pass2ReservedIds:
         from third_party.metal.backend.compiler import _MSL_RESERVED_IDENTIFIERS
 
         for name in ("uint", "uchar", "ushort", "ulong"):
-            assert (name in _MSL_RESERVED_IDENTIFIERS), f"{name} must be reserved — MSL uses it as unsigned type alias"
+            assert (
+                name in _MSL_RESERVED_IDENTIFIERS
+            ), f"{name} must be reserved — MSL uses it as unsigned type alias"
 
     def test_cpp_keywords_reserved(self):
         from third_party.metal.backend.compiler import _MSL_RESERVED_IDENTIFIERS
 
         cpp_keywords = {"void", "struct", "class", "const", "static", "sizeof"}
         for kw in cpp_keywords:
-            assert (kw in _MSL_RESERVED_IDENTIFIERS), f"C++ keyword '{kw}' must be in reserved set"
+            assert (
+                kw in _MSL_RESERVED_IDENTIFIERS
+            ), f"C++ keyword '{kw}' must be in reserved set"
 
     def test_msl_builtins_reserved(self):
         from third_party.metal.backend.compiler import _MSL_RESERVED_IDENTIFIERS
 
         builtins = {"select", "clamp", "abs", "mix", "saturate", "step"}
         for b in builtins:
-            assert (b in _MSL_RESERVED_IDENTIFIERS), f"MSL builtin '{b}' must be in reserved set"
+            assert (
+                b in _MSL_RESERVED_IDENTIFIERS
+            ), f"MSL builtin '{b}' must be in reserved set"
 
     def test_reserved_id_collision_avoided(self):
         """If an SSA name collides with a reserved word, msl_id prefixes it."""
@@ -7166,7 +7341,9 @@ define void @reserved_kernel(ptr %out, i32 %x) {
         msl = MetalBackend.make_metal_ir(llvm_ir, metadata, None)
         # The name 'uint' must be escaped (e.g., v_uint) to avoid
         # shadowing the MSL unsigned int type alias
-        assert ("v_uint" in msl), "SSA name %uint must be escaped to avoid shadowing MSL uint type"
+        assert (
+            "v_uint" in msl
+        ), "SSA name %uint must be escaped to avoid shadowing MSL uint type"
 
 
 # ── FP8 Runtime Matmul Validation ───────────────────────────────────
@@ -7234,12 +7411,16 @@ class TestMetalFP8RuntimeMatmul:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -7305,12 +7486,16 @@ class TestMetalFP8RuntimeMatmul:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -7374,12 +7559,16 @@ class TestMetalFP8RuntimeMatmul:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -7443,12 +7632,16 @@ class TestMetalFP8RuntimeMatmul:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -7497,8 +7690,9 @@ class TestMetalFP8RuntimeMatmul:
         result = a_fp8 @ b_fp8
 
         # fp8e5m2 has only 2 mantissa bits — large quantization noise
-        assert torch.allclose(result, ref, atol=2.0,
-                              rtol=0.3), f"fp8e5m2 quantized matmul max err: {(result - ref).abs().max().item():.4f}"
+        assert torch.allclose(
+            result, ref, atol=2.0, rtol=0.3
+        ), f"fp8e5m2 quantized matmul max err: {(result - ref).abs().max().item():.4f}"
 
     @skip_no_fp8
     def test_fp8e4m3fn_cpu_matmul_numerics_vs_fp32_reference(self):
@@ -7516,8 +7710,9 @@ class TestMetalFP8RuntimeMatmul:
         result = a_fp8 @ b_fp8
 
         # fp8e4m3fn has 3 mantissa bits — better than e5m2 but still noisy
-        assert torch.allclose(result, ref, atol=0.2,
-                              rtol=0.15), f"fp8e4m3fn quantized matmul max err: {(result - ref).abs().max().item():.4f}"
+        assert torch.allclose(
+            result, ref, atol=0.2, rtol=0.15
+        ), f"fp8e4m3fn quantized matmul max err: {(result - ref).abs().max().item():.4f}"
 
     @skip_no_fp8
     def test_fp8e5m2_cpu_odd_k_numerics(self):
@@ -7535,8 +7730,9 @@ class TestMetalFP8RuntimeMatmul:
         result = a_fp8 @ b_fp8
 
         # Larger K accumulates more fp8 quantization noise
-        assert torch.allclose(result, ref, atol=5.0,
-                              rtol=0.35), f"fp8e5m2 odd-K matmul max err: {(result - ref).abs().max().item():.4f}"
+        assert torch.allclose(
+            result, ref, atol=5.0, rtol=0.35
+        ), f"fp8e5m2 odd-K matmul max err: {(result - ref).abs().max().item():.4f}"
 
     @skip_non_darwin
     @skip_no_xcrun
@@ -7573,12 +7769,16 @@ class TestMetalFP8RuntimeMatmul:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, k, BLOCK_K):
                 a = tl.load(
-                    a_ptr + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < m) & (offs_k[None, :] + kk < k),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < k) & (offs_n[None, :] < n),
                     other=0.0,
                 )
@@ -7891,7 +8091,7 @@ class TestMetalInt8MatmulRuntime:
         ):
             pid = tl.program_id(axis=0)
             offs_m = pid * BLOCK_M + tl.arange(0, BLOCK_M)
-            acc = tl.zeros((BLOCK_M, ), dtype=tl.int32)
+            acc = tl.zeros((BLOCK_M,), dtype=tl.int32)
             for kk in range(0, k, BLOCK_K):
                 offs_k = tl.arange(0, BLOCK_K) + kk
                 a = tl.load(
@@ -7910,12 +8110,12 @@ class TestMetalInt8MatmulRuntime:
         torch.manual_seed(203)
         m, k = 16, 16
         a_cpu = torch.randint(-8, 8, (m, k), dtype=torch.int8)
-        x_cpu = torch.randint(-100, 100, (k, ), dtype=torch.int16)
+        x_cpu = torch.randint(-100, 100, (k,), dtype=torch.int16)
         a_mps = a_cpu.to("mps")
         x_mps = x_cpu.to("mps")
-        out_mps = torch.empty((m, ), dtype=torch.int32, device="mps")
+        out_mps = torch.empty((m,), dtype=torch.int32, device="mps")
 
-        _mixed_int_matvec[(triton.cdiv(m, 16), )](
+        _mixed_int_matvec[(triton.cdiv(m, 16),)](
             a_mps,
             x_mps,
             out_mps,
@@ -7956,9 +8156,9 @@ class TestMetalInt8MatmulRuntime:
         y_cpu = torch.tensor([0, 0, 1, -1, -128, 127, -1, 64], dtype=torch.int8)
         x_mps = x_cpu.to("mps")
         y_mps = y_cpu.to("mps")
-        out_mps = torch.empty((n, ), dtype=torch.int8, device="mps")
+        out_mps = torch.empty((n,), dtype=torch.int8, device="mps")
 
-        _vadd_i8_sat[(1, )](x_mps, y_mps, out_mps, n, BLOCK=8)
+        _vadd_i8_sat[(1,)](x_mps, y_mps, out_mps, n, BLOCK=8)
         torch.mps.synchronize()
         out_cpu = out_mps.cpu()
         torch.mps.synchronize()
@@ -8001,9 +8201,11 @@ class TestMetalBroadMLWorkloads:
             pid = tl.program_id(axis=0)
             offs = pid * BLOCK + tl.arange(0, BLOCK)
             mask = offs < out_len
-            acc = tl.zeros((BLOCK, ), dtype=tl.float32)
+            acc = tl.zeros((BLOCK,), dtype=tl.float32)
             for ki in range(ksize):
-                x = tl.load(x_ptr + offs + ki, mask=mask & ((offs + ki) < in_len), other=0.0)
+                x = tl.load(
+                    x_ptr + offs + ki, mask=mask & ((offs + ki) < in_len), other=0.0
+                )
                 w = tl.load(w_ptr + ki)
                 acc += x * w
             tl.store(y_ptr + offs, acc, mask=mask)
@@ -8011,13 +8213,13 @@ class TestMetalBroadMLWorkloads:
         torch.manual_seed(300)
         in_len, ksize = 128, 5
         out_len = in_len - ksize + 1
-        x_cpu = torch.randn((in_len, ), dtype=torch.float32)
-        w_cpu = torch.randn((ksize, ), dtype=torch.float32)
+        x_cpu = torch.randn((in_len,), dtype=torch.float32)
+        w_cpu = torch.randn((ksize,), dtype=torch.float32)
         x_mps = x_cpu.to("mps")
         w_mps = w_cpu.to("mps")
-        y_mps = torch.empty((out_len, ), device="mps", dtype=torch.float32)
+        y_mps = torch.empty((out_len,), device="mps", dtype=torch.float32)
 
-        _conv1d_simple[(triton.cdiv(out_len, 64), )](
+        _conv1d_simple[(triton.cdiv(out_len, 64),)](
             x_mps,
             w_mps,
             y_mps,
@@ -8034,7 +8236,7 @@ class TestMetalBroadMLWorkloads:
         # direct correlation, so compare with non-flipped reference
         expected_direct = torch.zeros(out_len)
         for i in range(out_len):
-            expected_direct[i] = (x_cpu[i:i + ksize] * w_cpu).sum()
+            expected_direct[i] = (x_cpu[i : i + ksize] * w_cpu).sum()
         assert torch.allclose(y_cpu, expected_direct, atol=1e-4, rtol=1e-4)
 
     @skip_non_darwin
@@ -8080,8 +8282,8 @@ class TestMetalBroadMLWorkloads:
         torch.manual_seed(301)
         n, d = 16, 32
         x_cpu = torch.randn((n, d), dtype=torch.float32)
-        w_cpu = torch.randn((d, ), dtype=torch.float32)
-        b_cpu = torch.randn((d, ), dtype=torch.float32)
+        w_cpu = torch.randn((d,), dtype=torch.float32)
+        b_cpu = torch.randn((d,), dtype=torch.float32)
         target_cpu = torch.randn((n, d), dtype=torch.float32)
         lr = 0.01
 
@@ -8091,11 +8293,11 @@ class TestMetalBroadMLWorkloads:
         target_mps = target_cpu.to("mps")
         y_mps = torch.empty((n, d), device="mps", dtype=torch.float32)
 
-        _fwd_linear[(n, )](x_mps, w_mps, b_mps, y_mps, n, d, BLOCK=32)
+        _fwd_linear[(n,)](x_mps, w_mps, b_mps, y_mps, n, d, BLOCK=32)
         torch.mps.synchronize()
 
-        grad_flat = torch.empty((n * d, ), device="mps", dtype=torch.float32)
-        _mse_grad[(triton.cdiv(n * d, 64), )](
+        grad_flat = torch.empty((n * d,), device="mps", dtype=torch.float32)
+        _mse_grad[(triton.cdiv(n * d, 64),)](
             y_mps.reshape(-1),
             target_mps.reshape(-1),
             grad_flat,
@@ -8105,7 +8307,7 @@ class TestMetalBroadMLWorkloads:
         torch.mps.synchronize()
 
         grad_w_mps = grad_flat.view(n, d).mean(dim=0)
-        _sgd_update[(1, )](w_mps, grad_w_mps, d, lr, BLOCK=32)
+        _sgd_update[(1,)](w_mps, grad_w_mps, d, lr, BLOCK=32)
         torch.mps.synchronize()
 
         y_ref = x_cpu * w_cpu + b_cpu
@@ -8145,14 +8347,14 @@ class TestMetalBroadMLWorkloads:
         torch.manual_seed(302)
         src_len = 256
         n_idx = 64
-        src_cpu = torch.randn((src_len, ), dtype=torch.float32)
-        idx_cpu = torch.randint(0, src_len, (n_idx, ), dtype=torch.int32)
+        src_cpu = torch.randn((src_len,), dtype=torch.float32)
+        idx_cpu = torch.randint(0, src_len, (n_idx,), dtype=torch.int32)
 
         src_mps = src_cpu.to("mps")
         idx_mps = idx_cpu.to("mps")
-        out_mps = torch.empty((n_idx, ), device="mps", dtype=torch.float32)
+        out_mps = torch.empty((n_idx,), device="mps", dtype=torch.float32)
 
-        _gather[(triton.cdiv(n_idx, 64), )](
+        _gather[(triton.cdiv(n_idx, 64),)](
             src_mps,
             idx_mps,
             out_mps,
@@ -8216,10 +8418,10 @@ class TestMetalBroadMLWorkloads:
         rows, cols = 8, 64
         eps = 1e-5
         x_cpu = torch.randn((rows, cols), dtype=torch.float32)
-        w_ln_cpu = torch.ones((cols, ), dtype=torch.float32)
-        b_ln_cpu = torch.zeros((cols, ), dtype=torch.float32)
-        w_proj_cpu = torch.randn((cols, ), dtype=torch.float32) * 0.1
-        b_proj_cpu = torch.randn((cols, ), dtype=torch.float32) * 0.01
+        w_ln_cpu = torch.ones((cols,), dtype=torch.float32)
+        b_ln_cpu = torch.zeros((cols,), dtype=torch.float32)
+        w_proj_cpu = torch.randn((cols,), dtype=torch.float32) * 0.1
+        b_proj_cpu = torch.randn((cols,), dtype=torch.float32) * 0.01
         res_cpu = torch.randn((rows, cols), dtype=torch.float32)
 
         x_mps = x_cpu.to("mps")
@@ -8230,7 +8432,7 @@ class TestMetalBroadMLWorkloads:
         res_mps = res_cpu.to("mps")
         y_mps = torch.empty((rows, cols), device="mps", dtype=torch.float32)
 
-        _fused_ln_linear_res[(rows, )](
+        _fused_ln_linear_res[(rows,)](
             x_mps,
             w_ln_mps,
             b_ln_mps,
@@ -8248,7 +8450,7 @@ class TestMetalBroadMLWorkloads:
 
         normed_ref = torch.nn.functional.layer_norm(
             x_cpu,
-            normalized_shape=(cols, ),
+            normalized_shape=(cols,),
             weight=w_ln_cpu,
             bias=b_ln_cpu,
             eps=eps,
@@ -8294,19 +8496,25 @@ class TestMetalBroadMLWorkloads:
             acc = tl.zeros((BLOCK_S, BLOCK_S), dtype=tl.float32)
             for dd in range(0, d_k, BLOCK_D):
                 q = tl.load(
-                    q_ptr + offs_row[:, None] * stride_qs + (offs_d[None, :] + dd) * stride_qd,
+                    q_ptr
+                    + offs_row[:, None] * stride_qs
+                    + (offs_d[None, :] + dd) * stride_qd,
                     mask=(offs_row[:, None] < seq_len) & (offs_d[None, :] + dd < d_k),
                     other=0.0,
                 )
                 k = tl.load(
-                    k_ptr + offs_col[:, None] * stride_ks + (offs_d[None, :] + dd) * stride_kd,
+                    k_ptr
+                    + offs_col[:, None] * stride_ks
+                    + (offs_d[None, :] + dd) * stride_kd,
                     mask=(offs_col[:, None] < seq_len) & (offs_d[None, :] + dd < d_k),
                     other=0.0,
                 )
                 acc += tl.dot(q, tl.trans(k))
 
             acc = acc * inv_sqrt_dk
-            s_ptrs = (s_ptr + offs_row[:, None] * stride_ss + offs_col[None, :] * stride_sd)
+            s_ptrs = (
+                s_ptr + offs_row[:, None] * stride_ss + offs_col[None, :] * stride_sd
+            )
             tl.store(
                 s_ptrs,
                 acc,
@@ -8482,7 +8690,7 @@ class TestMetalGPUProfiling:
         start = _MetalTimingEvent()
         out = torch.zeros(128, dtype=torch.int32, device="mps")
         start.record()
-        _nop_kernel[(128, )](out, BLOCK=1)
+        _nop_kernel[(128,)](out, BLOCK=1)
         end = _MetalTimingEvent()
         end.record()
         elapsed = start.elapsed_time(end)
@@ -8516,7 +8724,7 @@ class TestMetalGPUProfiling:
 
         start = _MetalTimingEvent()
         start.record()
-        _work_kernel[(16, )](x, out, n, BLOCK=256)
+        _work_kernel[(16,)](x, out, n, BLOCK=256)
         end = _MetalTimingEvent()
         end.record()
 
@@ -8525,7 +8733,9 @@ class TestMetalGPUProfiling:
 
         assert host_ms > 0
         if gpu_ms is not None:
-            assert (gpu_ms <= host_ms * 1.5), f"GPU time ({gpu_ms:.3f}ms) much larger than host time ({host_ms:.3f}ms)"
+            assert (
+                gpu_ms <= host_ms * 1.5
+            ), f"GPU time ({gpu_ms:.3f}ms) much larger than host time ({host_ms:.3f}ms)"
 
     @skip_non_darwin
     def test_fallback_when_no_cmd_buf(self):
@@ -8549,7 +8759,9 @@ class TestMetalGPUProfiling:
         from third_party.metal.backend.driver import _MetalDeviceInterface
 
         event = _MetalDeviceInterface.Event()
-        assert hasattr(event, "_cmd_buf"), "Event should have _cmd_buf attribute for GPU timing"
+        assert hasattr(
+            event, "_cmd_buf"
+        ), "Event should have _cmd_buf attribute for GPU timing"
 
 
 # ── Barrier insertion pass tests ────────────────────────────────────
@@ -8669,9 +8881,13 @@ exit:
         assert len(pass_.decisions) >= 1
 
         lines = result.split("\n")
-        store_idx = next(i for i, l in enumerate(lines) if "store float 1.0, ptr addrspace(3)" in l)
+        store_idx = next(
+            i for i, l in enumerate(lines) if "store float 1.0, ptr addrspace(3)" in l
+        )
         barrier_idx = next(i for i, l in enumerate(lines) if "llvm.nvvm.barrier0" in l)
-        load_idx = next(i for i, l in enumerate(lines) if "= load float, ptr addrspace(3)" in l)
+        load_idx = next(
+            i for i, l in enumerate(lines) if "= load float, ptr addrspace(3)" in l
+        )
         assert store_idx < barrier_idx < load_idx
 
     @skip_non_darwin
@@ -8682,7 +8898,10 @@ exit:
         pass_ = MetalBarrierInsertionPass()
         result = pass_.run(self._LOOP_CARRIED_IR)
         assert "call void @llvm.nvvm.barrier0()" in result
-        has_loop_reason = any("loop" in d.reason.lower() or "backedge" in d.reason.lower() for d in pass_.decisions)
+        has_loop_reason = any(
+            "loop" in d.reason.lower() or "backedge" in d.reason.lower()
+            for d in pass_.decisions
+        )
         assert has_loop_reason or len(pass_.decisions) >= 1
 
     @skip_non_darwin
@@ -8836,7 +9055,10 @@ entry:
 
         metadata = {}
         msl = MetalBackend.make_metal_ir(self._METAL_BARRIER_FLAGS_IR, metadata, None)
-        assert ("threadgroup_barrier((mem_flags::mem_threadgroup | mem_flags::mem_device));" in msl)
+        assert (
+            "threadgroup_barrier((mem_flags::mem_threadgroup | mem_flags::mem_device));"
+            in msl
+        )
 
     @skip_non_darwin
     def test_barrier_pipeline_produces_metal_barrier_calls(self):
@@ -8865,11 +9087,13 @@ entry:
         y = torch.ones(n, dtype=torch.float32, device="mps")
         out = torch.zeros(n, dtype=torch.float32, device="mps")
 
-        _add_kernel[(1, )](x, y, out, n, BLOCK=128)
+        _add_kernel[(1,)](x, y, out, n, BLOCK=128)
         result = out.cpu()
-        expected = torch.full((n, ), 2.0)
-        assert torch.allclose(result, expected), (f"Kernel with barrier pipeline failed: "
-                                                  f"max diff = {(result - expected).abs().max().item()}")
+        expected = torch.full((n,), 2.0)
+        assert torch.allclose(result, expected), (
+            f"Kernel with barrier pipeline failed: "
+            f"max diff = {(result - expected).abs().max().item()}"
+        )
 
     @skip_non_darwin
     def test_nvvm_barrier_artifact_rewrite_in_pipeline(self):
@@ -8882,7 +9106,9 @@ entry:
         from third_party.metal.backend.barrier_pass import run_barrier_pass
         from third_party.metal.backend.compiler import MetalBackend
 
-        ir_with_barrier = run_barrier_pass(TestMetalBarrierInsertion._SIMPLE_STORE_LOAD_IR)
+        ir_with_barrier = run_barrier_pass(
+            TestMetalBarrierInsertion._SIMPLE_STORE_LOAD_IR
+        )
         assert "llvm.nvvm.barrier0" in ir_with_barrier
 
         metadata = {}
@@ -8917,7 +9143,7 @@ class TestMetalSPMDOpLowering:
                 tl.store(out_ptr, n_progs)
 
         out = torch.zeros(1, dtype=torch.int32, device="mps")
-        _num_programs_kernel[(4, )](out, BLOCK=1)
+        _num_programs_kernel[(4,)](out, BLOCK=1)
         result = out.cpu().item()
         assert result == 4, f"Expected num_programs=4, got {result}"
 
@@ -8964,12 +9190,13 @@ class TestMetalSPMDOpLowering:
         x = torch.arange(n, dtype=torch.float32, device="mps")
         out = torch.zeros(n, dtype=torch.float32, device="mps")
 
-        _grid_stride_kernel[(4, )](x, out, n, BLOCK=64)
+        _grid_stride_kernel[(4,)](x, out, n, BLOCK=64)
         expected = x * 2.0
         result = out.cpu()
-        assert torch.allclose(result.cpu(), expected.cpu(),
-                              atol=1e-5), (f"Grid-stride loop with num_programs failed: "
-                                           f"max diff = {(result - expected).abs().max().item()}")
+        assert torch.allclose(result.cpu(), expected.cpu(), atol=1e-5), (
+            f"Grid-stride loop with num_programs failed: "
+            f"max diff = {(result - expected).abs().max().item()}"
+        )
 
     @skip_non_darwin
     def test_num_programs_ir_contains_metal_builtin(self):
@@ -8995,11 +9222,16 @@ class TestMetalSPMDOpLowering:
         llir_found = False
         for key in asm_keys:
             content = compiled.asm[key]
-            if (isinstance(content, str) and "__metal_get_threadgroups_per_grid" in content):
+            if (
+                isinstance(content, str)
+                and "__metal_get_threadgroups_per_grid" in content
+            ):
                 llir_found = True
                 break
-        assert llir_found, ("Expected __metal_get_threadgroups_per_grid in compiled output. "
-                            f"Available keys: {list(asm_keys)}")
+        assert llir_found, (
+            "Expected __metal_get_threadgroups_per_grid in compiled output. "
+            f"Available keys: {list(asm_keys)}"
+        )
 
 
 # ── Matmul acceleration strategy tests ───────────────────────────────
@@ -9050,11 +9282,13 @@ class TestMetalMatmulAcceleration:
             optimize_matmul_msl,
         )
 
-        src = ("#include <metal_stdlib>\n"
-               "using namespace metal;\n"
-               "kernel void k(device float* a [[buffer(0)]]) {\n"
-               "  a[0] = 1.0;\n"
-               "}\n")
+        src = (
+            "#include <metal_stdlib>\n"
+            "using namespace metal;\n"
+            "kernel void k(device float* a [[buffer(0)]]) {\n"
+            "  a[0] = 1.0;\n"
+            "}\n"
+        )
         strat = MetalMatmulStrategy(
             use_simdgroup=True,
             tile_m=8,
@@ -9075,19 +9309,21 @@ class TestMetalMatmulAcceleration:
             optimize_matmul_msl,
         )
 
-        src = ("#include <metal_stdlib>\n"
-               "using namespace metal;\n"
-               "kernel void matmul(\n"
-               "  device float* C [[buffer(0)]],\n"
-               "  const device float* A [[buffer(1)]],\n"
-               "  const device float* B [[buffer(2)]]\n"
-               ") {\n"
-               "  float acc = 0.0;\n"
-               "  for (int k = 0; k < K; ++k) {\n"
-               "    acc += A[k] * B[k];\n"
-               "  }\n"
-               "  C[0] = acc;\n"
-               "}\n")
+        src = (
+            "#include <metal_stdlib>\n"
+            "using namespace metal;\n"
+            "kernel void matmul(\n"
+            "  device float* C [[buffer(0)]],\n"
+            "  const device float* A [[buffer(1)]],\n"
+            "  const device float* B [[buffer(2)]]\n"
+            ") {\n"
+            "  float acc = 0.0;\n"
+            "  for (int k = 0; k < K; ++k) {\n"
+            "    acc += A[k] * B[k];\n"
+            "  }\n"
+            "  C[0] = acc;\n"
+            "}\n"
+        )
         strat = MetalMatmulStrategy(
             use_simdgroup=True,
             tile_m=8,
@@ -9324,8 +9560,9 @@ class TestMetalLibdevice:
             "round",
             "saturate",
         }
-        assert required_ops.issubset(set(
-            METAL_LIBDEVICE_MAP.keys())), f"Missing: {required_ops - set(METAL_LIBDEVICE_MAP.keys())}"
+        assert required_ops.issubset(
+            set(METAL_LIBDEVICE_MAP.keys())
+        ), f"Missing: {required_ops - set(METAL_LIBDEVICE_MAP.keys())}"
 
     def test_clz_mapping(self):
         """clz maps to MSL clz()."""
@@ -9421,7 +9658,9 @@ class TestMetalFP8Converters:
         for v in test_values:
             encoded = convert_fp16_to_fp8e5m2(v)
             decoded = convert_fp8e5m2_to_fp16(encoded)
-            assert (abs(decoded - v) <= abs(v) * 0.26 + 1e-7), f"E5M2 round-trip failed for {v}: got {decoded}"
+            assert (
+                abs(decoded - v) <= abs(v) * 0.26 + 1e-7
+            ), f"E5M2 round-trip failed for {v}: got {decoded}"
 
     def test_fp8e4b15_to_fp16_roundtrip(self):
         """E4B15 encode → decode round-trips for small representable values."""
@@ -9436,7 +9675,9 @@ class TestMetalFP8Converters:
         for v in test_values:
             encoded = convert_fp16_to_fp8e4b15(v)
             decoded = convert_fp8e4b15_to_fp16(encoded)
-            assert decoded == v or (v == 0.0 and decoded == 0.0), f"E4B15 round-trip failed for {v}: got {decoded}"
+            assert decoded == v or (
+                v == 0.0 and decoded == 0.0
+            ), f"E4B15 round-trip failed for {v}: got {decoded}"
 
     def test_fp8e5m2_special_values(self):
         """E5M2 handles NaN and Inf correctly."""
@@ -9497,7 +9738,9 @@ class TestMetalFP8Converters:
             elif math.isinf(expected):
                 assert result == expected, f"bits=0x{bits:02X}: expected {expected}"
             else:
-                assert (abs(result - expected) < 1e-9), f"bits=0x{bits:02X}: expected {expected}, got {result}"
+                assert (
+                    abs(result - expected) < 1e-9
+                ), f"bits=0x{bits:02X}: expected {expected}, got {result}"
 
     def test_fp8e4b15_special_values(self):
         """E4B15 has no Inf — overflows to NaN."""
@@ -9559,7 +9802,8 @@ class TestMetalCICompatibility:
                 "..",
                 "scripts",
                 "metal_ci_compat_matrix.py",
-            ))
+            )
+        )
         spec = importlib.util.spec_from_file_location(
             "metal_ci_compat_matrix",
             path,
@@ -9644,7 +9888,8 @@ class TestMetalAOTRuntime:
             "tools",
             "metal",
             "test_aot_runtime.m",
-        ))
+        )
+    )
     RUNTIME_SCRIPT_PATH = os.path.normpath(
         os.path.join(
             os.path.dirname(__file__),
@@ -9653,11 +9898,14 @@ class TestMetalAOTRuntime:
             "..",
             "scripts",
             "test_metal_aot_runtime.py",
-        ))
+        )
+    )
 
     def test_aot_harness_exists(self):
         """The ObjC AOT runtime harness file exists."""
-        assert os.path.isfile(self.HARNESS_PATH), f"AOT harness not found at {self.HARNESS_PATH}"
+        assert os.path.isfile(
+            self.HARNESS_PATH
+        ), f"AOT harness not found at {self.HARNESS_PATH}"
         content = open(self.HARNESS_PATH, "r").read()
         assert "MTLDevice" in content
         assert "MTLComputePipelineState" in content
@@ -9691,7 +9939,9 @@ class TestMetalAOTRuntime:
 
     def test_aot_runtime_script_exists(self):
         """The Python AOT runtime integration script exists."""
-        assert os.path.isfile(self.RUNTIME_SCRIPT_PATH), f"AOT runtime script not found at {self.RUNTIME_SCRIPT_PATH}"
+        assert os.path.isfile(
+            self.RUNTIME_SCRIPT_PATH
+        ), f"AOT runtime script not found at {self.RUNTIME_SCRIPT_PATH}"
         content = open(self.RUNTIME_SCRIPT_PATH, "r").read()
         assert "def main" in content
         assert "_compile_triton_kernel_to_metallib" in content
@@ -9713,13 +9963,16 @@ class TestMetalAOTRuntime:
             timeout=120,
             env={
                 **os.environ,
-                "PYTHONPATH":
-                os.path.join(os.path.dirname(__file__), "..", "..", "..") + ":" + os.environ.get("PYTHONPATH", ""),
+                "PYTHONPATH": os.path.join(os.path.dirname(__file__), "..", "..", "..")
+                + ":"
+                + os.environ.get("PYTHONPATH", ""),
             },
         )
-        assert result.returncode == 0, (f"AOT runtime flow failed (rc={result.returncode}):\n"
-                                        f"stdout: {result.stdout[:500]}\n"
-                                        f"stderr: {result.stderr[:500]}")
+        assert result.returncode == 0, (
+            f"AOT runtime flow failed (rc={result.returncode}):\n"
+            f"stdout: {result.stdout[:500]}\n"
+            f"stderr: {result.stderr[:500]}"
+        )
 
 
 # ── Training Loop Pattern Compile Tests ──────────────────────────────
@@ -10717,6 +10970,19 @@ class TestMetalBufferPool:
         assert nbytes == arr.nbytes
         encoder.setBuffer_offset_atIndex_.assert_called_once()
 
+    @skip_non_darwin
+    def test_bind_argument_accepts_native_metal_buffer(self):
+        from unittest.mock import MagicMock
+
+        from third_party.metal.backend.driver import _bind_argument
+
+        encoder = MagicMock()
+        buf = _MockMTLBuffer(256)
+
+        _bind_argument(None, encoder, 3, buf)
+
+        encoder.setBuffer_offset_atIndex_.assert_called_once_with(buf, 0, 3)
+
     # -- integration: launch_kernel passes pool through -------------------
 
     @skip_non_darwin
@@ -10746,7 +11012,9 @@ class TestMetalBufferPool:
             )
             assert mock_bind.called
             call_kwargs = mock_bind.call_args
-            assert call_kwargs.kwargs.get("pool") is pool or (len(call_kwargs.args) > 5 and call_kwargs.args[5] is pool)
+            assert call_kwargs.kwargs.get("pool") is pool or (
+                len(call_kwargs.args) > 5 and call_kwargs.args[5] is pool
+            )
 
     # -- integration: clear_cache drains pool -----------------------------
 
@@ -10865,7 +11133,9 @@ entry:
 
         metadata = {}
         msl = MetalBackend.make_metal_ir(self._SHUFFLE_IR, metadata, None)
-        assert ("simd_shuffle(" in msl or "simd_shuffle_and_fill" in msl), "simd_shuffle not found in MSL"
+        assert (
+            "simd_shuffle(" in msl or "simd_shuffle_and_fill" in msl
+        ), "simd_shuffle not found in MSL"
         assert "simd_shuffle_xor(" in msl, "simd_shuffle_xor not found in MSL"
         assert "simd_shuffle_up(" in msl, "simd_shuffle_up not found in MSL"
         assert "simd_shuffle_down(" in msl, "simd_shuffle_down not found in MSL"
@@ -10888,7 +11158,9 @@ entry:
 
         metadata = {}
         msl = MetalBackend.make_metal_ir(self._SHUFFLE_IR, metadata, None)
-        assert ("int" in msl or "uint" in msl), "Expected integer type in shuffle MSL output"
+        assert (
+            "int" in msl or "uint" in msl
+        ), "Expected integer type in shuffle MSL output"
 
     @skip_non_darwin
     def test_barrier_shuffle_combined_kernel(self):
@@ -10906,7 +11178,7 @@ entry:
             tl.store(out_ptr + pid, val)
 
         out = torch.zeros(4, dtype=torch.int32, device="mps")
-        _barrier_shuffle_kernel[(4, )](out, BLOCK=1)
+        _barrier_shuffle_kernel[(4,)](out, BLOCK=1)
         result = out.cpu()
         expected = torch.arange(4, dtype=torch.int32)
         assert torch.equal(result, expected), f"Expected {expected}, got {result}"
@@ -10955,7 +11227,8 @@ class TestMetalFPSanitizer:
 
         opts = MetalOptions()
         assert (
-            opts.instrumentation_mode == ""), f"Expected empty instrumentation_mode, got '{opts.instrumentation_mode}'"
+            opts.instrumentation_mode == ""
+        ), f"Expected empty instrumentation_mode, got '{opts.instrumentation_mode}'"
 
     @skip_non_darwin
     def test_licm_in_ttir_pipeline(self):
@@ -11069,7 +11342,7 @@ class TestMetalRegisterReporting:
             tl.store(out_ptr + pid, pid.to(tl.float32))
 
         out = torch.zeros(4, dtype=torch.float32, device="mps")
-        _trivial_kernel[(4, )](out, N=4)
+        _trivial_kernel[(4,)](out, N=4)
         result = out.cpu()
         assert result[0] == 0.0 and result[3] == 3.0
 
@@ -11108,12 +11381,14 @@ class TestMetalHistogram:
             tl.store(output_ptr + tl.arange(0, NUM_BINS), hist)
 
         N, NUM_BINS = 128, 8
-        x = torch.randint(0, NUM_BINS, (N, ), dtype=torch.int32, device="mps")
+        x = torch.randint(0, NUM_BINS, (N,), dtype=torch.int32, device="mps")
         out = torch.zeros(NUM_BINS, dtype=torch.int32, device="mps")
-        _histogram[(1, )](x, out, N=N, NUM_BINS=NUM_BINS)
+        _histogram[(1,)](x, out, N=N, NUM_BINS=NUM_BINS)
         torch.mps.synchronize()
 
-        expected = torch.histc(x.float().cpu(), bins=NUM_BINS, min=0, max=NUM_BINS - 1).int()
+        expected = torch.histc(
+            x.float().cpu(), bins=NUM_BINS, min=0, max=NUM_BINS - 1
+        ).int()
         assert torch.equal(out.cpu(), expected)
 
     @skip_non_darwin
@@ -11132,9 +11407,9 @@ class TestMetalHistogram:
             tl.store(output_ptr + tl.arange(0, NUM_BINS), hist)
 
         N, NUM_BINS = 64, 4
-        x = torch.full((N, ), 2, dtype=torch.int32, device="mps")
+        x = torch.full((N,), 2, dtype=torch.int32, device="mps")
         out = torch.zeros(NUM_BINS, dtype=torch.int32, device="mps")
-        _histogram[(1, )](x, out, N=N, NUM_BINS=NUM_BINS)
+        _histogram[(1,)](x, out, N=N, NUM_BINS=NUM_BINS)
         torch.mps.synchronize()
 
         expected = torch.tensor([0, 0, N, 0], dtype=torch.int32)
@@ -11149,7 +11424,9 @@ class TestMetalHistogram:
         import triton.language as tl
 
         @triton.jit
-        def _histogram_masked(input_ptr, output_ptr, n_elements, N: tl.constexpr, NUM_BINS: tl.constexpr):
+        def _histogram_masked(
+            input_ptr, output_ptr, n_elements, N: tl.constexpr, NUM_BINS: tl.constexpr
+        ):
             offs = tl.arange(0, N)
             mask = offs < n_elements
             vals = tl.load(input_ptr + offs, mask=mask, other=0)
@@ -11158,13 +11435,15 @@ class TestMetalHistogram:
 
         N, NUM_BINS = 128, 4
         n_elements = 80
-        x = torch.randint(0, NUM_BINS, (N, ), dtype=torch.int32, device="mps")
+        x = torch.randint(0, NUM_BINS, (N,), dtype=torch.int32, device="mps")
         out = torch.zeros(NUM_BINS, dtype=torch.int32, device="mps")
-        _histogram_masked[(1, )](x, out, n_elements, N=N, NUM_BINS=NUM_BINS)
+        _histogram_masked[(1,)](x, out, n_elements, N=N, NUM_BINS=NUM_BINS)
         torch.mps.synchronize()
 
         x_cpu = x.cpu()[:n_elements]
-        expected = torch.histc(x_cpu.float(), bins=NUM_BINS, min=0, max=NUM_BINS - 1).int()
+        expected = torch.histc(
+            x_cpu.float(), bins=NUM_BINS, min=0, max=NUM_BINS - 1
+        ).int()
         assert torch.equal(out.cpu(), expected)
 
 
@@ -11192,7 +11471,7 @@ class TestMetalJoinSplitInterleave:
         a = torch.arange(0, N, dtype=torch.float32, device="mps")
         b = torch.arange(N, 2 * N, dtype=torch.float32, device="mps")
         out = torch.empty(N * 2, dtype=torch.float32, device="mps")
-        _join[(1, )](a, b, out, N=N)
+        _join[(1,)](a, b, out, N=N)
         torch.mps.synchronize()
 
         expected = torch.stack([a.cpu(), b.cpu()], dim=1).reshape(-1)
@@ -11219,7 +11498,7 @@ class TestMetalJoinSplitInterleave:
         data = torch.arange(0, N * 2, dtype=torch.float32, device="mps")
         out_a = torch.empty(N, dtype=torch.float32, device="mps")
         out_b = torch.empty(N, dtype=torch.float32, device="mps")
-        _split[(1, )](data, out_a, out_b, N=N)
+        _split[(1,)](data, out_a, out_b, N=N)
         torch.mps.synchronize()
 
         data_cpu = data.cpu().reshape(N, 2)
@@ -11246,7 +11525,7 @@ class TestMetalJoinSplitInterleave:
         a = torch.arange(0, N, dtype=torch.float32, device="mps")
         b = torch.arange(N, 2 * N, dtype=torch.float32, device="mps")
         out = torch.empty(2 * N, dtype=torch.float32, device="mps")
-        _interleave[(1, )](a, b, out, N=N)
+        _interleave[(1,)](a, b, out, N=N)
         torch.mps.synchronize()
 
         expected = torch.stack([a.cpu(), b.cpu()], dim=-1).reshape(-1)
@@ -11275,7 +11554,7 @@ class TestMetalJoinSplitInterleave:
         b = torch.randn(N, dtype=torch.float32, device="mps")
         out_a = torch.empty(N, dtype=torch.float32, device="mps")
         out_b = torch.empty(N, dtype=torch.float32, device="mps")
-        _roundtrip[(1, )](a, b, out_a, out_b, N=N)
+        _roundtrip[(1,)](a, b, out_a, out_b, N=N)
         torch.mps.synchronize()
 
         assert torch.equal(out_a.cpu(), a.cpu())
@@ -11306,7 +11585,7 @@ class TestMetalCat:
         a = torch.arange(0, N, dtype=torch.float32, device="mps")
         b = torch.arange(N, 2 * N, dtype=torch.float32, device="mps")
         out = torch.empty(2 * N, dtype=torch.float32, device="mps")
-        _cat[(1, )](a, b, out, N=N)
+        _cat[(1,)](a, b, out, N=N)
         torch.mps.synchronize()
 
         expected = torch.cat([a.cpu(), b.cpu()])
@@ -11333,7 +11612,7 @@ class TestMetalCat:
         a = torch.ones(N, dtype=torch.float32, device="mps")
         b = torch.ones(N, dtype=torch.float32, device="mps") * 2
         out = torch.zeros(1, dtype=torch.float32, device="mps")
-        _cat_sum[(1, )](a, b, out, N=N)
+        _cat_sum[(1,)](a, b, out, N=N)
         torch.mps.synchronize()
 
         expected = N * 1.0 + N * 2.0
@@ -11416,18 +11695,29 @@ class TestMetal3DGrid:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(0, K, BLOCK_K):
                 a = tl.load(
-                    a_ptr + batch * stride_ab + offs_m[:, None] * stride_am + (offs_k[None, :] + kk) * stride_ak,
+                    a_ptr
+                    + batch * stride_ab
+                    + offs_m[:, None] * stride_am
+                    + (offs_k[None, :] + kk) * stride_ak,
                     mask=(offs_m[:, None] < M) & (offs_k[None, :] + kk < K),
                     other=0.0,
                 )
                 b = tl.load(
-                    b_ptr + batch * stride_bb + (offs_k[:, None] + kk) * stride_bk + offs_n[None, :] * stride_bn,
+                    b_ptr
+                    + batch * stride_bb
+                    + (offs_k[:, None] + kk) * stride_bk
+                    + offs_n[None, :] * stride_bn,
                     mask=(offs_k[:, None] + kk < K) & (offs_n[None, :] < N),
                     other=0.0,
                 )
                 acc += tl.dot(a, b)
 
-            c_ptrs = (c_ptr + batch * stride_cb + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn)
+            c_ptrs = (
+                c_ptr
+                + batch * stride_cb
+                + offs_m[:, None] * stride_cm
+                + offs_n[None, :] * stride_cn
+            )
             tl.store(c_ptrs, acc, mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
 
         torch.manual_seed(42)
@@ -11516,7 +11806,7 @@ class TestMetalClampPropagateNan:
         N = 128
         x = torch.randn(N, dtype=torch.float32, device="mps") * 10
         out = torch.empty(N, dtype=torch.float32, device="mps")
-        _clamp[(1, )](x, out, -2.0, 2.0, N=N)
+        _clamp[(1,)](x, out, -2.0, 2.0, N=N)
         torch.mps.synchronize()
 
         expected = torch.clamp(x.cpu(), -2.0, 2.0)
@@ -11540,7 +11830,7 @@ class TestMetalClampPropagateNan:
         N = 256
         x = torch.randn(N, dtype=torch.float32, device="mps") * 5
         out = torch.empty(N, dtype=torch.float32, device="mps")
-        _clamp_sym[(1, )](x, out, 1.5, N=N)
+        _clamp_sym[(1,)](x, out, 1.5, N=N)
         torch.mps.synchronize()
 
         expected = torch.clamp(x.cpu(), -1.5, 1.5)
@@ -11563,10 +11853,14 @@ class TestMetalClampPropagateNan:
             tl.store(out_ptr + offs, result)
 
         N = 64
-        a = torch.tensor([1.0, float("nan"), 3.0, float("nan")] * (N // 4), device="mps")
-        b = torch.tensor([2.0, 2.0, float("nan"), float("nan")] * (N // 4), device="mps")
+        a = torch.tensor(
+            [1.0, float("nan"), 3.0, float("nan")] * (N // 4), device="mps"
+        )
+        b = torch.tensor(
+            [2.0, 2.0, float("nan"), float("nan")] * (N // 4), device="mps"
+        )
         out = torch.empty(N, dtype=torch.float32, device="mps")
-        _min_nan[(1, )](a, b, out, N=N)
+        _min_nan[(1,)](a, b, out, N=N)
         torch.mps.synchronize()
 
         result = out.cpu()
@@ -11594,10 +11888,14 @@ class TestMetalClampPropagateNan:
             tl.store(out_ptr + offs, result)
 
         N = 64
-        a = torch.tensor([1.0, float("nan"), 3.0, float("nan")] * (N // 4), device="mps")
-        b = torch.tensor([2.0, 2.0, float("nan"), float("nan")] * (N // 4), device="mps")
+        a = torch.tensor(
+            [1.0, float("nan"), 3.0, float("nan")] * (N // 4), device="mps"
+        )
+        b = torch.tensor(
+            [2.0, 2.0, float("nan"), float("nan")] * (N // 4), device="mps"
+        )
         out = torch.empty(N, dtype=torch.float32, device="mps")
-        _max_nan[(1, )](a, b, out, N=N)
+        _max_nan[(1,)](a, b, out, N=N)
         torch.mps.synchronize()
 
         result = out.cpu()
@@ -11626,7 +11924,7 @@ class TestMetalClampPropagateNan:
         N = 64
         x = torch.tensor([0.5, float("nan"), -0.5, 2.0] * (N // 4), device="mps")
         out = torch.empty(N, dtype=torch.float32, device="mps")
-        _clamp_nan[(1, )](x, out, N=N)
+        _clamp_nan[(1,)](x, out, N=N)
         torch.mps.synchronize()
 
         result = out.cpu()
@@ -11656,8 +11954,8 @@ class TestMetalProgramIdNumPrograms:
             tl.store(out_ptr + pid, pid)
 
         N = 16
-        out = torch.full((N, ), -1, dtype=torch.int32, device="mps")
-        _pid0[(N, )](out, N=N)
+        out = torch.full((N,), -1, dtype=torch.int32, device="mps")
+        _pid0[(N,)](out, N=N)
         torch.mps.synchronize()
 
         expected = torch.arange(N, dtype=torch.int32)
@@ -11736,7 +12034,7 @@ class TestMetalRNG:
 
         N = 1024
         out = torch.empty(N, dtype=torch.float32, device="mps")
-        _rand[(1, )](12345, out, N=N)
+        _rand[(1,)](12345, out, N=N)
         torch.mps.synchronize()
 
         result = out.cpu()
@@ -11760,11 +12058,13 @@ class TestMetalRNG:
         N = 256
         out1 = torch.empty(N, dtype=torch.float32, device="mps")
         out2 = torch.empty(N, dtype=torch.float32, device="mps")
-        _rand[(1, )](42, out1, N=N)
-        _rand[(1, )](43, out2, N=N)
+        _rand[(1,)](42, out1, N=N)
+        _rand[(1,)](43, out2, N=N)
         torch.mps.synchronize()
 
-        assert not torch.equal(out1.cpu(), out2.cpu()), "Different seeds should produce different values"
+        assert not torch.equal(
+            out1.cpu(), out2.cpu()
+        ), "Different seeds should produce different values"
 
     @skip_non_darwin
     @skip_no_mps
@@ -11783,11 +12083,13 @@ class TestMetalRNG:
         N = 256
         out1 = torch.empty(N, dtype=torch.float32, device="mps")
         out2 = torch.empty(N, dtype=torch.float32, device="mps")
-        _rand[(1, )](99, out1, N=N)
-        _rand[(1, )](99, out2, N=N)
+        _rand[(1,)](99, out1, N=N)
+        _rand[(1,)](99, out2, N=N)
         torch.mps.synchronize()
 
-        assert torch.equal(out1.cpu(), out2.cpu()), "Same seed should produce identical values"
+        assert torch.equal(
+            out1.cpu(), out2.cpu()
+        ), "Same seed should produce identical values"
 
     @skip_non_darwin
     @skip_no_mps
@@ -11805,13 +12107,17 @@ class TestMetalRNG:
 
         N = 4096
         out = torch.empty(N, dtype=torch.float32, device="mps")
-        _randn[(1, )](7, out, N=N)
+        _randn[(1,)](7, out, N=N)
         torch.mps.synchronize()
 
         result = out.cpu()
         # For N=4096 from N(0,1), mean ~0, std ~1 with generous tolerance
-        assert (abs(result.mean().item()) < 0.15), f"Mean {result.mean().item()} too far from 0"
-        assert (abs(result.std().item() - 1.0) < 0.15), f"Std {result.std().item()} too far from 1"
+        assert (
+            abs(result.mean().item()) < 0.15
+        ), f"Mean {result.mean().item()} too far from 0"
+        assert (
+            abs(result.std().item() - 1.0) < 0.15
+        ), f"Std {result.std().item()} too far from 1"
 
     @skip_non_darwin
     @skip_no_mps
@@ -11829,7 +12135,7 @@ class TestMetalRNG:
 
         N = 1024
         out = torch.empty(N, dtype=torch.int32, device="mps")
-        _randint[(1, )](555, out, N=N)
+        _randint[(1,)](555, out, N=N)
         torch.mps.synchronize()
 
         result = out.cpu()
@@ -11859,7 +12165,7 @@ class TestMetalTypeConversion:
         N = 256
         x = torch.randn(N, dtype=torch.float32, device="mps")
         out = torch.empty(N, dtype=torch.float16, device="mps")
-        _cast[(1, )](x, out, N=N)
+        _cast[(1,)](x, out, N=N)
         torch.mps.synchronize()
 
         expected = x.cpu().half()
@@ -11883,7 +12189,7 @@ class TestMetalTypeConversion:
         N = 256
         x = torch.randn(N, dtype=torch.float16, device="mps")
         out = torch.empty(N, dtype=torch.float32, device="mps")
-        _cast[(1, )](x, out, N=N)
+        _cast[(1,)](x, out, N=N)
         torch.mps.synchronize()
 
         expected = x.cpu().float()
@@ -11907,7 +12213,7 @@ class TestMetalTypeConversion:
         N = 128
         x = torch.arange(-64, 64, dtype=torch.int32, device="mps")
         out = torch.empty(N, dtype=torch.float32, device="mps")
-        _cast[(1, )](x, out, N=N)
+        _cast[(1,)](x, out, N=N)
         torch.mps.synchronize()
 
         expected = x.cpu().float()
@@ -11931,7 +12237,7 @@ class TestMetalTypeConversion:
         N = 128
         x = torch.linspace(-10.0, 10.0, N, dtype=torch.float32, device="mps")
         out = torch.empty(N, dtype=torch.int32, device="mps")
-        _cast[(1, )](x, out, N=N)
+        _cast[(1,)](x, out, N=N)
         torch.mps.synchronize()
 
         expected = x.cpu().int()
@@ -11956,7 +12262,7 @@ class TestMetalTypeConversion:
         N = 256
         x = torch.randn(N, dtype=torch.float32, device="mps")
         out = torch.empty(N, dtype=torch.float32, device="mps")
-        _rt[(1, )](x, out, N=N)
+        _rt[(1,)](x, out, N=N)
         torch.mps.synchronize()
 
         expected = x.cpu().bfloat16().float()

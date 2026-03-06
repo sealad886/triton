@@ -40,6 +40,20 @@ from triton.backends.metal.translator_context import (
 _METAL_DEBUG = os.environ.get("TRITON_METAL_DEBUG", "").lower() in ("1", "true", "yes")
 
 
+def _load_triton_metal_plugin():
+    """Import the compiled Metal plugin with a backend-specific error."""
+    try:
+        import triton._C.libtriton.metal as metal
+    except ImportError as exc:
+        raise RuntimeError(
+            "Triton Metal backend requires the compiled "
+            "`triton._C.libtriton.metal` extension. Rebuild Triton with the "
+            "Metal plugin enabled and ensure Metal/Foundation frameworks were "
+            "available at build time."
+        ) from exc
+    return metal
+
+
 def _compile_provenance(options: "MetalOptions | None", src_hash: str) -> None:
     """Log compile provenance for debugging."""
     if not _METAL_DEBUG:
@@ -1346,7 +1360,7 @@ class MetalBackend(BaseBackend):
         return {"triton.language.extra.libdevice": libdevice}
 
     def load_dialects(self, ctx):
-        import triton._C.libtriton.metal as metal
+        metal = _load_triton_metal_plugin()
 
         if ctx is not None and hasattr(metal, "load_dialects"):
             metal.load_dialects(ctx)
@@ -1400,7 +1414,7 @@ class MetalBackend(BaseBackend):
 
     @staticmethod
     def make_ttgir(mod, metadata, opt):
-        import triton._C.libtriton.metal as metal
+        metal = _load_triton_metal_plugin()
 
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
@@ -1486,7 +1500,7 @@ class MetalBackend(BaseBackend):
         if hasattr(passes.convert, "add_index_to_llvmir"):
             _run_pass(passes.convert.add_index_to_llvmir, "index_to_llvmir", pm)
 
-        import triton._C.libtriton.metal as metal
+        metal = _load_triton_metal_plugin()
 
         _run_pass(
             passes.ttgpuir.add_allocate_shared_memory, "allocate_shared_memory", pm

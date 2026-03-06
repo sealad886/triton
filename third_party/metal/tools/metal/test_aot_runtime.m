@@ -11,9 +11,12 @@
  *
  * Usage:
  *   ./test_aot_runtime <path-to.metallib> [kernel_name] [num_elements]
+ *                      [block_size] [threads_per_threadgroup]
  *
  * Default kernel_name:  vector_add_kernel
  * Default num_elements: 1024
+ * Default block_size:   256
+ * Default threads_per_threadgroup: pipeline-dependent fallback
  *
  * The kernel is expected to take three device float* buffers (A, B, out)
  * and a uint element-count, computing out[i] = A[i] + B[i].
@@ -43,19 +46,26 @@ static void die_ns(NSString *msg) {
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc < 2) {
-            fprintf(stderr, "Usage: %s <metallib> [kernel_name] [num_elements]\n", argv[0]);
+            fprintf(stderr,
+                    "Usage: %s <metallib> [kernel_name] [num_elements] "
+                    "[block_size] [threads_per_threadgroup]\n",
+                    argv[0]);
             return 1;
         }
 
         const char *metallib_path = argv[1];
         const char *kernel_name = (argc >= 3) ? argv[2] : "vector_add_kernel";
         int num_elements = (argc >= 4) ? atoi(argv[3]) : 1024;
+        int block_size = (argc >= 5) ? atoi(argv[4]) : 256;
+        int requested_threads_per_tg = (argc >= 6) ? atoi(argv[5]) : 0;
         if (num_elements <= 0) num_elements = 1024;
+        if (block_size <= 0) block_size = 256;
 
         printf("AOT Runtime Harness\n");
         printf("  metallib:     %s\n", metallib_path);
         printf("  kernel:       %s\n", kernel_name);
         printf("  num_elements: %d\n", num_elements);
+        printf("  block_size:   %d\n", block_size);
 
         /* ── 1. Get Metal device ── */
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -130,12 +140,19 @@ int main(int argc, const char *argv[]) {
         uint32_t n_elem = (uint32_t)num_elements;
         [encoder setBytes:&n_elem length:sizeof(n_elem) atIndex:3];
 
-        NSUInteger threads_per_tg = [pipeline maxTotalThreadsPerThreadgroup];
+        NSUInteger threads_per_tg = requested_threads_per_tg > 0
+                                        ? (NSUInteger)requested_threads_per_tg
+                                        : [pipeline maxTotalThreadsPerThreadgroup];
         if (threads_per_tg > (NSUInteger)num_elements) {
             threads_per_tg = (NSUInteger)num_elements;
         }
-        /* Grid: ceil(num_elements / threads_per_tg) threadgroups */
-        NSUInteger num_tg = ((NSUInteger)num_elements + threads_per_tg - 1) / threads_per_tg;
+        if (threads_per_tg > [pipeline maxTotalThreadsPerThreadgroup]) {
+            threads_per_tg = [pipeline maxTotalThreadsPerThreadgroup];
+        }
+        /* Triton kernels expect program-grid launch geometry, not a raw
+         * element-thread mapping. */
+        NSUInteger num_tg = ((NSUInteger)num_elements + (NSUInteger)block_size - 1) /
+                            (NSUInteger)block_size;
 
         MTLSize tgSize = MTLSizeMake(threads_per_tg, 1, 1);
         MTLSize gridSize = MTLSizeMake(num_tg, 1, 1);

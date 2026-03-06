@@ -70,7 +70,9 @@ def _compile_harness(harness_src: Path, output_bin: Path) -> tuple[bool, str]:
         return False, "clang timed out"
 
 
-def _compile_triton_kernel_to_metallib(work_dir: Path) -> tuple[bool, Path | None, str]:
+def _compile_triton_kernel_to_metallib(
+    work_dir: Path,
+) -> tuple[bool, Path | None, dict[str, int | str] | str]:
     """Compile a vector_add kernel through Triton JIT → MSL → metallib."""
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -78,6 +80,8 @@ def _compile_triton_kernel_to_metallib(work_dir: Path) -> tuple[bool, Path | Non
         import triton.compiler
         import triton.language as tl
         from triton.compiler.compiler import GPUTarget
+
+        block_size = 256
 
         @triton.jit
         def vector_add_kernel(
@@ -98,7 +102,7 @@ def _compile_triton_kernel_to_metallib(work_dir: Path) -> tuple[bool, Path | Non
                 "out_ptr": "*fp32",
                 "n_elements": "i32",
             },
-            constexprs={"BLOCK_SIZE": 256},
+            constexprs={"BLOCK_SIZE": block_size},
         )
         target = GPUTarget("metal", "apple8", 32)
         compiled = triton.compile(src=src, target=target)
@@ -122,16 +126,32 @@ def _compile_triton_kernel_to_metallib(work_dir: Path) -> tuple[bool, Path | Non
                     kernel_name = parts[0].strip()
                     break
 
-        return True, metallib_path, kernel_name
+        return True, metallib_path, {
+            "kernel_name": kernel_name,
+            "block_size": block_size,
+            "threads_per_threadgroup": int(compiled.metadata.num_warps * target.warp_size),
+        }
     except Exception as exc:
         return False, None, str(exc)
 
 
 def _run_harness(
-    harness_bin: Path, metallib_path: Path, kernel_name: str, num_elements: int
+    harness_bin: Path,
+    metallib_path: Path,
+    kernel_name: str,
+    num_elements: int,
+    block_size: int,
+    threads_per_threadgroup: int,
 ) -> tuple[bool, str]:
     """Run the compiled AOT harness."""
-    cmd = [str(harness_bin), str(metallib_path), kernel_name, str(num_elements)]
+    cmd = [
+        str(harness_bin),
+        str(metallib_path),
+        kernel_name,
+        str(num_elements),
+        str(block_size),
+        str(threads_per_threadgroup),
+    ]
     try:
         result = subprocess.run(
             cmd,
@@ -189,22 +209,32 @@ def main() -> int:
         print(f"[1/3] Compiled AOT harness: {detail}")
 
         # Step 2: Compile Triton kernel → metallib
-        ok, metallib_path, kernel_name_or_err = _compile_triton_kernel_to_metallib(
+        ok, metallib_path, launch_info_or_err = _compile_triton_kernel_to_metallib(
             work_dir
         )
-        report["steps"]["compile_kernel"] = {"passed": ok, "detail": kernel_name_or_err}
+        report["steps"]["compile_kernel"] = {"passed": ok, "detail": launch_info_or_err}
         if not ok or metallib_path is None:
-            print(f"FAIL: compile kernel — {kernel_name_or_err}")
+            print(f"FAIL: compile kernel — {launch_info_or_err}")
             _output_report(report, args)
             return 1
+        assert isinstance(launch_info_or_err, dict)
         print(
-            f"[2/3] Compiled kernel to metallib: {metallib_path.stat().st_size} bytes (kernel={kernel_name_or_err})"
+            "[2/3] Compiled kernel to metallib: "
+            f"{metallib_path.stat().st_size} bytes "
+            f"(kernel={launch_info_or_err['kernel_name']}, "
+            f"block_size={launch_info_or_err['block_size']}, "
+            f"threads_per_tg={launch_info_or_err['threads_per_threadgroup']})"
         )
 
-        # Step 3: Run harness — use the actual kernel name from MSL
-        actual_kernel_name = kernel_name_or_err if ok else args.kernel_name
+        # Step 3: Run harness using the Triton launch geometry required by the
+        # generated kernel rather than generic Metal defaults.
         ok, output = _run_harness(
-            harness_bin, metallib_path, actual_kernel_name, args.num_elements
+            harness_bin,
+            metallib_path,
+            str(launch_info_or_err["kernel_name"]),
+            args.num_elements,
+            int(launch_info_or_err["block_size"]),
+            int(launch_info_or_err["threads_per_threadgroup"]),
         )
         report["steps"]["run_harness"] = {"passed": ok, "detail": output}
         report["overall_passed"] = ok

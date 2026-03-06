@@ -52,11 +52,11 @@ is corrected to reflect current implementation reality, including partial work.
 | `third_party/<backend>/tools` | `compile.*` + `link.h` | `compile.*` + `link.h` | present, but Metal AOT behavior not validated by unit tests | Medium |
 | `third_party/<backend>/python` | root binding (`triton_nvidia.cc`) | `python/triton_amd.cc` | `python/triton_metal.cc` present | Low |
 | Runtime `utils.load_binary` contract | matches JIT expectations | matches JIT expectations | aligned for source+metallib payloads | Low |
-| Runtime `utils.get_device_properties` schema | includes expected keys | includes expected keys | shared-memory keys present; benchmark-related keys still missing | Medium |
+| Runtime `utils.get_device_properties` schema | includes expected keys | includes expected keys | aligned with shared schema keys used by tutorials/benchmark helpers (`arch`, `warpSize`, `max_num_regs`, `max_threads_per_sm`, clock placeholders) | Low |
 | LLVM IR -> MSL backend stage | mature backend-specific lowering | mature backend-specific lowering | no longer stub; broad lowering coverage with known matmul/encoding gaps | Medium |
 | Backend stage inspection hook | implemented | implemented | implemented | Low |
 | Test utility backend helpers | cuda/hip helpers | hip helpers | `is_metal` helper present | Low |
-| AOT unit test behavior | supported | supported | Metal compile-template AOT tests present; runtime C harness still CUDA/HIP | Medium |
+| AOT unit test behavior | supported | supported | Metal compile-template and Objective-C runtime harness tests present | Low |
 | Crash diagnostics harness | mature sanitizer/profiler ecosystem | mature sanitizer/profiler ecosystem | deterministic MPS crash triage harness implemented | Low |
 
 ## First-Class Definition
@@ -437,7 +437,8 @@ Status: Complete.
   embedding, training patterns). HIP-backed cross-backend numerics remain
   incomplete.
 - AOT runtime C harness (`test_aot_runtime.m`) and test script
-  (`scripts/test_metal_aot_runtime.py`) added for Metal; the upstream
+  (`scripts/test_metal_aot_runtime.py`) are now exercised through the
+  Metal-specific pytest/release gate path; the upstream
   `python/test/unit/tools/test_aot.py` remains CUDA/HIP-centric.
 - Some documentation/claim text was ahead of implementation and has been
   corrected in prior updates.

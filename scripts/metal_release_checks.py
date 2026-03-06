@@ -143,6 +143,11 @@ def _checks(python_exe: str, soak: bool) -> list[tuple[str, list[str], int]]:
             600,
         ),
         (
+            "metal_aot_runtime",
+            [python_exe, "scripts/test_metal_aot_runtime.py"],
+            900,
+        ),
+        (
             "aot_unit_collection_gate",
             [python_exe, "-m", "pytest", "-q", "python/test/unit/tools/test_aot.py"],
             600,

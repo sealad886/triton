@@ -75,6 +75,28 @@ def _estimate_registers_from_occupancy(
     return min(regs_16bit, 256)
 
 
+def _estimate_max_num_regs(gpu_family: str) -> int:
+    """Approximate a CUDA-style per-block register budget for generic heuristics.
+
+    Metal does not expose a direct `max_num_regs` property. We derive a
+    compatible 32-bit register count from the per-core register file size so
+    generic Triton occupancy heuristics can remain defined on Metal.
+    """
+    reg_file = _REGISTER_FILE_BYTES.get(gpu_family, _REGISTER_FILE_BYTES["apple8"])
+    return max(0, reg_file // 4)
+
+
+def _estimate_max_threads_per_sm(max_threads_per_threadgroup: int) -> int:
+    """Provide a conservative resident-thread bound for schema parity.
+
+    Apple does not publish a direct equivalent of CUDA/HIP's
+    `maxThreadsPerMultiProcessor` through the Metal runtime. Using the
+    threadgroup limit keeps generic occupancy helpers defined without claiming
+    undocumented residency capacity.
+    """
+    return max(0, int(max_threads_per_threadgroup))
+
+
 # ── Size-bucketed MTLBuffer pool ────────────────────────────────────
 
 
@@ -219,6 +241,11 @@ def _extract_num_warps(metadata):
     if hasattr(metadata, "num_warps"):
         return metadata.num_warps
     return None
+
+
+def _is_mtl_buffer_like(arg) -> bool:
+    """Detect native/shared Metal buffers passed directly to the PyObjC path."""
+    return callable(getattr(arg, "contents", None)) and callable(getattr(arg, "length", None))
 
 
 def _resolve_kernel_name(kernel_metadata, launcher_metadata, handle):
@@ -600,11 +627,16 @@ class MetalUtils:
         if dev is None:
             return {
                 "name": "unknown",
+                "arch": "unknown",
                 "max_shared_mem": 0,
+                "max_num_regs": 0,
+                "warpSize": 32,
+                "max_threads_per_sm": 0,
                 "max_buffer_length": 0,
                 "max_threads_per_threadgroup": 0,
                 "max_threadgroup_memory_length": 0,
                 "gpu_family": "unknown",
+                "sm_clock_rate": 0,
                 "mem_clock_rate": 0,
                 "mem_bus_width": 0,
                 "multiprocessor_count": 0,
@@ -622,11 +654,19 @@ class MetalUtils:
         mem_info = _gpu_memory_specs(gpu_family, str(dev.name()))
         return {
             "name": str(dev.name()),
+            "arch": gpu_family,
             "max_shared_mem": max_threadgroup_memory_length,
+            "max_num_regs": _estimate_max_num_regs(gpu_family),
+            "warpSize": 32,
+            "max_threads_per_sm": _estimate_max_threads_per_sm(max_threads),
             "max_buffer_length": int(dev.maxBufferLength()),
             "max_threads_per_threadgroup": max_threads,
             "max_threadgroup_memory_length": max_threadgroup_memory_length,
             "gpu_family": gpu_family,
+            # Metal does not expose a public shader-core clock. Keep the schema
+            # aligned with other backends without fabricating an undocumented
+            # value.
+            "sm_clock_rate": 0,
             "mem_clock_rate": mem_info["mem_clock_rate"],
             "mem_bus_width": mem_info["mem_bus_width"],
             "multiprocessor_count": mem_info["multiprocessor_count"],
@@ -1083,6 +1123,10 @@ def _bind_argument(
         else:
             buf = device.newBufferWithBytes_length_options_(arg.tobytes(), nbytes, 0)
         encoder.setBuffer_offset_atIndex_(buf, 0, idx)
+        return
+
+    if _is_mtl_buffer_like(arg):
+        encoder.setBuffer_offset_atIndex_(arg, 0, idx)
         return
 
     if arg_type is not None:
