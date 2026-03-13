@@ -1,0 +1,56 @@
+name: Metal Release Gate
+
+on:
+  workflow_call:
+
+jobs:
+  metal-release-gate:
+    name: Metal Release Gate
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build prerequisites
+        run: |
+          brew update
+          brew install ccache llvm@19 lld coreutils
+          echo "/opt/homebrew/opt/llvm@19/bin" >> $GITHUB_PATH
+          python -m pip install --upgrade pip
+          python -m pip install pytest numpy loguru torch \
+            pyobjc-framework-Metal pyobjc-framework-Foundation
+
+      - name: Install Triton from current checkout
+        env:
+          MAX_JOBS: 3
+          TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+        run: |
+          export PATH="/opt/homebrew/opt/llvm@19/bin:$PATH"
+          export CC="/opt/homebrew/opt/llvm@19/bin/clang"
+          export CXX="/opt/homebrew/opt/llvm@19/bin/clang++"
+          export CXXFLAGS="-stdlib=libc++"
+          export LDFLAGS="-L/opt/homebrew/opt/llvm@19/lib"
+          make dev-install
+
+      - name: Run hosted Metal release gate
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          python scripts/metal_release_checks.py \
+            --profile hosted-ci \
+            --tag gha-metal-release-gate
+
+      - name: Upload Metal release-gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal-release-gate-${{ github.sha }}
+          path: artifacts/metal-release-checks/
+          retention-days: 14

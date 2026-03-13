@@ -48,7 +48,9 @@ def _ceildiv(a: int, b: int) -> int:
 # register file dimension per GPU core but scale core count instead.
 _REGISTER_FILE_BYTES = {
     "apple7": 212992,  # 208 KiB
-    "apple8": 212992, "apple9": 212992, "apple10": 212992,  # assumed same until Apple documents otherwise
+    "apple8": 212992,
+    "apple9": 212992,
+    "apple10": 212992,  # assumed same until Apple documents otherwise
 }
 
 
@@ -186,8 +188,14 @@ _ARG_PACK_FORMAT: dict[str, str] = {
     "u8": "B",  # unsigned char
     "i16": "h",  # signed short
     "u16": "H",  # unsigned short
-    "i32": "i", "i64": "q", "u32": "I", "u64": "Q", "f32": "f", "f64": "d", "f16": "e", "bf16":
-    "H",  # bfloat16 packed as raw 16-bit unsigned (no struct format)
+    "i32": "i",
+    "i64": "q",
+    "u32": "I",
+    "u64": "Q",
+    "f32": "f",
+    "f64": "d",
+    "f16": "e",
+    "bf16": "H",  # bfloat16 packed as raw 16-bit unsigned (no struct format)
 }
 
 
@@ -245,7 +253,9 @@ def _extract_num_warps(metadata):
 
 def _is_mtl_buffer_like(arg) -> bool:
     """Detect native/shared Metal buffers passed directly to the PyObjC path."""
-    return callable(getattr(arg, "contents", None)) and callable(getattr(arg, "length", None))
+    return callable(getattr(arg, "contents", None)) and callable(
+        getattr(arg, "length", None)
+    )
 
 
 def _resolve_kernel_name(kernel_metadata, launcher_metadata, handle):
@@ -276,7 +286,9 @@ def _resolve_kernel_name(kernel_metadata, launcher_metadata, handle):
 def _resolve_and_validate_kernel_name(kernel_metadata, launcher_metadata, handle):
     kernel_name = _resolve_kernel_name(kernel_metadata, launcher_metadata, handle)
     if not isinstance(kernel_name, str) or kernel_name == "":
-        raise RuntimeError(f"Missing/invalid Metal kernel name in launch metadata: {kernel_name!r}")
+        raise RuntimeError(
+            f"Missing/invalid Metal kernel name in launch metadata: {kernel_name!r}"
+        )
     return kernel_name
 
 
@@ -392,7 +404,11 @@ class _MetalTimingEvent:
 
     def record(self):
         torch = _get_torch_module()
-        if (torch is not None and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize")):
+        if (
+            torch is not None
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "synchronize")
+        ):
             torch.mps.synchronize()
         self._host_timestamp = time.perf_counter()
         self._cmd_buf = getattr(_metal_last_cmd_buf, "cmd_buf", None)
@@ -433,7 +449,11 @@ class _MetalDeviceInterface:
     @staticmethod
     def synchronize():
         torch = _get_torch_module()
-        if (torch is not None and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize")):
+        if (
+            torch is not None
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "synchronize")
+        ):
             torch.mps.synchronize()
 
     @staticmethod
@@ -497,13 +517,17 @@ class MetalUtils:
             return int(stream_id)
         if isinstance(stream_id, int):
             if stream_id < 0:
-                raise ValueError(f"Metal stream id must be non-negative, got {stream_id}")
+                raise ValueError(
+                    f"Metal stream id must be non-negative, got {stream_id}"
+                )
             return stream_id
         for attr in ("stream_id", "cuda_stream"):
             if hasattr(stream_id, attr):
                 value = int(getattr(stream_id, attr))
                 if value < 0:
-                    raise ValueError(f"Metal stream id from {attr} must be non-negative, got {value}")
+                    raise ValueError(
+                        f"Metal stream id from {attr} must be non-negative, got {value}"
+                    )
                 return value
         try:
             value = int(stream_id)
@@ -561,7 +585,11 @@ class MetalUtils:
     def reset_runtime_state(self) -> None:
         """Drain pending work and reset cached per-stream runtime state."""
         torch = self._torch or _get_torch_module()
-        if torch is not None and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+        if (
+            torch is not None
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "synchronize")
+        ):
             torch.mps.synchronize()
 
         for stream_id in list(self._command_queues):
@@ -577,7 +605,11 @@ class MetalUtils:
             self._buffer_pool.drain()
 
         torch = self._torch or _get_torch_module()
-        if (torch is not None and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize")):
+        if (
+            torch is not None
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "synchronize")
+        ):
             torch.mps.synchronize()
 
     def track_command_buffer(
@@ -590,7 +622,9 @@ class MetalUtils:
         stream_id = self._coerce_stream_id(stream_id)
         self._pending_buffers.setdefault(stream_id, []).append(cmd_buf)
         if acquired_pool_bufs:
-            self._pending_pool_returns.setdefault(stream_id, []).append(acquired_pool_bufs)
+            self._pending_pool_returns.setdefault(stream_id, []).append(
+                acquired_pool_bufs
+            )
 
     def resolve_execution_mode(self) -> str:
         """Determine the best available execution path.
@@ -640,7 +674,9 @@ class MetalUtils:
             device_id: Must be 0 (Apple Silicon exposes a single GPU).
         """
         if int(device_id) != 0:
-            raise ValueError(f"Metal backend has a single device (0), got device_id={device_id}")
+            raise ValueError(
+                f"Metal backend has a single device (0), got device_id={device_id}"
+            )
         dev = self.device
         if dev is None:
             return {
@@ -758,21 +794,28 @@ class MetalUtils:
         metadata = metadata or {}
         mode = self.resolve_execution_mode()
         if mode == "unavailable":
-            raise RuntimeError("No Metal execution backend available. "
-                               "Install PyObjC (pip install pyobjc-framework-Metal) "
-                               "or use a torch build with torch.mps.compile_shader support.")
+            raise RuntimeError(
+                "No Metal execution backend available. "
+                "Install PyObjC (pip install pyobjc-framework-Metal) "
+                "or use a torch build with torch.mps.compile_shader support."
+            )
 
         if isinstance(source, str):
             source_text = source
         elif isinstance(source, (bytes, bytearray, memoryview)):
             source_text = bytes(source).decode("utf-8")
         else:
-            raise TypeError("Metal source payload must be a UTF-8 string or bytes, "
-                            f"got: {type(source)}")
+            raise TypeError(
+                "Metal source payload must be a UTF-8 string or bytes, "
+                f"got: {type(source)}"
+            )
 
         torch = self._torch or _get_torch_module()
-        has_torch_compile_shader = (torch is not None and hasattr(torch, "mps")
-                                    and hasattr(torch.mps, "compile_shader"))
+        has_torch_compile_shader = (
+            torch is not None
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "compile_shader")
+        )
 
         if has_torch_compile_shader:
             try:
@@ -786,9 +829,11 @@ class MetalUtils:
             )
 
         if mode != "pyobjc":
-            raise RuntimeError("torch.mps.compile_shader is required for Metal runtime launches "
-                               "unless PyObjC fallback mode is active. "
-                               f"Current execution mode: {mode}")
+            raise RuntimeError(
+                "torch.mps.compile_shader is required for Metal runtime launches "
+                "unless PyObjC fallback mode is active. "
+                f"Current execution mode: {mode}"
+            )
 
         try:
             from third_party.metal.backend.compiler import MetalBackend, MetalOptions
@@ -797,8 +842,10 @@ class MetalUtils:
             opts = MetalOptions(arch=arch)
             metallib = MetalBackend.make_metallib(source_text, {}, opts)
         except Exception as e:
-            raise RuntimeError("Failed to compile Metal shader source through PyObjC fallback "
-                               f"path: {e}")
+            raise RuntimeError(
+                "Failed to compile Metal shader source through PyObjC fallback "
+                f"path: {e}"
+            )
 
         fallback_metadata = dict(metadata)
         fallback_metadata.setdefault("source_mode", "pyobjc_metallib_fallback")
@@ -847,12 +894,16 @@ class MetalUtils:
             except Exception:
                 per_kernel_max = device_max
 
-            n_regs = _estimate_registers_from_occupancy(per_kernel_max, device_max, gpu_family)
+            n_regs = _estimate_registers_from_occupancy(
+                per_kernel_max, device_max, gpu_family
+            )
             n_spills = 0  # Metal does not expose spill counts
             return handle, handle, n_regs, n_spills, per_kernel_max
 
-        raise TypeError("load_binary() expected either (binary_or_source, metadata=None) "
-                        "or (name, binary_or_source, shared, device_id)")
+        raise TypeError(
+            "load_binary() expected either (binary_or_source, metadata=None) "
+            "or (name, binary_or_source, shared, device_id)"
+        )
 
     def unload_module(self, module):
         # Metal libraries are reference-counted objects managed by PyObjC.
@@ -885,7 +936,9 @@ class MetalUtils:
 
         try:
             if launch_cooperative_grid:
-                raise RuntimeError("Metal backend does not currently support cooperative-grid launches")
+                raise RuntimeError(
+                    "Metal backend does not currently support cooperative-grid launches"
+                )
 
             # Accepted to preserve launch contract parity with other backends.
             _ = (
@@ -900,7 +953,9 @@ class MetalUtils:
             if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
                 raise RuntimeError("Expected Metal kernel handle for Metal launch")
 
-            kernel_name = _resolve_and_validate_kernel_name(kernel_metadata, None, handle)
+            kernel_name = _resolve_and_validate_kernel_name(
+                kernel_metadata, None, handle
+            )
 
             num_warps = _extract_num_warps(kernel_metadata) or 4
             block = (max(1, int(num_warps) * 32), 1, 1)
@@ -956,14 +1011,14 @@ class TorchMetalKernelHandle:
             return fn
 
     def launch_kernel(
-            self,
-            name,
-            args=None,
-            grid=(1, 1, 1),
-            block=(256, 1, 1),
-            sync=True,
-            stream_id=None,
-            utils=None,
+        self,
+        name,
+        args=None,
+        grid=(1, 1, 1),
+        block=(256, 1, 1),
+        sync=True,
+        stream_id=None,
+        utils=None,
     ):
         kernel = self.get_kernel(name)
         args = list(args) if args else []
@@ -983,7 +1038,9 @@ class TorchMetalKernelHandle:
 class MetalKernelHandle:
     """Handle for a loaded Metal library with kernel dispatch capabilities."""
 
-    def __init__(self, device, command_queue, library, metadata=None, binary_bytes=None):
+    def __init__(
+        self, device, command_queue, library, metadata=None, binary_bytes=None
+    ):
         self.device = device
         self.command_queue = command_queue
         self.library = library
@@ -1015,7 +1072,9 @@ class MetalKernelHandle:
             if isinstance(result, tuple):
                 pipeline, error = result
                 if error is not None:
-                    raise RuntimeError(f"Failed to create pipeline for '{name}': {error}")
+                    raise RuntimeError(
+                        f"Failed to create pipeline for '{name}': {error}"
+                    )
             else:
                 pipeline = result
 
@@ -1027,9 +1086,10 @@ class MetalKernelHandle:
         if self._scratch_buffer is None and self.global_scratch_size > 0:
             with self._lock:
                 if self._scratch_buffer is None:
-                    self._scratch_buffer = self.device.newBufferWithLength_options_(self.global_scratch_size,
-                                                                                    0,  # MTLResourceStorageModeShared
-                                                                                    )
+                    self._scratch_buffer = self.device.newBufferWithLength_options_(
+                        self.global_scratch_size,
+                        0,  # MTLResourceStorageModeShared
+                    )
         return self._scratch_buffer
 
     def launch_kernel(
@@ -1173,7 +1233,9 @@ def _bind_argument(
             data = bytes(arg)
             encoder.setBytes_length_index_(data, len(data), idx)
         except Exception:
-            raise TypeError(f"Unsupported Metal argument type at index {idx}: {type(arg)}")
+            raise TypeError(
+                f"Unsupported Metal argument type at index {idx}: {type(arg)}"
+            )
 
 
 def _detect_gpu_family(device):
@@ -1261,7 +1323,9 @@ class MetalLauncher:
         self.metadata = metadata
         self.src = src
         self._utils = MetalUtils()
-        self._signature_layout = (list(src.signature.values()) if hasattr(src, "signature") else [])
+        self._signature_layout = (
+            list(src.signature.values()) if hasattr(src, "signature") else []
+        )
 
     def __call__(
         self,
@@ -1287,10 +1351,16 @@ class MetalLauncher:
             if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
                 raise RuntimeError("Expected Metal kernel handle for Metal launch")
 
-            kernel_name = _resolve_and_validate_kernel_name(kernel_metadata, self.metadata, handle)
+            kernel_name = _resolve_and_validate_kernel_name(
+                kernel_metadata, self.metadata, handle
+            )
 
-            num_warps = (_extract_num_warps(kernel_metadata) or _extract_num_warps(self.metadata)
-                         or _extract_num_warps(getattr(handle, "metadata", None)) or 4)
+            num_warps = (
+                _extract_num_warps(kernel_metadata)
+                or _extract_num_warps(self.metadata)
+                or _extract_num_warps(getattr(handle, "metadata", None))
+                or 4
+            )
             block = (max(1, int(num_warps) * 32), 1, 1)
 
             flat_args = _flatten_runtime_args(self._signature_layout, args)
@@ -1387,7 +1457,9 @@ class MetalDriver(DriverBase):
 
     def set_current_device(self, device_id):
         if int(device_id) != 0:
-            raise ValueError(f"Metal backend exposes a single logical device (0), got {device_id}")
+            raise ValueError(
+                f"Metal backend exposes a single logical device (0), got {device_id}"
+            )
 
     def get_current_stream(self, device_id=0):
         return self.utils.get_current_stream(device_id)

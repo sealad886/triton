@@ -41,3 +41,6 @@ jobs:
     uses: ./.github/workflows/build-macos.yml
     with:
       matrix: ${{ needs.runner-preparation.outputs.matrix-MACOS }}
+
+  metal-release-gate:
+    uses: ./.github/workflows/metal-release-gate.yml

@@ -46,7 +46,7 @@ class BaseBackend(metaclass=ABCMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def add_stages(self, stages: dict, options: object) -> None:
+    def add_stages(self, stages: dict, options: object, language: Language) -> None:
         """
         Populates `stages` dictionary with entries of the form:
         ir_name [str] => Function[(src: str, metadata: dict) -> str|bytes]
@@ -54,6 +54,9 @@ class BaseBackend(metaclass=ABCMeta):
         Stages will be run sequentially (in inseriton order) and can communicate using `metadata`.
         All stages are expected to return a `str` object, except for the last stage which returns
         a `bytes` object for execution by the launcher.
+
+        `language` identifies the frontend source kind so the backend can
+        tailor its stage graph (for example Triton vs Gluon).
         """
         raise NotImplementedError
 

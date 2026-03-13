@@ -14,7 +14,8 @@ You can install the latest stable release of Triton from pip:
 
       pip install triton
 
-Binary wheels are available for CPython 3.10-3.14.
+Binary wheels are currently published for Linux CPython 3.10-3.14.
+The macOS Metal backend remains a source-build preview on Apple Silicon.
 
 -----------
 From Source

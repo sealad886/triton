@@ -17,7 +17,12 @@ on:
 
 jobs:
 
+  metal-release-gate:
+    if: ${{ github.repository == 'triton-lang/triton' }}
+    uses: ./.github/workflows/metal-release-gate.yml
+
   release:
+    needs: metal-release-gate
     if: ${{ github.repository == 'triton-lang/triton' }}
     name: Create Release
     runs-on: ubuntu-latest

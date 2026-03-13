@@ -124,10 +124,10 @@ class HIPBackend(BaseBackend):
     def get_target_name(self, options) -> str:
         return f"hip:{options.arch}"
 
-    def parse_options(self, opts) -> Any:
+    def parse_options(self, options) -> Any:
         args = {'arch': knobs.runtime.override_arch or self.target.arch}
 
-        if opts.get("num_ctas", 1) > 1 and not amd.supports_multi_cta_launch(self.target.arch):
+        if options.get("num_ctas", 1) > 1 and not amd.supports_multi_cta_launch(self.target.arch):
             raise ValueError(f"num_ctas > 1 not supported on {self.target.arch}")
 
         # Enable XF32 (TF32) for CDNA3 GPUs
@@ -136,7 +136,7 @@ class HIPBackend(BaseBackend):
             allowed_dot_input_precisions.update({'tf32'})
             args["allowed_dot_input_precisions"] = tuple(sorted(allowed_dot_input_precisions))
 
-        if "supported_fp8_dtypes" not in opts:
+        if "supported_fp8_dtypes" not in options:
             args["supported_fp8_dtypes"] = tuple(sorted(HIPOptions.supported_fp8_dtypes))
 
         if self.target.arch == 'gfx950':
@@ -144,9 +144,15 @@ class HIPBackend(BaseBackend):
             deprecated_fp8_dot_operand_dtypes.update({"fp8e5b16", "fp8e4b8"})
             args["deprecated_fp8_dot_operand_dtypes"] = tuple(sorted(deprecated_fp8_dot_operand_dtypes))
 
-        if "enable_fp_fusion" not in opts:
+        if "enable_fp_fusion" not in options:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
-        args.update({k: opts[k] for k in HIPOptions.__dataclass_fields__.keys() if k in opts and opts[k] is not None})
+        args.update(
+            {
+                k: options[k]
+                for k in HIPOptions.__dataclass_fields__.keys()
+                if k in options and options[k] is not None
+            }
+        )
         return HIPOptions(**args)
 
     def pack_metadata(self, metadata):
@@ -164,10 +170,10 @@ class HIPBackend(BaseBackend):
 
         return {"triton.language.extra.libdevice": libdevice}
 
-    def load_dialects(self, ctx):
-        amd.load_dialects(ctx)
+    def load_dialects(self, context):
+        amd.load_dialects(context)
         if HIPBackend.instrumentation:
-            HIPBackend.instrumentation.load_dialects(ctx)
+            HIPBackend.instrumentation.load_dialects(context)
 
     # is_within_2gb() needs to check for a torch subobject and this var tracks torch
     # availability state: None - not tested, True - torch is present. Anything else -
@@ -542,6 +548,9 @@ class HIPBackend(BaseBackend):
         if knobs.runtime.add_stages_inspection_hook is not None:
             knobs.runtime.add_stages_inspection_hook(self, stages, options, language, None)
 
-    @functools.lru_cache()
-    def hash(self):
-        return f'{self.target}'
+    def hash(self) -> str:
+        cached = getattr(self, "_hash_cache", None)
+        if cached is None:
+            cached = f'{self.target}'
+            self._hash_cache = cached
+        return cached

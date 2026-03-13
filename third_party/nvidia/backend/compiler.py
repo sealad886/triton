@@ -173,14 +173,23 @@ class CUDABackend(BaseBackend):
         super().__init__(target)
         self.binary_ext = "cubin"
 
-    def parse_options(self, opts) -> Any:
+    def parse_options(self, options) -> Any:
         # Enable debug mode for ConSan, so device-side assertions are not optimized out
-        if any(mode in opts.get("instrumentation_mode", "") for mode in ["consan", "iisan"]):
-            opts["debug"] = True
-            opts["sanitize_overflow"] = False
+        if any(
+            mode in options.get("instrumentation_mode", "")
+            for mode in ["consan", "iisan"]
+        ):
+            options["debug"] = True
+            options["sanitize_overflow"] = False
 
         args = {'arch': knobs.runtime.override_arch or f"sm{self.target.arch}"}
-        args.update({k: opts[k] for k in CUDAOptions.__dataclass_fields__.keys() if k in opts if opts[k] is not None})
+        args.update(
+            {
+                k: options[k]
+                for k in CUDAOptions.__dataclass_fields__.keys()
+                if k in options and options[k] is not None
+            }
+        )
         capability = int(self._parse_arch(args["arch"]))
 
         if args.get("num_ctas", 1) > 1 and capability < 90:
@@ -226,10 +235,10 @@ class CUDABackend(BaseBackend):
         from triton.language.extra.cuda import libdevice
         return {"triton.language.extra.libdevice": libdevice}
 
-    def load_dialects(self, ctx):
-        nvidia.load_dialects(ctx)
+    def load_dialects(self, context):
+        nvidia.load_dialects(context)
         if CUDABackend.instrumentation:
-            CUDABackend.instrumentation.load_dialects(ctx)
+            CUDABackend.instrumentation.load_dialects(context)
 
     @staticmethod
     def make_ttir(mod, metadata, opt, capability):
@@ -566,7 +575,10 @@ please share the reproducer above with Triton project.
         if knobs.runtime.add_stages_inspection_hook is not None:
             knobs.runtime.add_stages_inspection_hook(self, stages, options, language, capability)
 
-    @functools.lru_cache()
-    def hash(self):
-        version = get_ptxas_version(self.target.arch)
-        return f'{version}-{self.target.arch}'
+    def hash(self) -> str:
+        cached = getattr(self, "_hash_cache", None)
+        if cached is None:
+            version = get_ptxas_version(self.target.arch)
+            cached = f'{version}-{self.target.arch}'
+            self._hash_cache = cached
+        return cached

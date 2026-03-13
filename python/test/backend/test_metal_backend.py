@@ -2416,9 +2416,8 @@ entry:
 }
 """
         msl = MetalBackend.make_metal_ir(llvm_ir, {}, None)
-        assert "atomic_compare_exchange_weak_explicit" in msl; assert msl.count(
-            "memory_order_relaxed"
-        ) >= 2
+        assert "atomic_compare_exchange_weak_explicit" in msl
+        assert msl.count("memory_order_relaxed") >= 2
         assert ".field0" in msl
         assert ".field1" in msl
 
@@ -8380,7 +8379,9 @@ class TestMetalBroadMLWorkloads:
 
     @skip_non_darwin
     @skip_no_mps
-    def test_runtime_fused_layernorm_linear_residual(self, isolated_metal_runtime_state):
+    def test_runtime_fused_layernorm_linear_residual(
+        self, isolated_metal_runtime_state
+    ):
         """Fused layernorm→linear projection→residual add on MPS."""
         import torch
 

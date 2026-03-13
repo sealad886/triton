@@ -98,7 +98,9 @@ def _run_one(
     )
 
 
-def _checks(python_exe: str, soak: bool) -> list[tuple[str, list[str], int]]:
+def _checks(
+    python_exe: str, soak: bool, profile: str
+) -> list[tuple[str, list[str], int]]:
     checks: list[tuple[str, list[str], int]] = [
         (
             "metal_backend_pytests",
@@ -112,22 +114,19 @@ def _checks(python_exe: str, soak: bool) -> list[tuple[str, list[str], int]]:
             1800,
         ),
         (
-            "metal_smoke_script",
-            [python_exe, "scripts/test_metal_smoke.py"],
-            900,
-        ),
-        (
-            "metal_throughput_guard",
+            "metal_ir_types_pytests",
             [
                 python_exe,
-                "scripts/metal_matmul_throughput_guard.py",
-                "--warmup",
-                "3",
-                "--reps",
-                "8",
-                "--tag",
-                "release-throughput-guard",
+                "-m",
+                "pytest",
+                "-q",
+                "python/test/backend/test_ir_types.py",
             ],
+            1200,
+        ),
+        (
+            "metal_smoke_script",
+            [python_exe, "scripts/test_metal_smoke.py"],
             900,
         ),
         (
@@ -158,6 +157,24 @@ def _checks(python_exe: str, soak: bool) -> list[tuple[str, list[str], int]]:
             600,
         ),
     ]
+    if profile == "default":
+        checks.insert(
+            3,
+            (
+                "metal_throughput_guard",
+                [
+                    python_exe,
+                    "scripts/metal_matmul_throughput_guard.py",
+                    "--warmup",
+                    "3",
+                    "--reps",
+                    "8",
+                    "--tag",
+                    "release-throughput-guard",
+                ],
+                900,
+            ),
+        )
     if soak:
         checks.extend(
             [
@@ -262,6 +279,15 @@ def main() -> int:
         action="store_true",
         help="Run extended MPS soak checks in addition to the default suite.",
     )
+    parser.add_argument(
+        "--profile",
+        choices=("default", "hosted-ci"),
+        default="default",
+        help=(
+            "Check profile to run. 'default' includes throughput guardrails; "
+            "'hosted-ci' keeps the gate correctness-focused for hosted runners."
+        ),
+    )
     args = parser.parse_args()
 
     if shutil.which(args.python) is None and not Path(args.python).exists():
@@ -274,7 +300,7 @@ def main() -> int:
     failed = False
 
     print(f"artifact_dir={artifact_dir}")
-    for name, cmd, timeout_s in _checks(args.python, args.soak):
+    for name, cmd, timeout_s in _checks(args.python, args.soak, args.profile):
         print(f"\n--- {name} ---")
         print("cmd:", " ".join(cmd))
         try:
@@ -323,6 +349,7 @@ def main() -> int:
         "status": "failed" if failed else "success",
         "python": args.python,
         "soak": args.soak,
+        "profile": args.profile,
         "artifact_dir": str(artifact_dir),
         "results": [asdict(x) for x in results],
     }

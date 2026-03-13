@@ -3,6 +3,9 @@
 This document describes the Metal backend for Triton, which enables running
 Triton programs on Apple Silicon GPUs via the Metal API.
 
+The current Metal path is a **preview-quality, source-build backend** for
+Apple Silicon. It is not yet distributed as a general macOS wheel path.
+
 ## Overview
 
 The Metal backend adds Apple GPU support to Triton by:
@@ -16,7 +19,7 @@ The Metal backend adds Apple GPU support to Triton by:
 ## Requirements
 
 - **macOS 14.0+** (Sonoma or later)
-- **Apple Silicon** (M1 or later) or discrete AMD GPU with Metal support
+- **Apple Silicon** (M1 or later)
 - **Xcode Command Line Tools** (provides `xcrun`, `metal`, `metallib`)
 - **Python 3.10+**
 - **PyObjC** (`pip install pyobjc-framework-Metal pyobjc-framework-Foundation`)
@@ -283,6 +286,9 @@ TRITON_CACHE_DIR="$(mktemp -d /tmp/triton-metal-cache.XXXXXX)" python -m pytest 
 
 # Consolidated release checks (default suite)
 python scripts/metal_release_checks.py
+
+# Hosted correctness gate used by primary CI and release workflows
+python scripts/metal_release_checks.py --profile hosted-ci
 
 # Extended local soak checks (larger transfer/training stress)
 python scripts/metal_release_checks.py --soak

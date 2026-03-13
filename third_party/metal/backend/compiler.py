@@ -1310,23 +1310,24 @@ class MetalBackend(BaseBackend):
         # torch.mps.compile_shader while we still emit `.metallib` for tooling.
         self.binary_ext = "metal"
 
-    def parse_options(self, opts) -> Any:
+    def parse_options(self, options) -> Any:
         # Enable debug mode for ConSan/IISan so device-side assertions
         # are not optimised out.
         if any(
-            mode in opts.get("instrumentation_mode", "") for mode in ["consan", "iisan"]
+            mode in options.get("instrumentation_mode", "")
+            for mode in ["consan", "iisan"]
         ):
-            opts["debug"] = True
-            opts["sanitize_overflow"] = False
+            options["debug"] = True
+            options["sanitize_overflow"] = False
 
         args = {"arch": self.target.arch}
-        if "enable_fp_fusion" not in opts:
+        if "enable_fp_fusion" not in options:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
         args.update(
             {
-                k: opts[k]
+                k: options[k]
                 for k in MetalOptions.__dataclass_fields__.keys()
-                if k in opts and opts[k] is not None
+                if k in options and options[k] is not None
             }
         )
         return MetalOptions(**args)
@@ -1362,11 +1363,11 @@ class MetalBackend(BaseBackend):
 
         return {"triton.language.extra.libdevice": libdevice}
 
-    def load_dialects(self, ctx):
+    def load_dialects(self, context):
         metal = _load_triton_metal_plugin()
 
-        if ctx is not None and hasattr(metal, "load_dialects"):
-            metal.load_dialects(ctx)
+        if context is not None and hasattr(metal, "load_dialects"):
+            metal.load_dialects(context)
 
     @staticmethod
     def make_ttir(mod, metadata, opt):
@@ -2377,15 +2378,18 @@ class MetalBackend(BaseBackend):
                 self, stages, options, language, None
             )
 
-    @functools.lru_cache()
-    def hash(self):
-        version = _get_metal_sdk_version()
+    def hash(self) -> str:
+        cached = getattr(self, "_hash_cache", None)
+        if cached is None:
+            version = _get_metal_sdk_version()
 
-        try:
-            import triton
+            try:
+                import triton
 
-            triton_version = triton.__version__
-        except (ImportError, AttributeError):
-            triton_version = "dev"
-        backend_hash = _get_metal_backend_source_hash()
-        return f"{version}-{self.target.arch}-{triton_version}-{backend_hash}"
+                triton_version = triton.__version__
+            except (ImportError, AttributeError):
+                triton_version = "dev"
+            backend_hash = _get_metal_backend_source_hash()
+            cached = f"{version}-{self.target.arch}-{triton_version}-{backend_hash}"
+            self._hash_cache = cached
+        return cached

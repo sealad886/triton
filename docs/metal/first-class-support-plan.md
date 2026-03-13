@@ -1,6 +1,6 @@
 # Metal First-Class Support Plan
 
-Last updated: 2026-02-27
+Last updated: 2026-03-13
 
 ## Objective
 
@@ -23,12 +23,12 @@ In:
 Out (for this phase):
 - New Metal architecture-specific optimization passes beyond current baseline
 
-## Status Snapshot (Validated 2026-03-06)
+## Status Snapshot (Validated 2026-03-13)
 
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `449 passed, 1 skipped`
+  -> `448 passed, 1 skipped`
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_ir_types.py`
   -> `162 passed`
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
@@ -39,9 +39,13 @@ Validated in workspace `.venv` with:
   -> `overall_passed=true`
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
   -> `2 passed`
+- `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --profile hosted-ci`
+  -> hosted correctness gate passes with artifacts (backend tests,
+     `test_ir_types`, smoke, cross-backend numerics, AOT checks)
 - `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py`
-  -> default release gate checks pass with artifacts (backend tests, smoke,
-     throughput guard, cross-backend numerics, AOT checks)
+  -> default release gate checks pass with artifacts (backend tests,
+     `test_ir_types`, smoke, throughput guard, cross-backend numerics,
+     AOT checks)
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot.py`
   -> `7 skipped` (expected on non-CUDA/HIP environment)
 
@@ -52,7 +56,7 @@ is corrected to reflect current implementation reality, including partial work.
 
 | Area | NVIDIA | AMD | Metal (current) | Gap |
 | --- | --- | --- | --- | --- |
-| `third_party/<backend>/backend` | mature runtime/compiler pair | mature runtime/compiler pair | present; several runtime contract fields remain partial | Medium |
+| `third_party/<backend>/backend` | mature runtime/compiler pair | mature runtime/compiler pair | present; shared Python backend/driver contracts are now aligned with actual compiler/runtime usage | Low |
 | `third_party/<backend>/language` | `cuda` extras + libdevice | `hip` extras + libdevice | minimal `metal` extras only | Medium |
 | `third_party/<backend>/lib` | large conversion stack | large conversion + transforms | conversion stack present but still narrower than CUDA/HIP | Medium |
 | `third_party/<backend>/tools` | `compile.*` + `link.h` | `compile.*` + `link.h` | present, with dedicated Metal compile-template and Objective-C runtime validation | Low |

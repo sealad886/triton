@@ -43,6 +43,21 @@ class DriverBase(metaclass=ABCMeta):
         """
         raise NotImplementedError
 
+    def get_current_device(self):
+        raise NotImplementedError
+
+    def set_current_device(self, device):
+        raise NotImplementedError
+
+    def get_device_interface(self):
+        raise NotImplementedError
+
+    def get_empty_cache_for_benchmark(self):
+        return None
+
+    def clear_cache(self, cache):
+        return None
+
     def __init__(self) -> None:
         pass
 
