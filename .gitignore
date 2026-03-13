@@ -50,6 +50,9 @@ __pycache__/
 
 # Local run artifacts
 artifacts/metal-harness-runs/
+artifacts/metal-release-checks/
+artifacts/metal-throughput-guard/
+artifacts/metal-cross-backend/
 
 # Environments
 .venv

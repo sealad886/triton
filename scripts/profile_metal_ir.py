@@ -4,12 +4,16 @@
 import cProfile
 import io
 import pstats
-import time
 import sys
-import os
+import time
+from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from _repo_bootstrap import ensure_repo_imports
+
+ensure_repo_imports()
 
 from triton_metal_backend_compiler_perf import (
     generate_sample_llvm_ir,

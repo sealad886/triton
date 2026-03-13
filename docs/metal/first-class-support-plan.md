@@ -23,21 +23,27 @@ In:
 Out (for this phase):
 - New Metal architecture-specific optimization passes beyond current baseline
 
-## Status Snapshot (Validated 2026-02-27)
+## Status Snapshot (Validated 2026-03-06)
 
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `337 passed, 1 skipped`
+  -> `449 passed, 1 skipped`
+- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_ir_types.py`
+  -> `162 passed`
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
   -> smoke + harness checks pass in CPU and MPS modes
+- `PYTHONPATH=python .venv/bin/python scripts/test_metal_reduction.py`
+  -> reduction compile checks pass
+- `PYTHONPATH=python .venv/bin/python scripts/metal_ci_compat_matrix.py --json`
+  -> `overall_passed=true`
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
-  -> `1 passed`
+  -> `2 passed`
 - `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py`
   -> default release gate checks pass with artifacts (backend tests, smoke,
      throughput guard, cross-backend numerics, AOT checks)
-- `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --soak`
-  -> extended local soak checks pass with artifacts
+- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot.py`
+  -> `7 skipped` (expected on non-CUDA/HIP environment)
 
 Important: this does not imply full first-class parity yet. The checklist below
 is corrected to reflect current implementation reality, including partial work.
@@ -49,7 +55,7 @@ is corrected to reflect current implementation reality, including partial work.
 | `third_party/<backend>/backend` | mature runtime/compiler pair | mature runtime/compiler pair | present; several runtime contract fields remain partial | Medium |
 | `third_party/<backend>/language` | `cuda` extras + libdevice | `hip` extras + libdevice | minimal `metal` extras only | Medium |
 | `third_party/<backend>/lib` | large conversion stack | large conversion + transforms | conversion stack present but still narrower than CUDA/HIP | Medium |
-| `third_party/<backend>/tools` | `compile.*` + `link.h` | `compile.*` + `link.h` | present, but Metal AOT behavior not validated by unit tests | Medium |
+| `third_party/<backend>/tools` | `compile.*` + `link.h` | `compile.*` + `link.h` | present, with dedicated Metal compile-template and Objective-C runtime validation | Low |
 | `third_party/<backend>/python` | root binding (`triton_nvidia.cc`) | `python/triton_amd.cc` | `python/triton_metal.cc` present | Low |
 | Runtime `utils.load_binary` contract | matches JIT expectations | matches JIT expectations | aligned for source+metallib payloads | Low |
 | Runtime `utils.get_device_properties` schema | includes expected keys | includes expected keys | aligned with shared schema keys used by tutorials/benchmark helpers (`arch`, `warpSize`, `max_num_regs`, `max_threads_per_sm`, clock placeholders) | Low |
@@ -410,7 +416,7 @@ Acceptance:
   with clear diagnostics, stable upgrade behavior, and documented guardrails.
 Status: Complete.
 
-## Known Partial/Incorrect Implementations (Validated 2026-02-27)
+## Known Partial/Incorrect Implementations (Validated 2026-03-06)
 
 - Non-blocked distributed `tt.dot` encodings now lower through the generic FMA
   path, but matrix-core/simdgroup-optimized encoding families still lack full
@@ -455,9 +461,9 @@ Status: Complete.
 
 ## Risks and Mitigations
 
-- Risk: Matmul path remains incomplete (`accelerate_matmul` is currently a
-  non-CUDA no-op, missing
-  simdgroup matmul integration, limited runtime dtype/shape breadth).
+- Risk: Matmul path remains incomplete. The shared `accelerate_matmul` pass is
+  still a non-CUDA no-op, and the Metal-specific simdgroup strategy/lowering
+  path is not yet fully integrated and tuned across GPU families.
   - Mitigation: prioritize Phase 8 items (encoding support, mixed-precision
     lowering fixes, pass enablement with regression/perf validation).
 - Risk: Runtime feature surface is still narrower than CUDA/HIP for advanced

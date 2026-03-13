@@ -30,7 +30,7 @@ jobs:
   metal-unit-tests:
     name: Metal Backend Unit Tests
     runs-on: macos-14  # Apple Silicon runner
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -42,23 +42,37 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install test dependencies
+      - name: Install build prerequisites
         run: |
+          brew update
+          brew install ccache llvm@19 lld coreutils
+          echo "/opt/homebrew/opt/llvm@19/bin" >> $GITHUB_PATH
           python -m pip install --upgrade pip
-          python -m pip install pytest numpy loguru pyobjc-framework-Metal pyobjc-framework-Foundation
+          python -m pip install torch pytest numpy loguru pyobjc-framework-Metal pyobjc-framework-Foundation
+
+      - name: Install Triton from current checkout
+        env:
+          MAX_JOBS: 3
+          TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+        run: |
+          export PATH="/opt/homebrew/opt/llvm@19/bin:$PATH"
+          export CC="/opt/homebrew/opt/llvm@19/bin/clang"
+          export CXX="/opt/homebrew/opt/llvm@19/bin/clang++"
+          export CXXFLAGS="-stdlib=libc++"
+          export LDFLAGS="-L/opt/homebrew/opt/llvm@19/lib"
+          make dev-install
 
       - name: Run Metal backend tests (non-GPU)
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python -m pytest python/test/backend/test_metal_backend.py \
             -v --tb=short -x \
             -k "not (TestMetalKernelLaunch or TestMetalKernelHandle or TestMetalCompilation or test_driver_is_active or test_get_current_target or test_get_device_properties)"
 
       - name: Run Metal backend tests (GPU, if available)
         if: runner.os == 'macOS'
-        continue-on-error: true
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python -m pytest python/test/backend/test_metal_backend.py \
             -v --tb=short -x
 
@@ -68,7 +82,7 @@ jobs:
   metal-smoke-and-harness:
     name: Metal Smoke Tests & Harness Artifacts
     runs-on: macos-14  # Apple Silicon for Metal GPU access
-    timeout-minutes: 45
+    timeout-minutes: 75
 
     steps:
       - uses: actions/checkout@v4
@@ -80,22 +94,39 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install build prerequisites
         run: |
+          brew update
+          brew install ccache llvm@19 lld coreutils
+          echo "/opt/homebrew/opt/llvm@19/bin" >> $GITHUB_PATH
           python -m pip install --upgrade pip
           python -m pip install pytest numpy loguru torch \
             pyobjc-framework-Metal pyobjc-framework-Foundation
 
+      - name: Install Triton from current checkout
+        env:
+          MAX_JOBS: 3
+          TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+        run: |
+          export PATH="/opt/homebrew/opt/llvm@19/bin:$PATH"
+          export CC="/opt/homebrew/opt/llvm@19/bin/clang"
+          export CXX="/opt/homebrew/opt/llvm@19/bin/clang++"
+          export CXXFLAGS="-stdlib=libc++"
+          export LDFLAGS="-L/opt/homebrew/opt/llvm@19/lib"
+          make dev-install
+
       - name: Run Metal smoke tests
+        id: smoke_tests
         continue-on-error: true  # Capture artifacts even on failure
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python scripts/test_metal_smoke.py
 
       - name: Run Metal reduction tests
+        id: reduction_tests
         continue-on-error: true
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python scripts/test_metal_reduction.py
 
       - name: Upload harness run artifacts
@@ -107,11 +138,17 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      - name: Fail if smoke or reduction checks failed
+        if: always() && (steps.smoke_tests.outcome != 'success' || steps.reduction_tests.outcome != 'success')
+        run: |
+          echo "Metal smoke/reduction checks failed; see uploaded artifacts."
+          exit 1
+
   # ────────────────────────────────────────────────────────────────────
   # Cross-platform import check (Linux)
   # ────────────────────────────────────────────────────────────────────
   metal-import-check:
-    name: Metal Backend Import Check
+    name: Metal Backend Import Smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -128,13 +165,13 @@ jobs:
       - name: Install minimal dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest
+          python -m pip install pytest triton
 
       - name: Verify Metal backend importable on non-macOS
         run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}:${PYTHONPATH}" \
           python -c "
           import sys
-          sys.path.insert(0, '.')
           from third_party.metal.backend.compiler import MetalBackend, MetalOptions
           from third_party.metal.backend.driver import MetalDriver
           print('Metal backend imports OK on', sys.platform)
@@ -150,7 +187,7 @@ jobs:
   metal-compat-matrix:
     name: "Compat: py${{ matrix.python-version }} / torch ${{ matrix.torch-version }}"
     runs-on: macos-14
-    timeout-minutes: 20
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -171,8 +208,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install torch ${{ matrix.torch-version }}
+      - name: Install build prerequisites
         run: |
+          brew update
+          brew install ccache llvm@19 lld coreutils
+          echo "/opt/homebrew/opt/llvm@19/bin" >> $GITHUB_PATH
           python -m pip install --upgrade pip
           if [ "${{ matrix.torch-version }}" = "nightly" ]; then
             python -m pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
@@ -182,15 +222,27 @@ jobs:
           python -m pip install numpy loguru pytest \
             pyobjc-framework-Metal pyobjc-framework-Foundation
 
+      - name: Install Triton from current checkout
+        env:
+          MAX_JOBS: 3
+          TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+        run: |
+          export PATH="/opt/homebrew/opt/llvm@19/bin:$PATH"
+          export CC="/opt/homebrew/opt/llvm@19/bin/clang"
+          export CXX="/opt/homebrew/opt/llvm@19/bin/clang++"
+          export CXXFLAGS="-stdlib=libc++"
+          export LDFLAGS="-L/opt/homebrew/opt/llvm@19/lib"
+          make dev-install
+
       - name: Run compatibility matrix validation
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python scripts/metal_ci_compat_matrix.py --json -o compat-report.json
           cat compat-report.json
 
       - name: Run compile-only tests
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python -m pytest python/test/backend/test_metal_backend.py \
             -v --tb=short -x \
             -k "TestMetalCICompatibility" \
@@ -215,7 +267,7 @@ jobs:
     name: Metal GPU Integration Tests
     runs-on: [self-hosted, macOS, metal-gpu]
     if: contains(github.event.pull_request.labels.*.name, 'metal-gpu-ci')
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -227,22 +279,37 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install build prerequisites
         run: |
+          brew update
+          brew install ccache llvm@19 lld coreutils
+          echo "/opt/homebrew/opt/llvm@19/bin" >> $GITHUB_PATH
           python -m pip install --upgrade pip
           python -m pip install pytest numpy loguru torch \
             pyobjc-framework-Metal pyobjc-framework-Foundation
 
+      - name: Install Triton from current checkout
+        env:
+          MAX_JOBS: 3
+          TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+        run: |
+          export PATH="/opt/homebrew/opt/llvm@19/bin:$PATH"
+          export CC="/opt/homebrew/opt/llvm@19/bin/clang"
+          export CXX="/opt/homebrew/opt/llvm@19/bin/clang++"
+          export CXXFLAGS="-stdlib=libc++"
+          export LDFLAGS="-L/opt/homebrew/opt/llvm@19/lib"
+          make dev-install
+
       - name: Run full Metal backend test suite
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python -m pytest python/test/backend/test_metal_backend.py \
             -v --tb=short -x \
             --junitxml=gpu-test-results.xml
 
       - name: Run AOT runtime integration test
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python scripts/test_metal_aot_runtime.py --json -o aot-report.json
 
       - name: Upload GPU test artifacts
@@ -278,13 +345,28 @@ jobs:
 
       - name: Install dependencies
         run: |
+          brew update
+          brew install ccache llvm@19 lld coreutils
+          echo "/opt/homebrew/opt/llvm@19/bin" >> $GITHUB_PATH
           python -m pip install --upgrade pip
-          python -m pip install torch numpy loguru triton \
+          python -m pip install torch numpy loguru \
             pyobjc-framework-Metal pyobjc-framework-Foundation
+
+      - name: Install Triton from current checkout
+        env:
+          MAX_JOBS: 3
+          TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+        run: |
+          export PATH="/opt/homebrew/opt/llvm@19/bin:$PATH"
+          export CC="/opt/homebrew/opt/llvm@19/bin/clang"
+          export CXX="/opt/homebrew/opt/llvm@19/bin/clang++"
+          export CXXFLAGS="-stdlib=libc++"
+          export LDFLAGS="-L/opt/homebrew/opt/llvm@19/lib"
+          make dev-install
 
       - name: Run throughput guardrails
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python scripts/metal_matmul_throughput_guard.py \
             --baseline docs/metal/matmul-throughput-baselines.json
 
@@ -306,7 +388,7 @@ jobs:
     needs: metal-gpu-tests
     runs-on: [self-hosted, macOS, metal-gpu]
     if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'metal-soak')
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     steps:
       - uses: actions/checkout@v4
@@ -318,32 +400,50 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install build prerequisites
         run: |
+          brew update
+          brew install ccache llvm@19 lld coreutils
+          echo "/opt/homebrew/opt/llvm@19/bin" >> $GITHUB_PATH
           python -m pip install --upgrade pip
           python -m pip install pytest torch numpy loguru \
             pyobjc-framework-Metal pyobjc-framework-Foundation
 
+      - name: Install Triton from current checkout
+        env:
+          MAX_JOBS: 3
+          TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+        run: |
+          export PATH="/opt/homebrew/opt/llvm@19/bin:$PATH"
+          export CC="/opt/homebrew/opt/llvm@19/bin/clang"
+          export CXX="/opt/homebrew/opt/llvm@19/bin/clang++"
+          export CXXFLAGS="-stdlib=libc++"
+          export LDFLAGS="-L/opt/homebrew/opt/llvm@19/lib"
+          make dev-install
+
       - name: Run MPS transfer stress test
+        id: soak_transfer
         continue-on-error: true
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python -m pytest python/test/backend/metal_mps_transfer_stress.py \
             -v --tb=short -x \
             --junitxml=soak-transfer-results.xml
 
       - name: Run MPS project flow stress test
+        id: soak_project_flow
         continue-on-error: true
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python -m pytest python/test/backend/metal_mps_project_flow_stress.py \
             -v --tb=short -x \
             --junitxml=soak-flow-results.xml
 
       - name: Run release checks (soak mode)
+        id: soak_release_checks
         continue-on-error: true
         run: |
-          PYTHONPATH="${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
+          PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/python:${PYTHONPATH}" \
           python scripts/metal_release_checks.py --soak \
             --artifact-root artifacts/metal-soak-runs
 
@@ -357,3 +457,9 @@ jobs:
             soak-flow-results.xml
             artifacts/metal-soak-runs/
           retention-days: 30
+
+      - name: Fail if soak checks failed
+        if: always() && (steps.soak_transfer.outcome != 'success' || steps.soak_project_flow.outcome != 'success' || steps.soak_release_checks.outcome != 'success')
+        run: |
+          echo "Metal soak checks failed; see uploaded artifacts."
+          exit 1

@@ -30,6 +30,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from _repo_bootstrap import ensure_repo_imports
+
+ensure_repo_imports()
+
 
 @dataclass
 class CheckResult:
@@ -45,11 +52,13 @@ def _utc_now_iso() -> str:
 
 def check_python_version() -> CheckResult:
     ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    supported = sys.version_info[:2] in ((3, 11), (3, 12), (3, 13))
+    supported = sys.version_info[:2] in ((3, 10), (3, 11), (3, 12), (3, 13))
     return CheckResult(
         name="python_version",
         passed=supported,
-        detail=f"Python {ver} ({'supported' if supported else 'unsupported — need 3.11/3.12/3.13'})",
+        detail=(
+            f"Python {ver} ({'supported' if supported else 'unsupported — need 3.10/3.11/3.12/3.13'})"
+        ),
         value=ver,
     )
 
@@ -168,7 +177,6 @@ def check_metal_toolchain() -> CheckResult:
 
 def check_metal_backend_import() -> CheckResult:
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from third_party.metal.backend.compiler import MetalBackend, MetalOptions
         from third_party.metal.backend.driver import MetalDriver
 

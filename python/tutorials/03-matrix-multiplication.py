@@ -139,7 +139,7 @@ You will specifically learn about:
 # blocks into SRAM to compute the first 9 output blocks, but if we do it in grouped
 # ordering, we only need to load 54 blocks.
 #
-#   .. image:: grouped-vs-row-major-ordering.png
+#   .. image:: grouped_vs_row_major_ordering.png
 #
 # In practice, this can improve the performance of our matrix multiplication kernel by
 # more than 10\% on some hardware architecture (e.g., 220 to 245 TFLOPS on A100).

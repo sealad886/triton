@@ -3,12 +3,15 @@
 Helper module for performance profiling of Metal backend make_metal_ir.
 Generates synthetic LLVM IR that exercises the main code paths.
 """
-import sys
 import os
+import sys
 
-_root = os.path.join(os.path.dirname(__file__), "..")
-sys.path.insert(0, os.path.join(_root, "python"))
-sys.path.insert(0, _root)
+_SCRIPT_DIR = os.path.dirname(__file__)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from _repo_bootstrap import ensure_repo_imports
+
+ensure_repo_imports()
 
 from third_party.metal.backend.compiler import MetalBackend, MetalOptions
 

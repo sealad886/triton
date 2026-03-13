@@ -1,5 +1,15 @@
 """Test that dynamic-loop reduction kernels compile through the Metal backend."""
 
+import os
+import sys
+
+_SCRIPT_DIR = os.path.dirname(__file__)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from _repo_bootstrap import ensure_repo_imports
+
+ensure_repo_imports()
+
 import triton
 import triton.language as tl
 from triton.backends.compiler import GPUTarget

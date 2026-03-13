@@ -1039,11 +1039,14 @@ _LLVM_SCALAR_TO_MSL = {
 }
 
 _MEMORY_ORDER_MAP = {
+    # Metal device-scope atomics only support relaxed ordering semantics.
+    # Keep the Python LLVM->MSL translator aligned with the C++ lowering in
+    # TritonMetalGPUToLLVM/LoadStoreOpToLLVM.cpp.
     "monotonic": "memory_order_relaxed",
-    "acquire": "memory_order_acquire",
-    "release": "memory_order_release",
-    "acq_rel": "memory_order_acq_rel",
-    "seq_cst": "memory_order_seq_cst",
+    "acquire": "memory_order_relaxed",
+    "release": "memory_order_relaxed",
+    "acq_rel": "memory_order_relaxed",
+    "seq_cst": "memory_order_relaxed",
 }
 
 _ATOMIC_OP_MAP = {

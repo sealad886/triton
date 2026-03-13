@@ -6,6 +6,12 @@ import tempfile
 import os
 import shutil
 import sys
+from pathlib import Path
+
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from _repo_bootstrap import repo_subprocess_env
 
 
 def test_xcrun_compilation():
@@ -341,7 +347,7 @@ def _run_harness_script(script_name, mode, extra_args):
     ]
     cmd.extend(extra_args)
     with tempfile.TemporaryDirectory(prefix="triton-metal-smoke-cache-") as cache_dir:
-        env = os.environ.copy()
+        env = repo_subprocess_env()
         env["TRITON_CACHE_DIR"] = cache_dir
         result = subprocess.run(
             cmd,

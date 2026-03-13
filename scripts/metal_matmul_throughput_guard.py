@@ -7,10 +7,18 @@ import argparse
 import json
 import os
 import statistics
+import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from _repo_bootstrap import ensure_repo_imports
+
+ensure_repo_imports()
 
 import torch
 import triton

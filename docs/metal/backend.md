@@ -154,8 +154,9 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
   has no equivalent DMA engine or tensor descriptor hardware.
 - **Inline assembly**: MSL has no inline assembly mechanism.
 - **Cross-backend numerics**: deterministic CPU-reference comparisons are
-  implemented for MPS and optional CUDA via a dedicated harness; HIP parity and
-  CI-backed multi-backend coverage remain pending.
+  implemented for MPS and optional CUDA via a dedicated harness and default
+  release checks; HIP parity and broader multi-family CI coverage remain
+  pending.
 
 ## Troubleshooting
 

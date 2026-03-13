@@ -26,6 +26,13 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from _repo_bootstrap import ensure_repo_imports
+
+ensure_repo_imports()
+
 HARNESS_SRC = (
     Path(__file__).resolve().parent.parent
     / "third_party"
@@ -75,7 +82,6 @@ def _compile_triton_kernel_to_metallib(
 ) -> tuple[bool, Path | None, dict[str, int | str] | str]:
     """Compile a vector_add kernel through Triton JIT → MSL → metallib."""
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         import triton
         import triton.compiler
         import triton.language as tl

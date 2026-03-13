@@ -19,6 +19,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from _repo_bootstrap import repo_subprocess_env
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -59,7 +64,7 @@ def _run_one(
     timeout_s: int,
 ) -> CheckResult:
     cache_dir = tempfile.mkdtemp(prefix=f"triton-metal-release-cache-{name}-")
-    env = os.environ.copy()
+    env = repo_subprocess_env()
     env["TRITON_CACHE_DIR"] = cache_dir
     start = datetime.now(timezone.utc)
     start_s = _utc_now_iso()

@@ -54,9 +54,10 @@ Last updated: 2026-03-03
 | TMA / Tensor Memory Access | **N/A** | NVIDIA Hopper-specific; no Metal DMA engine |
 | Inline assembly | **N/A** | MSL has no inline assembly mechanism |
 | Fence insertion pass (dual-proxy ordering) | **N/A** | NVIDIA Hopper-specific; Metal barriers are sufficient |
-| Throughput guardrails across Apple7/8/9 are not yet automated | **Partial** | CI workflow includes throughput guardrail job stub; requires self-hosted Metal GPU runner |
+| Device-scope atomic ordering stronger than relaxed | **Limited by Metal** | Metal lowering collapses device atomics to relaxed ordering semantics |
+| Throughput guardrails are automated in local release checks and self-hosted CI, but cross-family Apple7/8/9 coverage is still partial | **Partial** | Run `scripts/metal_release_checks.py` locally and on target-family self-hosted runners |
 | fp8 and int8 matmul-class runtime validation | **Mitigated** | fp8e5m2 runtime matmul + int8 blocked matmul + boundary saturation tests added; FP8 software converters available |
-| Cross-backend CUDA/HIP numerical comparison harness is not yet in place | **Open** | Use deterministic CPU-reference validation |
+| Cross-backend numerics cover MPS with optional CUDA, but HIP parity is still open | **Partial** | Use `python/test/backend/metal_cross_backend_compare.py` plus deterministic CPU-reference validation |
 
 ## Execution Modes
 
@@ -68,15 +69,27 @@ Last updated: 2026-03-03
 
 ## Validated Branch Snapshot
 
-Validated on branch `feat/metal-support` (2026-03-03):
+Validated on branch `feat/metal-support` (2026-03-06):
 
-- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py python/test/backend/test_ir_types.py`
-  - `609 passed, 1 skipped`
+- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
+  - `449 passed, 1 skipped`
   - Skipped: 1× fp8e4b15 matmul pipeline (unsupported format)
+- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_ir_types.py`
+  - `162 passed`
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
   - all smoke checks passed (including transfer/project/training harnesses in CPU and MPS modes)
+- `PYTHONPATH=python .venv/bin/python scripts/test_metal_reduction.py`
+  - all reduction checks passed
+- `PYTHONPATH=python .venv/bin/python scripts/metal_ci_compat_matrix.py --json`
+  - `overall_passed=true`
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
-  - `1 passed`
+  - `2 passed`
+- `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --python .venv/bin/python --tag merge-readiness-r3`
+  - success (backend tests, smoke, throughput guard, cross-backend numerics, AOT checks)
+
+Hosted CI covers import/compile/smoke/compat paths. Self-hosted Metal GPU,
+throughput, and soak lanes remain supplemental until dedicated Apple runners are
+always available.
 
 ## Environment Variables
 

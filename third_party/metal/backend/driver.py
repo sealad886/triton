@@ -558,6 +558,24 @@ class MetalUtils:
                 for mtl_buf, nbytes in acquired_list:
                     pool.release(mtl_buf, nbytes)
 
+    def reset_runtime_state(self) -> None:
+        """Drain pending work and reset cached per-stream runtime state."""
+        torch = self._torch or _get_torch_module()
+        if torch is not None and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+            torch.mps.synchronize()
+
+        for stream_id in list(self._command_queues):
+            self.synchronize_stream(stream_id)
+
+        self._command_queues.clear()
+        self._pending_buffers.clear()
+        self._pending_pool_returns.clear()
+        self._current_stream = 0
+        self._command_queue = None
+        self._execution_mode = None
+        if self._buffer_pool is not None:
+            self._buffer_pool.drain()
+
         torch = self._torch or _get_torch_module()
         if (torch is not None and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize")):
             torch.mps.synchronize()

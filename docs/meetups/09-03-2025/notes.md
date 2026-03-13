@@ -88,7 +88,7 @@
         * Wenlei Bao (Bytedance ) - Triton - distributed computation and communication overlapping
         * Yanming Chen (Linked in) - Evolution of Liger Kernels to post training
 * Q> Who is using tritonbench? How are you using it? OpenAI?
-    * [Kernelize.ai](https://kernelize.ai) - vLLM testing tritonbench nightly. Built a visualization (noticed H100 and B200 regressions on Liger kernel and BF16).
+    * [Kernelize.ai](Kernelize.ai) - vLLM testing tritonbench nightly. Built a visualization (noticed H100 and B200 regressions on Liger kernel and BF16).
     * OpenAI - not using tritonbench, using internal benchmarking system.  Lowtech stuff, ocaml (some of it is open sources in repo).  Simple benchmarking.
     * Q> no new kernels added
     * A> we’re continuously updating them, thinking of upstreaming more, attention, but no timeline.  We are keeping MoE update.
