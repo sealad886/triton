@@ -17,7 +17,7 @@ This audit covers release-readiness for current Metal first-class work:
 Executed in workspace `.venv`:
 
 1. `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
-   - Result: `448 passed, 1 skipped`
+   - Result: `450 passed, 1 skipped`
 2. `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_ir_types.py`
    - Result: `162 passed`
 3. `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
@@ -32,20 +32,19 @@ Executed in workspace `.venv`:
 7. `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot.py`
    - Result: `7 skipped` (expected non-CUDA/HIP environment)
 8. `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py python/test/backend/test_ir_types.py python/test/unit/tools/test_aot_metal.py`
-   - Result: `613 passed, 1 skipped`
-9. `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --profile hosted-ci --tag final-hosted-ci`
+   - Result: `614 passed, 1 skipped`
+9. `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --profile hosted-ci --tag first-class-hosted-ci`
     - Result: success
     - Includes backend tests, `test_ir_types`, smoke, cross-backend numerics,
        AOT unit/runtime, and AOT collection gate.
-10. `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --python .venv/bin/python --tag final-default`
+10. `PYTHONPATH=python .venv/bin/python scripts/metal_matmul_throughput_guard.py --warmup 3 --reps 8 --tag first-class-recheck`
    - Result: success
-    - Includes backend tests, `test_ir_types`, smoke, throughput guard,
-       cross-backend numerics, AOT unit/runtime, and AOT collection gate.
+   - Supplemental local throughput guardrail run for the current Apple Silicon lane.
 
 Release-check artifacts:
 
-- `artifacts/metal-release-checks/20260313-205353_final-hosted-ci/summary.json`
-- `artifacts/metal-release-checks/20260313-205449_final-default/summary.json`
+- `artifacts/metal-release-checks/20260313-224758_first-class-hosted-ci/summary.json`
+- `artifacts/metal-throughput-guard/20260313-225207_first-class-recheck/summary.json`
 
 ## Hardening Changes Included in This Audit Window
 
@@ -74,17 +73,21 @@ Release-check artifacts:
 
 ## Release Readiness Assessment
 
-Current status: **ready for upstream review as a preview backend** with
-bounded, documented architecture limitations.
+Current status: **supported on Apple Silicon for source builds** with a
+mandatory hosted correctness gate and bounded, documented architecture
+limitations.
 
-This branch is merge-ready for a preview-quality Metal backend. It is **not**
-the same as claiming strict fully-first-class closure across every Apple GPU
-family, every backend-comparison lane, and every performance/soak lane.
+This branch now meets the repo-controlled first-class support bar for Apple
+Silicon correctness, tooling, and CI integration. It is **not** the same as
+claiming strict universal fleet/performance parity across every Apple GPU
+family, every backend-comparison lane, and every soak lane.
 
 What is ready:
 
 - End-to-end LLVM→MSL lowering is functional for broad ML kernel classes.
 - Runtime contract coverage is in place for current Metal launch surface.
+- Multi-output mean/variance reduction coverage is now part of the correctness
+   contract, including odd-tail row coverage in isolated runtime checks.
 - Deterministic crash-classification harnesses are implemented and integrated.
 - Release-check workflows are reproducible with persisted artifacts.
 - Primary CI and release creation now run a reusable hosted Metal correctness
@@ -96,9 +99,7 @@ What is still missing for a stricter "fully first-class" release bar:
 1. Automated throughput baselines/regression gates across more Apple GPU
    families than the locally validated Apple M3 Pro lane.
 2. HIP-backed cross-backend numerical comparison parity.
-3. Stable multi-output scalar-reduction reuse semantics for preview-uncovered
-   kernels (currently documented and excluded from release gating).
-4. Always-on Metal GPU/throughput/soak coverage on provisioned Apple hardware,
+3. Always-on Metal GPU/throughput/soak coverage on provisioned Apple hardware,
    rather than the current supplemental self-hosted lanes.
 
 Documented scope boundaries rather than current correctness blockers:
@@ -123,7 +124,8 @@ Logical stop point reached for this phase:
 
 Recommended release framing:
 
-- Publish as Metal backend **preview** with explicit known limitations.
-- Gate release candidate updates on `metal_release_checks.py` default suite.
-- Use soak mode for pre-cut validation on target Apple hardware before release
-  cuts.
+- Publish as a **supported Apple Silicon source-build backend** with explicit
+   fleet/performance scope boundaries.
+- Treat the reusable hosted correctness gate as the mandatory release bar.
+- Use throughput guardrails and soak mode as supplemental pre-cut validation on
+   target Apple hardware.

@@ -14,6 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import textwrap
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -123,6 +124,51 @@ def isolated_metal_runtime_state(fresh_triton_cache, fresh_knobs):
     finally:
         gc.collect()
         utils.reset_runtime_state()
+
+
+def _run_isolated_metal_runtime_script(script: str) -> None:
+    """Execute a Metal runtime assertion script in a fresh Python process."""
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir)
+    )
+    env = os.environ.copy()
+    pythonpath_entries = [repo_root, os.path.join(repo_root, "python")]
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+
+    with tempfile.TemporaryDirectory(prefix="triton-metal-mean-var-") as tmpdir:
+        env["TRITON_CACHE_DIR"] = tmpdir
+        script_path = os.path.join(tmpdir, "isolated_metal_runtime_check.py")
+        wrapped_script = (
+            "import gc\n\n"
+            "from third_party.metal.backend.driver import MetalUtils\n\n"
+            "_metal_utils = MetalUtils()\n"
+            "gc.collect()\n"
+            "_metal_utils.reset_runtime_state()\n"
+            "try:\n"
+            f"{textwrap.indent(script, '    ')}\n"
+            "finally:\n"
+            "    gc.collect()\n"
+            "    _metal_utils.reset_runtime_state()\n"
+        )
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(wrapped_script)
+        result = subprocess.run(
+            [sys.executable, script_path],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert result.returncode == 0, (
+        "Isolated Metal runtime script failed\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
 
 
 # ── MetalOptions tests ──────────────────────────────────────────────
@@ -4185,7 +4231,10 @@ class TestMetalRuntimeConformance:
     def test_launcher_rejects_cooperative_grid_metadata(self):
         from types import SimpleNamespace
 
-        from third_party.metal.backend.driver import MetalLauncher, TorchMetalKernelHandle
+        from third_party.metal.backend.driver import (
+            MetalLauncher,
+            TorchMetalKernelHandle,
+        )
 
         src = SimpleNamespace(signature={})
         metadata = {"name": "test_fn", "launch_cooperative_grid": True}
@@ -6674,54 +6723,105 @@ class TestMetalRuntimeExecuteVerify:
 
     @skip_non_darwin
     @skip_no_mps
-    def test_runtime_mean_var_matches_cpu(self, isolated_metal_runtime_state):
+    def test_runtime_mean_var_matches_cpu(self):
         """A single kernel computing both mean and variance."""
-        import torch
+        _run_isolated_metal_runtime_script(
+            textwrap.dedent(
+                """
+                import torch
+                import triton
+                import triton.language as tl
 
-        import triton
-        import triton.language as tl
+                assert torch.backends.mps.is_available()
 
-        pytest.skip(
-            "Metal preview does not yet guarantee stable multi-output scalar-reduction reuse semantics"
+                @triton.jit
+                def _mean_var(x_ptr, mean_ptr, var_ptr, n_cols, BLOCK: tl.constexpr):
+                    pid = tl.program_id(axis=0)
+                    offs = tl.arange(0, BLOCK)
+                    mask = offs < n_cols
+                    row_base = pid * n_cols
+                    x = tl.load(x_ptr + row_base + offs, mask=mask, other=0.0)
+                    mean = tl.sum(x, axis=0) / n_cols
+                    centered = x - mean
+                    var = tl.sum(centered * centered, axis=0) / n_cols
+                    tl.store(mean_ptr + pid, mean)
+                    tl.store(var_ptr + pid, var)
+
+                torch.manual_seed(117)
+                rows, cols, block = 8, 64, 64
+                x_cpu = torch.randn((rows, cols), dtype=torch.float32)
+                x_mps = x_cpu.to("mps")
+                mean_mps = torch.empty((rows,), device="mps", dtype=torch.float32)
+                var_mps = torch.empty((rows,), device="mps", dtype=torch.float32)
+
+                _mean_var[(rows,)](x_mps, mean_mps, var_mps, cols, BLOCK=block)
+                torch.mps.synchronize()
+                mean_cpu = mean_mps.cpu()
+                var_cpu = var_mps.cpu()
+                torch.mps.synchronize()
+
+                expected_mean = x_cpu.mean(dim=1)
+                expected_var = x_cpu.var(dim=1, correction=0)
+                assert torch.allclose(mean_cpu, expected_mean, atol=1e-4, rtol=1e-4)
+                assert torch.allclose(var_cpu, expected_var, atol=1e-3, rtol=1e-3)
+                """
+            )
         )
 
-        @triton.jit
-        def _mean_var(x_ptr, mean_ptr, var_ptr, n_cols, BLOCK: tl.constexpr):
-            pid = tl.program_id(axis=0)
-            row_base = pid * n_cols
-            mean = 0.0
-            for kk in range(0, BLOCK):
-                if kk < n_cols:
-                    mean += tl.load(x_ptr + row_base + kk)
-            mean = mean / n_cols
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_mean_var_odd_tail_matches_cpu(self):
+        """Mean/variance kernel handles odd-width row tails correctly."""
+        _run_isolated_metal_runtime_script(
+            textwrap.dedent(
+                """
+                import torch
+                import triton
+                import triton.language as tl
 
-            var = 0.0
-            for kk in range(0, BLOCK):
-                if kk < n_cols:
-                    x = tl.load(x_ptr + row_base + kk)
-                    centered = x - mean
-                    var += centered * centered
-            var = var / n_cols
-            tl.store(mean_ptr + pid, mean)
-            tl.store(var_ptr + pid, var)
+                assert torch.backends.mps.is_available()
 
-        torch.manual_seed(117)
-        rows, cols = 8, 64
-        x_cpu = torch.randn((rows, cols), dtype=torch.float32)
-        x_mps = x_cpu.to("mps")
-        mean_mps = torch.empty((rows,), device="mps", dtype=torch.float32)
-        var_mps = torch.empty((rows,), device="mps", dtype=torch.float32)
+                @triton.jit
+                def _mean_var_tail(x_ptr, mean_ptr, var_ptr, n_cols, BLOCK: tl.constexpr):
+                    pid = tl.program_id(axis=0)
+                    row_base = pid * n_cols
 
-        _mean_var[(rows,)](x_mps, mean_mps, var_mps, cols, BLOCK=32, num_warps=1)
-        torch.mps.synchronize()
-        mean_cpu = mean_mps.cpu()
-        var_cpu = var_mps.cpu()
-        torch.mps.synchronize()
+                    total = 0.0
+                    for kk in range(0, BLOCK):
+                        if kk < n_cols:
+                            total += tl.load(x_ptr + row_base + kk)
+                    mean = total / n_cols
 
-        expected_mean = x_cpu.mean(dim=1)
-        expected_var = x_cpu.var(dim=1, correction=0)
-        assert torch.allclose(mean_cpu, expected_mean, atol=1e-4, rtol=1e-4)
-        assert torch.allclose(var_cpu, expected_var, atol=1e-3, rtol=1e-3)
+                    total_sq = 0.0
+                    for kk in range(0, BLOCK):
+                        if kk < n_cols:
+                            x = tl.load(x_ptr + row_base + kk)
+                            centered = x - mean
+                            total_sq += centered * centered
+                    var = total_sq / n_cols
+                    tl.store(mean_ptr + pid, mean)
+                    tl.store(var_ptr + pid, var)
+
+                torch.manual_seed(117)
+                rows, cols, block = 8, 65, 128
+                x_cpu = torch.randn((rows, cols), dtype=torch.float32)
+                x_mps = x_cpu.to("mps")
+                mean_mps = torch.empty((rows,), device="mps", dtype=torch.float32)
+                var_mps = torch.empty((rows,), device="mps", dtype=torch.float32)
+
+                _mean_var_tail[(rows,)](x_mps, mean_mps, var_mps, cols, BLOCK=block)
+                torch.mps.synchronize()
+                mean_cpu = mean_mps.cpu()
+                var_cpu = var_mps.cpu()
+                torch.mps.synchronize()
+
+                expected_mean = x_cpu.mean(dim=1)
+                expected_var = x_cpu.var(dim=1, correction=0)
+                assert torch.allclose(mean_cpu, expected_mean, atol=1e-4, rtol=1e-4)
+                assert torch.allclose(var_cpu, expected_var, atol=1e-3, rtol=1e-3)
+                """
+            )
+        )
 
 
 # ── LLVM vector-constant lowering regressions ───────────────────────

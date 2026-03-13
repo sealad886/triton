@@ -28,7 +28,7 @@ Out (for this phase):
 Validated in workspace `.venv` with:
 
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py`
-  -> `448 passed, 1 skipped`
+  -> `450 passed, 1 skipped`
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_ir_types.py`
   -> `162 passed`
 - `PYTHONPATH=python .venv/bin/python scripts/test_metal_smoke.py`
@@ -40,21 +40,22 @@ Validated in workspace `.venv` with:
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
   -> `2 passed`
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py python/test/backend/test_ir_types.py python/test/unit/tools/test_aot_metal.py`
-  -> `613 passed, 1 skipped`
+  -> `614 passed, 1 skipped`
 - `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --profile hosted-ci`
   -> hosted correctness gate passes with artifacts (backend tests,
      `test_ir_types`, smoke, cross-backend numerics, AOT checks)
 - `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py`
-  -> default release gate checks pass with artifacts (backend tests,
-     `test_ir_types`, smoke, throughput guard, cross-backend numerics,
-     AOT checks)
+  -> default local release profile adds supplemental throughput guardrails in
+     addition to the hosted correctness lanes; treat it as extended
+     performance coverage rather than the baseline support contract
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot.py`
   -> `7 skipped` (expected on non-CUDA/HIP environment)
 
-Important: this does not imply strict full first-class parity yet. The
-remaining gap set is now dominated by cross-family performance coverage,
-HIP-backed parity coverage, and supplemental self-hosted validation breadth
-rather than missing repo-controlled correctness integration.
+Important: the repo-controlled first-class support bar is now met for Apple
+Silicon correctness, tooling, and hosted CI/release integration. The remaining
+gap set is dominated by cross-family performance coverage, HIP-backed parity
+coverage, and supplemental self-hosted validation breadth rather than missing
+repo-controlled correctness integration.
 
 ## Backend Parity Audit
 
@@ -436,8 +437,6 @@ Status: Complete.
   advanced features: cooperative-grid launch is explicit hard-fail,
   `launch_pdl` is a compatibility no-op, and `profile_scratch` metadata is
   retained without a Metal profiler runtime path yet.
-- Multi-output scalar-reduction reuse kernels remain outside the preview
-  release-gate contract and are explicitly documented as partial coverage.
 - Phase 10 runtime coverage is substantially complete: fp8 runtime matmul
   (fp8e5m2 + fp16/fp32 accumulation), int8 blocked matmul + boundary
   saturation, broad ML workloads (attention, MLP, normalization, convolution,
@@ -472,12 +471,6 @@ Status: Complete.
   advanced launch features (`launch_cooperative_grid`, `launch_pdl`,
   `profile_scratch`).
   - Mitigation: keep explicit hard-fail/no-op semantics, document behavior, and
- - Risk: Multi-output scalar reductions reused later in the same kernel are not
-   yet a preview-quality guarantee on Metal.
-  - Mitigation: keep them out of release gating, prefer single-output
-    reductions or vector-output formulations, and revisit with dedicated
-    reduction-lowering work.
-    add native Metal implementations only where correctness can be guaranteed.
 - Risk: Runtime validation breadth is improved but still incomplete for fp8 and
   full multi-backend parity (especially HIP and CI-enforced coverage).
   - Mitigation: complete Phase 10 fp8 runtime suites and extend backend matrix

@@ -3,8 +3,9 @@
 This document describes the Metal backend for Triton, which enables running
 Triton programs on Apple Silicon GPUs via the Metal API.
 
-The current Metal path is a **preview-quality, source-build backend** for
-Apple Silicon. It is not yet distributed as a general macOS wheel path.
+The current Metal path is a **supported, source-build backend** for Apple
+Silicon, with mandatory hosted correctness gating in primary CI and release
+workflows. It is not yet distributed as a general macOS wheel path.
 
 ## Overview
 
