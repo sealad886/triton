@@ -31,19 +31,21 @@ Executed in workspace `.venv`:
    - Result: `2 passed`
 7. `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot.py`
    - Result: `7 skipped` (expected non-CUDA/HIP environment)
-8. `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --profile hosted-ci --tag local-hosted-ci`
+8. `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py python/test/backend/test_ir_types.py python/test/unit/tools/test_aot_metal.py`
+   - Result: `613 passed, 1 skipped`
+9. `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --profile hosted-ci --tag final-hosted-ci`
     - Result: success
     - Includes backend tests, `test_ir_types`, smoke, cross-backend numerics,
        AOT unit/runtime, and AOT collection gate.
-9. `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --python .venv/bin/python --tag prod-gap-closeout`
+10. `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --python .venv/bin/python --tag final-default`
    - Result: success
     - Includes backend tests, `test_ir_types`, smoke, throughput guard,
        cross-backend numerics, AOT unit/runtime, and AOT collection gate.
 
 Release-check artifacts:
 
-- `artifacts/metal-release-checks/20260313-191740_local-hosted-ci/summary.json`
-- `artifacts/metal-release-checks/20260313-192019_prod-gap-closeout/summary.json`
+- `artifacts/metal-release-checks/20260313-205353_final-hosted-ci/summary.json`
+- `artifacts/metal-release-checks/20260313-205449_final-default/summary.json`
 
 ## Hardening Changes Included in This Audit Window
 
@@ -75,6 +77,10 @@ Release-check artifacts:
 Current status: **ready for upstream review as a preview backend** with
 bounded, documented architecture limitations.
 
+This branch is merge-ready for a preview-quality Metal backend. It is **not**
+the same as claiming strict fully-first-class closure across every Apple GPU
+family, every backend-comparison lane, and every performance/soak lane.
+
 What is ready:
 
 - End-to-end LLVM→MSL lowering is functional for broad ML kernel classes.
@@ -87,16 +93,25 @@ What is ready:
 
 What is still missing for a stricter "fully first-class" release bar:
 
-1. Full Metal-native simdgroup/matrix-core matmul acceleration integration.
-   The shared `accelerate_matmul` pass remains a non-CUDA no-op, while the
-   Metal-specific strategy/lowering path exists but is not yet fully wired into
-   the pass pipeline and performance-tuned across families.
-2. Automated throughput baselines/regression gates across more Apple GPU
+1. Automated throughput baselines/regression gates across more Apple GPU
    families than the locally validated Apple M3 Pro lane.
-3. fp8/int8 matmul-class runtime validation breadth.
-4. HIP-backed cross-backend numerical comparison parity.
-5. Always-on Metal GPU/throughput/soak coverage on provisioned Apple hardware,
+2. HIP-backed cross-backend numerical comparison parity.
+3. Stable multi-output scalar-reduction reuse semantics for preview-uncovered
+   kernels (currently documented and excluded from release gating).
+4. Always-on Metal GPU/throughput/soak coverage on provisioned Apple hardware,
    rather than the current supplemental self-hosted lanes.
+
+Documented scope boundaries rather than current correctness blockers:
+
+- Metal-native simdgroup/matrix-core acceleration is wired into the compiler
+  pipeline for supported blocked layouts; the remaining work is cross-family
+  tuning and performance guard coverage.
+- `launch_cooperative_grid` is an explicit hard-fail on Metal, and
+  `launch_pdl` is a compatibility no-op.
+- `profile_scratch` metadata is preserved for future profiling flows, but the
+  profiler-specific runtime path remains dormant on Metal.
+- `fp8e4b15` is not advertised as a supported Metal dtype; the validated fp8
+  path is `fp8e5`.
 
 ## Packaging/Release Recommendation
 

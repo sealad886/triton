@@ -56,6 +56,7 @@ Last updated: 2026-03-13
 | Fence insertion pass (dual-proxy ordering) | **N/A** | NVIDIA Hopper-specific; Metal barriers are sufficient |
 | Device-scope atomic ordering stronger than relaxed | **Limited by Metal** | Metal lowering collapses device atomics to relaxed ordering semantics |
 | Throughput guardrails are automated in the default local release gate and self-hosted CI, but cross-family Apple7/8/9 coverage is still partial | **Partial** | Run `scripts/metal_release_checks.py` locally and on target-family self-hosted runners |
+| Multi-output scalar-reduction reuse kernels are not yet part of the preview release gate | **Partial** | Prefer single-output reductions or vector-output formulations for release-critical kernels |
 | fp8 and int8 matmul-class runtime validation | **Mitigated** | fp8e5m2 runtime matmul + int8 blocked matmul + boundary saturation tests added; FP8 software converters available |
 | Cross-backend numerics cover MPS with optional CUDA, but HIP parity is still open | **Partial** | Use `python/test/backend/metal_cross_backend_compare.py` plus deterministic CPU-reference validation |
 
@@ -84,9 +85,11 @@ Validated on branch `feat/metal-support` (2026-03-13):
   - `overall_passed=true`
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
   - `2 passed`
-- `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --profile hosted-ci --tag local-hosted-ci`
+- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py python/test/backend/test_ir_types.py python/test/unit/tools/test_aot_metal.py`
+  - `613 passed, 1 skipped`
+- `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --profile hosted-ci --tag final-hosted-ci`
   - success (backend tests, `test_ir_types`, smoke, cross-backend numerics, AOT checks)
-- `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --python .venv/bin/python --tag prod-gap-closeout`
+- `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --python .venv/bin/python --tag final-default`
   - success (backend tests, `test_ir_types`, smoke, throughput guard, cross-backend numerics, AOT checks)
 
 Primary CI and release creation now run a reusable hosted Metal correctness

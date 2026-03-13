@@ -53,6 +53,11 @@ namespace {
 
 using namespace mlir::triton::Metal;
 
+static Value emitMetalRedundantThreadPred(
+  Type ptrType, ModuleOp mod, ConversionPatternRewriter &rewriter,
+  Location loc);
+static int32_t getRegisterFreeVarMask(Type type);
+
 struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp> {
   LoadOpConversion(LLVMTypeConverter &typeConverter, PatternBenefit benefit)
       : ConvertOpToLLVMPattern<triton::LoadOp>(typeConverter, benefit) {}
@@ -161,9 +166,24 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp> {
         maskElems.push_back(adaptor.getMask());
     }
 
+    int addrSpace = triton::getAddressSpace(op.getPtr().getType());
+    Value threadPred;
+    int32_t regMask = 0;
+    if (addrSpace != 3) {
+      threadPred =
+          emitMetalRedundantThreadPred(op.getPtr().getType(), mod, rewriter, loc);
+      regMask = getRegisterFreeVarMask(op.getPtr().getType());
+    }
+
     Type voidTy = LLVM::LLVMVoidType::get(op.getContext());
     for (auto idx : llvm::seq<size_t>(0, ptrElems.size())) {
+      if (threadPred && !isCanonicalIndex(idx, regMask))
+        continue;
+
       Value pred = op.getMask() ? maskElems[idx] : Value();
+      if (threadPred)
+        pred = pred ? LLVM::AndOp::create(rewriter, loc, pred, threadPred)
+                    : threadPred;
       if (pred) {
         std::string suffix = mangleTypeForSymbol(valElems[idx].getType()) +
                              "_" + mangleTypeForSymbol(ptrElems[idx].getType());

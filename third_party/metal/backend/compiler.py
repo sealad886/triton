@@ -172,6 +172,24 @@ from triton.backends.metal.ir_types import parse_block as _parse_block  # noqa: 
 # line stored during block parsing).  All functions take the
 # ``TranslatorContext`` as first argument.
 
+_MANGLE_TO_LLVM_SCALAR: dict[str, str] = {
+    "i1": "i1",
+    "i8": "i8",
+    "i16": "i16",
+    "i32": "i32",
+    "i64": "i64",
+    "f16": "half",
+    "bf16": "bfloat",
+    "f32": "float",
+    "f64": "double",
+}
+
+
+def _mangle_ptr_addr_space(tag: str) -> str | None:
+    if not tag.startswith("p") or not tag[1:].isdigit():
+        return None
+    return tag[1:]
+
 
 def _emit_binop(ctx: "TranslatorContext", inst: _BinOp) -> bool:
     out_ssa = inst.out_ssa
@@ -389,7 +407,30 @@ def _emit_void_call(ctx: "TranslatorContext", inst: _Call) -> bool:
     fn = inst.fn_name
     args = [ctx.to_expr(v) for v in ctx.parse_call_args(inst.args_raw)]
     if fn.startswith("__metal_predicated_st_global_") and len(args) == 3:
-        ctx.emit(f"if ({args[2]}) {{ *{args[1]} = {args[0]}; }}")
+        suffix = fn.removeprefix("__metal_predicated_st_global_")
+        val_tag, _, ptr_tag = suffix.rpartition("_")
+        llvm_ty = _MANGLE_TO_LLVM_SCALAR.get(val_tag)
+        msl_ty = ctx.llvm_type_to_msl(llvm_ty) if llvm_ty is not None else None
+        if msl_ty is None:
+            raise RuntimeError(
+                "Unsupported predicated store helper in Metal lowering: "
+                f"'{fn}'"
+            )
+        addr_space = _mangle_ptr_addr_space(ptr_tag)
+        if addr_space is None:
+            raise RuntimeError(
+                "Unsupported predicated store pointer helper in Metal lowering: "
+                f"'{fn}'"
+            )
+        ctx.emit(
+            "if ({pred}) {{ *(({addr_space} {msl_ty}*)({ptr})) = {val}; }}".format(
+                pred=args[2],
+                addr_space=ctx.msl_addr_space(addr_space),
+                msl_ty=msl_ty,
+                ptr=args[1],
+                val=args[0],
+            )
+        )
     elif fn == "__metal_simdgroup_barrier":
         barrier_flags = "mem_flags::mem_none"
         if len(args) >= 1:
@@ -1156,7 +1197,7 @@ class MetalOptions:
     debug: bool = False
     backend_name: str = "metal"
     arch: str = None
-    supported_fp8_dtypes: Tuple[str] = ("fp8e5", "fp8e4b15")
+    supported_fp8_dtypes: Tuple[str] = ("fp8e5",)
     deprecated_fp8_dot_operand_dtypes: Tuple[str] = ()
     default_dot_input_precision: str = "ieee"
     allowed_dot_input_precisions: Tuple[str] = ("ieee",)

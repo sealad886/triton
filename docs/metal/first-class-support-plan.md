@@ -39,6 +39,8 @@ Validated in workspace `.venv` with:
   -> `overall_passed=true`
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot_metal.py`
   -> `2 passed`
+- `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/backend/test_metal_backend.py python/test/backend/test_ir_types.py python/test/unit/tools/test_aot_metal.py`
+  -> `613 passed, 1 skipped`
 - `PYTHONPATH=python .venv/bin/python scripts/metal_release_checks.py --profile hosted-ci`
   -> hosted correctness gate passes with artifacts (backend tests,
      `test_ir_types`, smoke, cross-backend numerics, AOT checks)
@@ -49,8 +51,10 @@ Validated in workspace `.venv` with:
 - `PYTHONPATH=python .venv/bin/python -m pytest -q python/test/unit/tools/test_aot.py`
   -> `7 skipped` (expected on non-CUDA/HIP environment)
 
-Important: this does not imply full first-class parity yet. The checklist below
-is corrected to reflect current implementation reality, including partial work.
+Important: this does not imply strict full first-class parity yet. The
+remaining gap set is now dominated by cross-family performance coverage,
+HIP-backed parity coverage, and supplemental self-hosted validation breadth
+rather than missing repo-controlled correctness integration.
 
 ## Backend Parity Audit
 
@@ -420,32 +424,27 @@ Acceptance:
   with clear diagnostics, stable upgrade behavior, and documented guardrails.
 Status: Complete.
 
-## Known Partial/Incorrect Implementations (Validated 2026-03-06)
+## Known Partial/Incorrect Implementations (Validated 2026-03-13)
 
-- Non-blocked distributed `tt.dot` encodings now lower through the generic FMA
-  path, but matrix-core/simdgroup-optimized encoding families still lack full
-  pass-level integration and throughput tuning. Metal-native matmul acceleration
-  strategy module (`matmul_accel.py`) with simdgroup dispatch has been added;
-  strategy selection, tile dispatch, and performance model are implemented.
-- Matmul optimization parity is improved: `accelerate_matmul` is enabled in
-  `third_party/metal/backend/compiler.py` (target-aware, no-ops for non-CUDA);
-  Metal-specific matmul acceleration module (`matmul_accel.py`) now provides
-  equivalent strategy selection and tile dispatch for Metal targets.
-- Simdgroup matmul support now includes typed native/fallback LLVM->MSL
-  lowering strategies, strategy selection, tile dispatch, and a performance
-  model via `matmul_accel.py`. Full pass-level `accelerate_matmul` integration
-  with the Metal acceleration module remains in progress.
+- Blocked-layout simdgroup/matrix-core acceleration is now wired into the
+  Metal compiler pipeline. Remaining work is cross-family tuning and
+  performance-guard breadth, not missing pass-level integration.
 - Shared-memory synchronization for blocked matmul now uses a dedicated barrier
   insertion pass (`barrier_pass.py`) in addition to the translator-level loop
   heuristic in `make_metal_ir`.
-- Runtime launch contract support is still intentionally constrained for some
-  advanced features: cooperative-grid launch is explicit hard-fail and
-  `profile_scratch`/`launch_pdl` are contract no-ops pending native support.
+- Runtime launch contract support is intentionally constrained for some
+  advanced features: cooperative-grid launch is explicit hard-fail,
+  `launch_pdl` is a compatibility no-op, and `profile_scratch` metadata is
+  retained without a Metal profiler runtime path yet.
+- Multi-output scalar-reduction reuse kernels remain outside the preview
+  release-gate contract and are explicitly documented as partial coverage.
 - Phase 10 runtime coverage is substantially complete: fp8 runtime matmul
   (fp8e5m2 + fp16/fp32 accumulation), int8 blocked matmul + boundary
   saturation, broad ML workloads (attention, MLP, normalization, convolution,
   embedding, training patterns). HIP-backed cross-backend numerics remain
   incomplete.
+- `fp8e4b15` is treated as unsupported on Metal and is no longer advertised as
+  a supported backend dtype.
 - AOT runtime C harness (`test_aot_runtime.m`) and test script
   (`scripts/test_metal_aot_runtime.py`) are now exercised through the
   Metal-specific pytest/release gate path; the upstream
@@ -465,14 +464,19 @@ Status: Complete.
 
 ## Risks and Mitigations
 
-- Risk: Matmul path remains incomplete. The shared `accelerate_matmul` pass is
-  still a non-CUDA no-op, and the Metal-specific simdgroup strategy/lowering
-  path is not yet fully integrated and tuned across GPU families.
-  - Mitigation: prioritize Phase 8 items (encoding support, mixed-precision
-    lowering fixes, pass enablement with regression/perf validation).
-- Risk: Runtime feature surface is still narrower than CUDA/HIP for advanced
-  launch features (`launch_cooperative_grid`, `profile_scratch` behavior).
+- Risk: Cross-family performance coverage remains thinner than correctness
+  coverage.
+  - Mitigation: prioritize Apple7/8/9 throughput baselines and self-hosted
+    performance lanes.
+- Risk: Runtime feature surface is intentionally narrower than CUDA/HIP for
+  advanced launch features (`launch_cooperative_grid`, `launch_pdl`,
+  `profile_scratch`).
   - Mitigation: keep explicit hard-fail/no-op semantics, document behavior, and
+ - Risk: Multi-output scalar reductions reused later in the same kernel are not
+   yet a preview-quality guarantee on Metal.
+  - Mitigation: keep them out of release gating, prefer single-output
+    reductions or vector-output formulations, and revisit with dedicated
+    reduction-lowering work.
     add native Metal implementations only where correctness can be guaranteed.
 - Risk: Runtime validation breadth is improved but still incomplete for fp8 and
   full multi-backend parity (especially HIP and CI-enforced coverage).

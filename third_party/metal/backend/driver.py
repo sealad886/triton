@@ -251,6 +251,19 @@ def _extract_num_warps(metadata):
     return None
 
 
+def _metadata_flag(name: str, *sources) -> bool:
+    for source in sources:
+        if source is None:
+            continue
+        if isinstance(source, dict):
+            if source.get(name):
+                return True
+            continue
+        if getattr(source, name, False):
+            return True
+    return False
+
+
 def _is_mtl_buffer_like(arg) -> bool:
     """Detect native/shared Metal buffers passed directly to the PyObjC path."""
     return callable(getattr(arg, "contents", None)) and callable(
@@ -1348,6 +1361,17 @@ class MetalLauncher:
 
         try:
             handle = function
+            cooperative_grid_requested = _metadata_flag(
+                "launch_cooperative_grid",
+                kernel_metadata,
+                self.metadata,
+                getattr(handle, "metadata", None),
+            )
+            if cooperative_grid_requested:
+                raise RuntimeError(
+                    "Metal backend does not currently support cooperative-grid launches"
+                )
+
             if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
                 raise RuntimeError("Expected Metal kernel handle for Metal launch")
 
