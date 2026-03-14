@@ -1,4 +1,4 @@
-e"""
+"""
 Tests for the typed LLVM IR instruction AST and parser.
 
 Validates ``ir_types.parse_instruction`` and ``parse_block`` against
@@ -8,7 +8,6 @@ representative LLVM IR lines drawn from the Metal backend test corpus.
 import sys
 
 import pytest
-
 from triton.backends.metal.ir_types import (
     GEP,
     AggregateOp,
