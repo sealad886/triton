@@ -6,7 +6,7 @@ Validates that the Metal backend:
 1. Imports without error
 2. Compilation pipeline works (TTIR -> TTGIR -> LLIR -> MSL)
 3. Basic kernel compilation succeeds
-4. Runtime fallback paths are functional
+4. Runtime path selection is honest and both execution modes remain probeable
 
 Exit code 0 = all checks pass, non-zero = failure with details.
 
@@ -257,6 +257,182 @@ def check_basic_compilation() -> CheckResult:
         )
 
 
+def _runtime_probe_source() -> str:
+    return """#include <metal_stdlib>
+using namespace metal;
+
+kernel void compat_probe(device float* out [[buffer(0)]],
+                         uint gid [[thread_position_in_grid]]) {
+  if (gid == 0) {
+    out[0] = 1.0f;
+  }
+}
+"""
+
+
+def check_runtime_paths() -> CheckResult:
+    if sys.platform != "darwin":
+        return CheckResult(
+            name="runtime_paths",
+            passed=True,
+            detail="Not macOS — runtime path probe skipped",
+            value=None,
+        )
+
+    try:
+        from third_party.metal.backend.driver import MetalUtils, _get_metal_module
+    except Exception as exc:
+        return CheckResult(
+            name="runtime_paths",
+            passed=False,
+            detail=f"Cannot import Metal runtime helpers: {exc}",
+            value=None,
+        )
+
+    utils = MetalUtils()
+    torch = getattr(utils, "_torch", None)
+    if torch is None:
+        try:
+            import torch as _torch
+
+            torch = _torch
+        except ImportError:
+            torch = None
+
+    torch_compile_shader = bool(
+        torch is not None
+        and hasattr(torch, "mps")
+        and hasattr(torch.mps, "compile_shader")
+    )
+    mps_available = bool(
+        torch_compile_shader
+        and hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_available()
+    )
+    pyobjc_available = _get_metal_module() is not None
+    source = _runtime_probe_source()
+
+    value: dict[str, Any] = {
+        "preferred_mode": None,
+        "torch_mps_runtime": None,
+        "pyobjc_pipeline": None,
+    }
+    details: list[str] = []
+    errors: list[str] = []
+
+    old_prefer = os.environ.get("TRITON_METAL_PREFER_TORCH_MPS")
+    old_mode = getattr(utils, "_execution_mode", None)
+    try:
+        utils._execution_mode = None
+        value["preferred_mode"] = utils.resolve_execution_mode()
+
+        if torch_compile_shader and mps_available:
+            os.environ["TRITON_METAL_PREFER_TORCH_MPS"] = "1"
+            utils._execution_mode = None
+            try:
+                handle = utils._load_msl_source_handle(
+                    source,
+                    {"name": "compat_probe"},
+                )
+                out = torch.zeros((1,), dtype=torch.float32, device="mps")
+                handle.launch_kernel(
+                    name="compat_probe",
+                    args=[out],
+                    grid=(1, 1, 1),
+                    block=(1, 1, 1),
+                    sync=True,
+                    stream_id=0,
+                    utils=utils,
+                )
+                torch.mps.synchronize()
+                value["torch_mps_runtime"] = float(out.cpu().item()) == 1.0
+                details.append(
+                    "torch.mps runtime probe passed"
+                    if value["torch_mps_runtime"]
+                    else "torch.mps runtime probe produced an unexpected result"
+                )
+            except Exception as exc:
+                value["torch_mps_runtime"] = False
+                errors.append(f"torch.mps probe failed: {exc}")
+        else:
+            details.append(
+                "torch.mps runtime probe skipped "
+                f"(compile_shader={torch_compile_shader}, mps_available={mps_available})"
+            )
+
+        if pyobjc_available:
+            os.environ["TRITON_METAL_PREFER_TORCH_MPS"] = "0"
+            utils._execution_mode = None
+            try:
+                handle = utils._load_msl_source_handle(
+                    source,
+                    {"name": "compat_probe"},
+                )
+                pipeline = handle.get_pipeline("compat_probe")
+                value["pyobjc_pipeline"] = pipeline is not None
+                details.append(
+                    "PyObjC metallib fallback probe passed"
+                    if value["pyobjc_pipeline"]
+                    else "PyObjC metallib fallback probe returned no pipeline"
+                )
+            except Exception as exc:
+                value["pyobjc_pipeline"] = False
+                errors.append(f"PyObjC fallback probe failed: {exc}")
+        else:
+            details.append("PyObjC fallback probe skipped (PyObjC unavailable)")
+    finally:
+        utils._execution_mode = old_mode
+        if old_prefer is None:
+            os.environ.pop("TRITON_METAL_PREFER_TORCH_MPS", None)
+        else:
+            os.environ["TRITON_METAL_PREFER_TORCH_MPS"] = old_prefer
+
+    passed = True
+    if torch_compile_shader and mps_available:
+        passed = passed and bool(value["torch_mps_runtime"])
+    if pyobjc_available:
+        passed = passed and bool(value["pyobjc_pipeline"])
+    if errors:
+        detail = "; ".join(details + errors)
+    else:
+        detail = "; ".join(details)
+    return CheckResult(
+        name="runtime_paths",
+        passed=passed,
+        detail=detail,
+        value=value,
+    )
+
+
+def check_capability_snapshot() -> CheckResult:
+    try:
+        from third_party.metal.backend.driver import MetalDriver
+    except Exception as exc:
+        return CheckResult(
+            name="capability_snapshot",
+            passed=False,
+            detail=f"Capability snapshot unavailable: {exc}",
+            value=None,
+        )
+
+    snapshot = MetalDriver().get_capability_snapshot()
+    blockers = snapshot.get("strict_first_class_blockers", [])
+    runtime_modes = snapshot.get("runtime_modes", {})
+    detail = (
+        f"repo_bar={snapshot['repo_first_class_bar']['level']}, "
+        f"strict_bar={snapshot['strict_first_class_bar']['level']}, "
+        f"strict_blockers={len(blockers)}, "
+        f"torch_mps={runtime_modes.get('torch_mps', {}).get('level', 'unknown')}, "
+        f"pyobjc={runtime_modes.get('pyobjc_metallib', {}).get('level', 'unknown')}"
+    )
+    return CheckResult(
+        name="capability_snapshot",
+        passed=True,
+        detail=detail,
+        value=snapshot,
+    )
+
+
 def run_all_checks() -> dict:
     checks = [
         check_python_version,
@@ -266,6 +442,8 @@ def run_all_checks() -> dict:
         check_metal_toolchain,
         check_metal_backend_import,
         check_basic_compilation,
+        check_runtime_paths,
+        check_capability_snapshot,
     ]
     results = [c() for c in checks]
     overall = all(r.passed for r in results)

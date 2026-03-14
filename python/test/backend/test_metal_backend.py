@@ -225,27 +225,27 @@ class TestMetalOptions:
 class TestMetalBackend:
 
     def test_supports_target(self):
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         assert MetalBackend.supports_target(GPUTarget("metal", "apple8", 32))
         assert not MetalBackend.supports_target(GPUTarget("cuda", 90, 32))
         assert not MetalBackend.supports_target(GPUTarget("hip", "gfx942", 64))
 
     def test_init(self):
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
         assert backend.binary_ext == "metal"
 
     def test_backend_hash_includes_source_fingerprint(self):
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
@@ -263,9 +263,9 @@ class TestMetalBackend:
             )
 
     def test_parse_options(self):
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
@@ -275,9 +275,9 @@ class TestMetalBackend:
         assert opts.arch == "apple8"
 
     def test_add_stages(self):
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget, Language
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
@@ -291,10 +291,10 @@ class TestMetalBackend:
         assert "metallib" in stages
 
     def test_add_stages_inspection_hook(self, monkeypatch):
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton import knobs
         from triton.backends.compiler import GPUTarget, Language
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         calls = {"count": 0}
 
@@ -314,9 +314,9 @@ class TestMetalBackend:
         assert calls["count"] == 1
 
     def test_load_dialects_no_error(self):
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
@@ -324,10 +324,10 @@ class TestMetalBackend:
         backend.load_dialects(None)
 
     def test_load_dialects_missing_plugin_raises_clear_error(self, monkeypatch):
+        from triton.backends.compiler import GPUTarget
+
         from third_party.metal.backend import compiler as metal_compiler
         from third_party.metal.backend.compiler import MetalBackend
-
-        from triton.backends.compiler import GPUTarget
 
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
@@ -348,9 +348,9 @@ class TestMetalBackend:
             backend.load_dialects(None)
 
     def test_get_module_map_has_libdevice(self):
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         target = GPUTarget("metal", "apple8", 32)
         backend = MetalBackend(target)
@@ -1315,7 +1315,6 @@ class TestMetalRealWorldCompileCases:
     @skip_no_xcrun
     def test_compile_triton_fp8_blocked_matmul_pipeline(self):
         import torch
-
         import triton
         import triton.language as tl
         from triton.backends.compiler import GPUTarget
@@ -1394,7 +1393,6 @@ class TestMetalRealWorldCompileCases:
     @skip_no_xcrun
     def test_compile_triton_fp8_roundtrip_convert_pipeline(self):
         import torch
-
         import triton
         import triton.language as tl
         from triton.backends.compiler import GPUTarget
@@ -4155,6 +4153,37 @@ class TestMetalRuntimeConformance:
         assert handle is dummy_handle
         load_metallib.assert_called_once()
 
+    def test_source_handle_honors_forced_pyobjc_mode_even_when_torch_exists(self):
+        from types import SimpleNamespace
+
+        from third_party.metal.backend.driver import MetalUtils
+
+        utils = MetalUtils()
+        dummy_handle = object()
+        compile_shader = MagicMock(name="compile_shader")
+        dummy_torch = SimpleNamespace(
+            mps=SimpleNamespace(compile_shader=compile_shader),
+            backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
+        )
+
+        with patch.object(
+            utils, "resolve_execution_mode", return_value="pyobjc"
+        ), patch.object(
+            utils, "get_device_properties", return_value={"gpu_family": "apple8"}
+        ), patch.object(
+            utils, "_torch", dummy_torch
+        ), patch(
+            "third_party.metal.backend.compiler.MetalBackend.make_metallib",
+            return_value=b"MTLB",
+        ), patch.object(
+            utils, "_load_metallib_handle", return_value=dummy_handle
+        ) as load_metallib:
+            handle = utils._load_msl_source_handle("kernel void test_fn() {}")
+
+        assert handle is dummy_handle
+        load_metallib.assert_called_once()
+        compile_shader.assert_not_called()
+
     def test_utils_launch_consumes_stream(self):
         from third_party.metal.backend.driver import MetalUtils, TorchMetalKernelHandle
 
@@ -4298,9 +4327,9 @@ class MetalTestHarness:
     @staticmethod
     def get_metal_backend():
         """Get a Metal backend instance configured for apple8."""
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         target = GPUTarget("metal", "apple8", 32)
         return MetalBackend(target)
@@ -4863,7 +4892,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_vector_add_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -4896,7 +4924,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_int8_vector_add_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -4930,7 +4957,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_int8_blocked_matmul_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5013,7 +5039,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_small_blocked_matmul_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5098,7 +5123,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_row_softmax_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5133,7 +5157,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_row_layernorm_matches_cpu(self, isolated_metal_runtime_state):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5191,7 +5214,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_fp16_blocked_matmul_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5277,7 +5299,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_batched_blocked_matmul_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5374,7 +5395,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_embedding_gather_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5419,7 +5439,6 @@ class TestMetalRuntimeMLCorrectness:
         import math
 
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5523,7 +5542,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_mlp_block_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5640,7 +5658,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_bf16_blocked_matmul_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5731,7 +5748,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_grouped_batched_matmul_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5843,7 +5859,6 @@ class TestMetalRuntimeMLCorrectness:
     @skip_no_mps
     def test_runtime_depthwise_conv1d_like_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5936,7 +5951,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_atomic_add_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -5968,7 +5982,6 @@ class TestMetalRuntimeExecuteVerify:
     def test_runtime_atomic_add_per_bin(self):
         """Histogram-style atomic add into multiple bins."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6006,7 +6019,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_reduce_sum_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6038,7 +6050,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_reduce_max_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6070,7 +6081,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_reduce_min_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6103,7 +6113,6 @@ class TestMetalRuntimeExecuteVerify:
     def test_runtime_2d_reduce_sum_axis0(self):
         """Reduce along axis=0 of a 2D block (column-wise sum)."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6151,7 +6160,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_scan_cumsum_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6185,7 +6193,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_where_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6227,7 +6234,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_exp_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6257,7 +6263,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_log_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6287,7 +6292,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_abs_neg_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6322,7 +6326,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_transpose_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6387,7 +6390,6 @@ class TestMetalRuntimeExecuteVerify:
     def test_runtime_fp16_matmul_f32_accum_matches_cpu(self):
         """Verify f16×f16→f32 accumulation is actually precise (not truncated)."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6475,7 +6477,6 @@ class TestMetalRuntimeExecuteVerify:
     def test_runtime_fp16_matmul_larger_k(self):
         """Larger K to exercise multi-tile K-loop in mixed-precision path."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6561,7 +6562,6 @@ class TestMetalRuntimeExecuteVerify:
     def test_runtime_bf16_matmul_f32_accum_matches_cpu(self):
         """bf16×bf16→f32 matmul, output stored as f32."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6653,7 +6653,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_cast_fp32_to_fp16_roundtrip(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -6686,7 +6685,6 @@ class TestMetalRuntimeExecuteVerify:
     @skip_no_mps
     def test_runtime_fma_pattern_matches_cpu(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -7994,7 +7992,6 @@ class TestMetalInt8MatmulRuntime:
     def test_int8_matmul_small_16x16x16(self):
         """int8×int8→int32 matmul with 16x16x16 shape."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8075,7 +8072,6 @@ class TestMetalInt8MatmulRuntime:
     def test_int8_matmul_medium_32x32x32(self):
         """int8×int8→int32 matmul 32x32x32."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8156,7 +8152,6 @@ class TestMetalInt8MatmulRuntime:
     def test_int8_matmul_i16_accumulation(self):
         """int8×int8 with int16 accumulation — small values avoid overflow."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8238,7 +8233,6 @@ class TestMetalInt8MatmulRuntime:
     def test_int8_mixed_i8_i16_input_matmul(self):
         """Mixed int8 and int16 input matmul: widen both to int32 for acc."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8303,7 +8297,6 @@ class TestMetalInt8MatmulRuntime:
     def test_int8_saturation_boundary_values(self):
         """int8 boundary: INT8_MIN=-128, INT8_MAX=127 in vector add."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8350,7 +8343,6 @@ class TestMetalBroadMLWorkloads:
     def test_runtime_sliding_window_conv1d(self):
         """1D convolution via sliding window dot product over channels."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8410,7 +8402,6 @@ class TestMetalBroadMLWorkloads:
     def test_runtime_training_iteration_pattern(self):
         """Simulated training step: fwd→loss→grad→update on MPS."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8490,7 +8481,6 @@ class TestMetalBroadMLWorkloads:
     def test_runtime_gather_irregular_indices(self):
         """Gather with irregular/non-contiguous indices on MPS."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8542,7 +8532,6 @@ class TestMetalBroadMLWorkloads:
     ):
         """Fused layernorm→linear projection→residual add on MPS."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8635,7 +8624,6 @@ class TestMetalBroadMLWorkloads:
         import math
 
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8747,6 +8735,68 @@ class TestMetalDriverFeatures:
             assert result == (1, 1, 1), f"Expected (1,1,1) for {bw}-bit operands"
 
     @skip_non_darwin
+    def test_describe_dot_capability_reports_native_simdgroup_for_apple7_fp16(self):
+        from types import SimpleNamespace
+
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ty = SimpleNamespace(
+            scalar=SimpleNamespace(
+                primitive_bitwidth=16,
+                name="fp16",
+                is_fp16=lambda: True,
+            )
+        )
+
+        capability = MetalBackend.describe_dot_capability(
+            ty,
+            ty,
+            gpu_family="apple7",
+        )
+
+        assert capability.supported is True
+        assert capability.supports_simdgroup is True
+        assert capability.native_tile == (16, 16, 8)
+        assert capability.required_accumulator == "float"
+
+    @skip_non_darwin
+    def test_describe_dot_capability_bf16_requires_apple9_for_native_path(self):
+        from types import SimpleNamespace
+
+        from third_party.metal.backend.compiler import MetalBackend
+
+        ty = SimpleNamespace(
+            scalar=SimpleNamespace(
+                primitive_bitwidth=16,
+                name="bf16",
+                is_bf16=lambda: True,
+            )
+        )
+
+        apple8 = MetalBackend.describe_dot_capability(ty, ty, gpu_family="apple8")
+        apple9 = MetalBackend.describe_dot_capability(ty, ty, gpu_family="apple9")
+
+        assert apple8.supported is True
+        assert apple8.supports_simdgroup is False
+        assert apple9.supports_simdgroup is True
+
+    @skip_non_darwin
+    def test_backend_capability_snapshot_marks_strict_bar_limited(self):
+        from third_party.metal.backend.compiler import MetalBackend
+
+        snapshot = MetalBackend.get_capability_snapshot("apple8")
+
+        assert snapshot["repo_first_class_bar"]["level"] == "supported"
+        assert snapshot["strict_first_class_bar"]["level"] == "limited"
+        assert snapshot["launch_contract"]["launch_pdl"]["level"] == "limited"
+        assert snapshot["launch_contract"]["profile_scratch"]["level"] == "limited"
+        assert (
+            snapshot["launch_contract"]["launch_cooperative_grid"]["level"]
+            == "unsupported"
+        )
+        assert snapshot["strict_first_class_blockers"]
+
+    @skip_non_darwin
     def test_check_dot_compatibility_invalid_fp64(self):
         from unittest.mock import MagicMock
 
@@ -8845,7 +8895,6 @@ class TestMetalGPUProfiling:
     def test_timing_event_returns_positive_time(self):
         """A kernel execution should produce a positive elapsed time."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -8870,7 +8919,6 @@ class TestMetalGPUProfiling:
     def test_gpu_timing_less_than_or_equal_host_timing(self):
         """GPU-side timing should be ≤ host-side (synchronize overhead)."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -9238,7 +9286,6 @@ entry:
         the C++ lowering + Python barrier pass pipeline is functioning.
         """
         import torch
-
         import triton
         import triton.language as tl
 
@@ -9300,7 +9347,6 @@ class TestMetalSPMDOpLowering:
     def test_num_programs_compilation(self):
         """Kernel using tl.num_programs() compiles without error."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -9320,7 +9366,6 @@ class TestMetalSPMDOpLowering:
     def test_num_programs_axis1(self):
         """tl.num_programs(1) returns correct grid size on axis 1."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -9341,7 +9386,6 @@ class TestMetalSPMDOpLowering:
     def test_grid_stride_loop_pattern(self):
         """Grid-stride loop using program_id + num_programs produces correct results."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -9418,6 +9462,15 @@ class TestMetalMatmulAcceleration:
         assert s.tile_m == 8
         assert s.tile_n == 8
         assert s.elem_type == "float"
+        assert s.accum_type == "float"
+
+    def test_strategy_selection_large_fp16_apple7(self):
+        """apple7 should still select simdgroup for native fp16 tiles."""
+        from third_party.metal.backend.matmul_accel import select_matmul_strategy
+
+        s = select_matmul_strategy(64, 64, 64, dtype="fp16", gpu_family="apple7")
+        assert s.use_simdgroup is True
+        assert s.elem_type == "half"
         assert s.accum_type == "float"
 
     def test_strategy_selection_small(self):
@@ -9643,9 +9696,9 @@ class TestMetalGluonSupport:
         """add_stages() registers a ttgir stage when Language is GLUON."""
         from unittest.mock import MagicMock
 
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget, Language
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         target = GPUTarget(backend="metal", arch="apple8", warp_size=32)
         backend = MetalBackend(target)
@@ -9669,9 +9722,9 @@ class TestMetalGluonSupport:
         """add_stages() with Language.TRITON still produces ttir + ttgir."""
         from unittest.mock import MagicMock
 
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget, Language
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         target = GPUTarget(backend="metal", arch="apple8", warp_size=32)
         backend = MetalBackend(target)
@@ -9686,9 +9739,9 @@ class TestMetalGluonSupport:
         """gluon_to_ttgir raises RuntimeError when passes.gluon is absent."""
         from unittest.mock import MagicMock, patch
 
-        from third_party.metal.backend.compiler import MetalBackend
-
         from triton.backends.compiler import GPUTarget
+
+        from third_party.metal.backend.compiler import MetalBackend
 
         target = GPUTarget(backend="metal", arch="apple8", warp_size=32)
         backend = MetalBackend(target)
@@ -10038,6 +10091,23 @@ class TestMetalCICompatibility:
             assert "name" in check
             assert "passed" in check
             assert "detail" in check
+
+    def test_compat_runtime_and_capability_checks_present(self):
+        """Compatibility report includes runtime-path and capability snapshot checks."""
+        mod = self._load_compat_module()
+        report = mod.run_all_checks()
+        names = {check["name"] for check in report["checks"]}
+        assert "runtime_paths" in names
+        assert "capability_snapshot" in names
+
+    def test_compat_capability_snapshot_contains_strict_blockers(self):
+        """Capability snapshot is machine-readable and exposes strict blockers."""
+        mod = self._load_compat_module()
+        result = mod.check_capability_snapshot()
+        assert result.passed is True
+        assert result.value is not None
+        assert result.value["strict_first_class_blockers"]
+        assert result.value["launch_contract"]["profile_scratch"]["level"] == "limited"
 
 
 # ── AOT Runtime Tests ────────────────────────────────────────────────
@@ -11123,6 +11193,7 @@ class TestMetalBufferPool:
         from unittest.mock import MagicMock
 
         import numpy as np
+
         from third_party.metal.backend.driver import MetalBufferPool, _bind_argument
 
         pool = MetalBufferPool()
@@ -11335,7 +11406,6 @@ entry:
     def test_barrier_shuffle_combined_kernel(self):
         """Kernel with both barrier and shuffle ops compiles end-to-end."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11501,7 +11571,6 @@ class TestMetalRegisterReporting:
     def test_load_binary_returns_five_tuple(self):
         """load_binary() 4-arg form returns (handle, handle, n_regs, n_spills, n_max)."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11538,7 +11607,6 @@ class TestMetalHistogram:
     @skip_no_mps
     def test_histogram_basic(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11564,7 +11632,6 @@ class TestMetalHistogram:
     @skip_no_mps
     def test_histogram_all_same_bin(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11588,7 +11655,6 @@ class TestMetalHistogram:
     @skip_no_mps
     def test_histogram_with_mask(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11623,7 +11689,6 @@ class TestMetalJoinSplitInterleave:
     @skip_no_mps
     def test_join_1d(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11650,7 +11715,6 @@ class TestMetalJoinSplitInterleave:
     @skip_no_mps
     def test_split_2d(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11678,7 +11742,6 @@ class TestMetalJoinSplitInterleave:
     @skip_no_mps
     def test_interleave(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11704,7 +11767,6 @@ class TestMetalJoinSplitInterleave:
     @skip_no_mps
     def test_join_split_roundtrip(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11737,7 +11799,6 @@ class TestMetalCat:
     @skip_no_mps
     def test_cat_1d(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11764,7 +11825,6 @@ class TestMetalCat:
     @skip_no_mps
     def test_cat_reorder_reduction(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11795,7 +11855,6 @@ class TestMetal3DGrid:
     @skip_no_mps
     def test_3d_grid_program_ids(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11829,7 +11888,6 @@ class TestMetal3DGrid:
     def test_3d_matmul_batch(self):
         """3D grid: batch dimension on axis 2."""
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11928,7 +11986,6 @@ class TestMetal3DGrid:
     @skip_no_mps
     def test_num_programs_all_axes(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11961,7 +12018,6 @@ class TestMetalClampPropagateNan:
     @skip_no_mps
     def test_clamp_basic(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -11985,7 +12041,6 @@ class TestMetalClampPropagateNan:
     @skip_no_mps
     def test_clamp_symmetric(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12009,7 +12064,6 @@ class TestMetalClampPropagateNan:
     @skip_no_mps
     def test_propagate_nan_minimum(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12044,7 +12098,6 @@ class TestMetalClampPropagateNan:
     @skip_no_mps
     def test_propagate_nan_maximum(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12079,7 +12132,6 @@ class TestMetalClampPropagateNan:
     @skip_no_mps
     def test_clamp_propagate_nan_all(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12113,7 +12165,6 @@ class TestMetalProgramIdNumPrograms:
     @skip_no_mps
     def test_program_id_axis0_only(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12134,7 +12185,6 @@ class TestMetalProgramIdNumPrograms:
     @skip_no_mps
     def test_program_id_2d_grid(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12162,7 +12212,6 @@ class TestMetalProgramIdNumPrograms:
     @skip_no_mps
     def test_num_programs_matches_grid(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12191,7 +12240,6 @@ class TestMetalRNG:
     @skip_no_mps
     def test_rand_uniform_range(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12214,7 +12262,6 @@ class TestMetalRNG:
     @skip_no_mps
     def test_rand_different_seeds(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12239,7 +12286,6 @@ class TestMetalRNG:
     @skip_no_mps
     def test_rand_deterministic(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12264,7 +12310,6 @@ class TestMetalRNG:
     @skip_no_mps
     def test_randn_normal_distribution(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12292,7 +12337,6 @@ class TestMetalRNG:
     @skip_no_mps
     def test_randint_range(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12320,7 +12364,6 @@ class TestMetalTypeConversion:
     @skip_no_mps
     def test_cast_f32_to_f16(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12344,7 +12387,6 @@ class TestMetalTypeConversion:
     @skip_no_mps
     def test_cast_f16_to_f32(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12368,7 +12410,6 @@ class TestMetalTypeConversion:
     @skip_no_mps
     def test_cast_int32_to_float32(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12392,7 +12433,6 @@ class TestMetalTypeConversion:
     @skip_no_mps
     def test_cast_float32_to_int32(self):
         import torch
-
         import triton
         import triton.language as tl
 
@@ -12416,7 +12456,6 @@ class TestMetalTypeConversion:
     @skip_no_mps
     def test_cast_bf16_to_f32_roundtrip(self):
         import torch
-
         import triton
         import triton.language as tl
 
