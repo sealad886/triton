@@ -7,6 +7,11 @@ The current Metal path is a **supported, source-build backend** for Apple
 Silicon, with mandatory hosted correctness gating in primary CI and release
 workflows. It is not yet distributed as a general macOS wheel path.
 
+The canonical machine-readable feature contract now lives in
+`python/triton/backends/metal/capabilities.py` (mirrored through
+`third_party/metal/backend/capabilities.py`). Use that snapshot for tooling,
+CI, and tests instead of re-encoding launch/runtime support in multiple places.
+
 ## Overview
 
 The Metal backend adds Apple GPU support to Triton by:
@@ -147,8 +152,12 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
   through `parse_options` and `make_llir`. The pass emits device-side
   assertions; full runtime validation on Metal requires further testing.
 - **Profiling scratch memory**: `profile_scratch_size` and
-  `profile_scratch_align` metadata are now populated. The driver accepts
-  but discards the value until profiling instrumentation is implemented.
+  `profile_scratch_align` metadata are now populated. The contract field is
+  accepted as **metadata-only**; the driver currently discards the value until
+  profiling instrumentation is implemented.
+- **Launch contract extensions**: `launch_pdl` is accepted for ABI parity but
+  remains a no-op, while `launch_cooperative_grid` is an explicit runtime
+  error on Metal.
 - **TF32 dot products**: Apple Silicon has no TF32 tensor cores;
   `add_f32_dot_tc(pm, False)` is explicitly called to opt out.
 - **Warp specialization**: Metal has no hardware equivalent to NVIDIA's
@@ -170,6 +179,9 @@ This error means your PyTorch version does not support MPS shader compilation.
 - **Fix**: upgrade to PyTorch 2.1+ (`pip install --upgrade torch`).
 - **Alternative**: the Metal backend will fall back to the PyObjC `.metallib`
   loading path automatically if `compile_shader` is unavailable.
+- **Force the fallback path intentionally**: set
+  `TRITON_METAL_PREFER_TORCH_MPS=0` to validate the PyObjC metallib runtime
+  path even on hosts where `torch.mps.compile_shader` exists.
 
 ### "Unsupported LLVM IR" errors
 

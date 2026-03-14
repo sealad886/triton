@@ -57,6 +57,13 @@ gap set is dominated by cross-family performance coverage, HIP-backed parity
 coverage, and supplemental self-hosted validation breadth rather than missing
 repo-controlled correctness integration.
 
+For a stricter backend-parity bar, the remaining blockers are now explicit and
+machine-readable in `python/triton/backends/metal/capabilities.py`: the launch
+contract remains intentionally narrower (`launch_cooperative_grid` unsupported,
+`launch_pdl` and `profile_scratch` limited), HIP-backed parity is incomplete,
+and always-on self-hosted Apple GPU runtime/performance coverage is still
+supplemental.
+
 ## Backend Parity Audit
 
 | Area | NVIDIA | AMD | Metal (current) | Gap |
@@ -85,6 +92,22 @@ Metal is considered first-class for this project phase when:
 3. AOT/link tool paths do not fail due to missing Metal backend templates.
 4. Tests either validate Metal-specific behavior or explicitly gate
    unsupported paths without accidental failures.
+
+## Stricter Parity Blockers
+
+The repo-controlled bar above is intentionally narrower than a strict
+CUDA/HIP-style "fully first-class" bar. The outstanding stricter blockers are:
+
+- `launch_cooperative_grid` is still unsupported on Metal.
+- `launch_pdl` remains a compatibility no-op.
+- `profile_scratch` is metadata-only until a Metal profiler runtime path lands.
+- HIP-backed cross-backend numerical parity remains partial.
+- Always-on self-hosted Apple GPU runtime, throughput, and soak coverage
+  remains supplemental.
+
+Tooling, CI probes, and tests should consume the shared capability snapshot in
+`python/triton/backends/metal/capabilities.py` instead of duplicating these
+status rules in ad hoc tables.
 
 ## Execution Plan (Living Checklist)
 

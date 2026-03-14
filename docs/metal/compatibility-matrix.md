@@ -42,7 +42,7 @@ Last updated: 2026-03-13
 | 3D grid launch | ✅ | ✅ | ✅ |
 | Direct GPU→Metal lowering (no NVVM) | ✅ | ✅ | ✅ |
 | Concurrency sanitizer (consan) | ✅ | ✅ | ✅ |
-| Profile scratch metadata | ✅ | ✅ | ✅ |
+| Profile scratch contract field (metadata-only) | ✅ | ✅ | ✅ |
 | f32 dot TF32 opt-out | ✅ | ✅ | ✅ |
 | Async copy guard assertion | ✅ | ✅ | ✅ |
 
@@ -53,6 +53,9 @@ Last updated: 2026-03-13
 | Warp specialization (Hopper async-warp model) | **N/A** | No Metal hardware equivalent; architectural impossibility |
 | TMA / Tensor Memory Access | **N/A** | NVIDIA Hopper-specific; no Metal DMA engine |
 | Inline assembly | **N/A** | MSL has no inline assembly mechanism |
+| Cooperative-grid launch | **Unsupported** | Metal runtime rejects cooperative-grid launches explicitly |
+| `launch_pdl` launch metadata | **Limited** | Accepted for ABI compatibility, but remains a no-op |
+| `profile_scratch` launch metadata | **Limited** | Metadata is preserved for tooling, but the runtime does not consume it yet |
 | Fence insertion pass (dual-proxy ordering) | **N/A** | NVIDIA Hopper-specific; Metal barriers are sufficient |
 | Device-scope atomic ordering stronger than relaxed | **Limited by Metal** | Metal lowering collapses device atomics to relaxed ordering semantics |
 | Throughput guardrails are available in the default local release gate and self-hosted CI, but cross-family Apple7/8/9 coverage is still partial and remains supplemental to the hosted correctness support bar | **Partial** | Run `scripts/metal_release_checks.py` locally and on target-family self-hosted runners |
@@ -93,6 +96,11 @@ Hosted correctness gating is the canonical first-class support bar. The local
 default release profile adds supplemental throughput guardrails that can vary
 with machine load and should be interpreted as extended performance coverage,
 not as the baseline correctness contract.
+
+For a stricter CUDA/HIP-style parity bar, the remaining blockers are the
+limited launch-contract fields (`launch_pdl`, `profile_scratch`,
+cooperative-grid), HIP-backed cross-backend parity, and always-on self-hosted
+Apple GPU runtime/performance coverage.
 
 Primary CI and release creation now run a reusable hosted Metal correctness
 gate (`.github/workflows/metal-release-gate.yml`). Self-hosted Metal GPU,
