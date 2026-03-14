@@ -1,4 +1,4 @@
-"""
+e"""
 Tests for the typed LLVM IR instruction AST and parser.
 
 Validates ``ir_types.parse_instruction`` and ``parse_block`` against
