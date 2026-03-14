@@ -63,10 +63,10 @@ _MIN_SHAPE_FOR_SIMDGROUP = 16
 
 # dtypes that support simdgroup_matrix natively by GPU family.
 _SIMDGROUP_DTYPES: dict[str, str] = {
-    "float": "apple8",
-    "half": "apple8",
-    "fp16": "apple8",
-    "fp32": "apple8",
+    "float": "apple7",
+    "half": "apple7",
+    "fp16": "apple7",
+    "fp32": "apple7",
     "bfloat": "apple9",
     "bf16": "apple9",
 }

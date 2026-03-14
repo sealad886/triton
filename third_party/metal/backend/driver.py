@@ -17,6 +17,11 @@ import time
 from triton.backends.compiler import GPUTarget
 from triton.backends.driver import DriverBase
 
+from third_party.metal.backend.capabilities import (
+    metal_capability_snapshot,
+    runtime_mode_snapshot,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Lazy module-level imports ────────────────────────────────────────
@@ -449,8 +454,6 @@ def _gpu_elapsed_ms(start_buf, end_buf):
     return None
 
 
-import threading
-
 _metal_last_cmd_buf = threading.local()
 
 
@@ -830,7 +833,12 @@ class MetalUtils:
             and hasattr(torch.mps, "compile_shader")
         )
 
-        if has_torch_compile_shader:
+        if mode == "torch_mps":
+            if not has_torch_compile_shader:
+                raise RuntimeError(
+                    "Metal execution mode resolved to torch.mps, but "
+                    "`torch.mps.compile_shader` is unavailable."
+                )
             try:
                 shader_library = torch.mps.compile_shader(source_text)
             except Exception as e:
@@ -864,6 +872,27 @@ class MetalUtils:
         fallback_metadata.setdefault("source_mode", "pyobjc_metallib_fallback")
         fallback_metadata.setdefault("name", metadata.get("name"))
         return self._load_metallib_handle(metallib, metadata=fallback_metadata)
+
+    def get_capability_snapshot(self, device_id: int = 0) -> dict:
+        props = self.get_device_properties(device_id)
+        snapshot = metal_capability_snapshot(props.get("gpu_family", "apple8"))
+        torch = self._torch or _get_torch_module()
+        torch_compile_shader = bool(
+            torch is not None
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "compile_shader")
+        )
+        mps_available = bool(
+            torch_compile_shader
+            and hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()
+        )
+        snapshot["runtime_modes"] = runtime_mode_snapshot(
+            torch_compile_shader=torch_compile_shader,
+            mps_available=mps_available,
+            pyobjc_available=self._Metal is not None,
+        )
+        return snapshot
 
     def load_binary(self, *args):
         """
@@ -1530,6 +1559,9 @@ class MetalDriver(DriverBase):
         from triton.testing import do_bench
 
         return do_bench
+
+    def get_capability_snapshot(self, device_id: int = 0) -> dict:
+        return self.utils.get_capability_snapshot(device_id)
 
     def get_device_interface(self):
         return _MetalDeviceInterface()

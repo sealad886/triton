@@ -35,6 +35,13 @@ from triton.backends.metal.translator_context import (
     vector_alias_msl,
 )
 
+from third_party.metal.backend.capabilities import (
+    describe_dot_capability as describe_metal_dot_capability,
+)
+from third_party.metal.backend.capabilities import (
+    metal_capability_snapshot,
+)
+
 # ── Compile observability ───────────────────────────────────────────
 
 _METAL_DEBUG = os.environ.get("TRITON_METAL_DEBUG", "").lower() in ("1", "true", "yes")
@@ -1380,23 +1387,42 @@ class MetalBackend(BaseBackend):
         )
 
     @staticmethod
-    def check_dot_compatibility(lhs_type, rhs_type):
+    def check_dot_compatibility(lhs_type, rhs_type, gpu_family: str = "apple8"):
         """Validate that *lhs_type* and *rhs_type* are supported for dot on Metal.
 
         Returns the minimum (M, N, K) tile supported.  Raises ``CompileError``
         for truly unsupported operand types (e.g. fp64).
         """
-        lhs_bw = lhs_type.scalar.primitive_bitwidth
-        rhs_bw = rhs_type.scalar.primitive_bitwidth
-        if lhs_bw == 64 or rhs_bw == 64:
-            raise ValueError(
-                "Metal does not support fp64/i64 dot operands "
-                f"(got lhs={lhs_bw}-bit, rhs={rhs_bw}-bit)"
-            )
-        return (1, 1, 1)
+        capability = describe_metal_dot_capability(
+            lhs_type,
+            rhs_type,
+            gpu_family=gpu_family,
+        )
+        if not capability.supported:
+            raise ValueError(capability.detail)
+        return capability.min_dot_size
+
+    @staticmethod
+    def describe_dot_capability(lhs_type, rhs_type, gpu_family: str = "apple8"):
+        return describe_metal_dot_capability(
+            lhs_type,
+            rhs_type,
+            gpu_family=gpu_family,
+        )
+
+    @staticmethod
+    def get_capability_snapshot(gpu_family: str = "apple8"):
+        return metal_capability_snapshot(gpu_family)
 
     def get_codegen_implementation(self, options):
-        return {"min_dot_size": lambda lhs_type, rhs_type: (1, 1, 1)}
+        gpu_family = getattr(self.target, "arch", "apple8")
+        return {
+            "min_dot_size": lambda lhs_type, rhs_type: self.check_dot_compatibility(
+                lhs_type,
+                rhs_type,
+                gpu_family=gpu_family,
+            )
+        }
 
     def get_module_map(self) -> Dict[str, ModuleType]:
         from third_party.metal.language.metal import libdevice
