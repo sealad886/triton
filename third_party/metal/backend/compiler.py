@@ -413,8 +413,7 @@ def _emit_void_call(ctx: "TranslatorContext", inst: _Call) -> bool:
         msl_ty = ctx.llvm_type_to_msl(llvm_ty) if llvm_ty is not None else None
         if msl_ty is None:
             raise RuntimeError(
-                "Unsupported predicated store helper in Metal lowering: "
-                f"'{fn}'"
+                "Unsupported predicated store helper in Metal lowering: " f"'{fn}'"
             )
         addr_space = _mangle_ptr_addr_space(ptr_tag)
         if addr_space is None:

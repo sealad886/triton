@@ -1,8 +1,8 @@
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Union
 from types import ModuleType
+from typing import Dict, Union
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,7 @@ class GPUTarget(object):
 
 class Language(Enum):
     """The input language being compiled by the backend."""
+
     TRITON = 0
     GLUON = 1
 

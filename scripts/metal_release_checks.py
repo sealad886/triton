@@ -143,7 +143,13 @@ def _checks(
         ),
         (
             "metal_aot_unit",
-            [python_exe, "-m", "pytest", "-q", "python/test/unit/tools/test_aot_metal.py"],
+            [
+                python_exe,
+                "-m",
+                "pytest",
+                "-q",
+                "python/test/unit/tools/test_aot_metal.py",
+            ],
             600,
         ),
         (
@@ -353,7 +359,9 @@ def main() -> int:
         "artifact_dir": str(artifact_dir),
         "results": [asdict(x) for x in results],
     }
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    summary_path.write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(f"\nsummary={summary_path}")
     return 1 if failed else 0
 

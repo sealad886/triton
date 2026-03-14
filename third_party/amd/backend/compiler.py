@@ -1,16 +1,17 @@
-from triton.backends.compiler import BaseBackend, GPUTarget, Language
-from triton._C.libtriton import ir, passes, llvm, amd
-from triton import knobs
-from dataclasses import dataclass
-from typing import Any, Dict, Tuple
-from types import ModuleType
-import os
-import hashlib
-import tempfile
-import re
 import functools
+import hashlib
+import os
+import re
+import tempfile
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
+from typing import Any, Dict, Tuple
+
+from triton import knobs
+from triton._C.libtriton import amd, ir, llvm, passes
+from triton.backends.compiler import BaseBackend, GPUTarget, Language
 
 
 def get_min_dot_size(target: GPUTarget):
@@ -20,16 +21,27 @@ def get_min_dot_size(target: GPUTarget):
 
 
 def is_pingpong_schedule_enabled(arch, use_async_copy):
-    return (arch == "gfx942" or (arch == "gfx950" and use_async_copy is True)) \
-        if knobs.amd.use_block_pingpong is None else knobs.amd.use_block_pingpong
+    return (
+        (arch == "gfx942" or (arch == "gfx950" and use_async_copy is True))
+        if knobs.amd.use_block_pingpong is None
+        else knobs.amd.use_block_pingpong
+    )
 
 
 def is_in_thread_transpose_enabled(arch):
-    return (arch == "gfx942") if knobs.amd.use_in_thread_transpose is None else knobs.amd.use_in_thread_transpose
+    return (
+        (arch == "gfx942")
+        if knobs.amd.use_in_thread_transpose is None
+        else knobs.amd.use_in_thread_transpose
+    )
 
 
 def is_async_copy_enabled(arch):
-    return (arch in ["gfx950", "gfx1250"]) if knobs.amd.use_async_copy is None else knobs.amd.use_async_copy
+    return (
+        (arch in ["gfx950", "gfx1250"])
+        if knobs.amd.use_async_copy is None
+        else knobs.amd.use_async_copy
+    )
 
 
 def is_fpsan_supported(arch):
@@ -53,14 +65,14 @@ class HIPOptions:
     supported_fp8_dtypes: Tuple[str] = ("fp8e4nv", "fp8e5", "fp8e5b16", "fp8e4b8")
     deprecated_fp8_dot_operand_dtypes: Tuple[str] = ()
     default_dot_input_precision: str = "ieee"
-    allowed_dot_input_precisions: Tuple[str] = ("ieee", 'bf16x3', 'bf16x6')
+    allowed_dot_input_precisions: Tuple[str] = ("ieee", "bf16x3", "bf16x6")
     enable_fp_fusion: bool = True
     launch_cooperative_grid: bool = False
     matrix_instr_nonkdim: int = 0
     kpack: int = 1
     allow_flush_denorm: bool = False
     max_num_imprecise_acc_default: int = 0
-    backend_name: str = 'hip'
+    backend_name: str = "hip"
     instrumentation_mode: str = ""
 
     # The following option provides hints to the AMDGPU backend regarding instruction scheduling
@@ -82,29 +94,30 @@ class HIPOptions:
     #
     # Option allows to set multiple variants divided by commas:
     # schedule_hint="attention,memory-bound-attention"
-    schedule_hint: str = 'none'
+    schedule_hint: str = "none"
 
     def __post_init__(self):
         gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
         warp_size = 32 if gfx_major >= 10 else 64
-        object.__setattr__(self, 'warp_size', warp_size)
-        assert self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0, \
-            "num_warps must be a power of 2"
+        object.__setattr__(self, "warp_size", warp_size)
+        assert (
+            self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0
+        ), "num_warps must be a power of 2"
 
-        if (self.arch == 'gfx950') and (self.kpack != 1):
+        if (self.arch == "gfx950") and (self.kpack != 1):
             warnings.warn(
                 f"kpack is deprecated starting from gfx950 and will be removed in later releases. So for now kpack = {self.kpack} will be overwritten to 1 to make transitioning easier."
             )
-            object.__setattr__(self, 'kpack', 1)
+            object.__setattr__(self, "kpack", 1)
 
-        default_libdir = Path(__file__).parent / 'lib'
+        default_libdir = Path(__file__).parent / "lib"
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
         for lib in ["ocml", "ockl"]:
-            extern_libs[lib] = str(default_libdir / f'{lib}.bc')
-        object.__setattr__(self, 'extern_libs', tuple(extern_libs.items()))
+            extern_libs[lib] = str(default_libdir / f"{lib}.bc")
+        object.__setattr__(self, "extern_libs", tuple(extern_libs.items()))
 
     def hash(self):
-        key = '_'.join([f'{name}-{val}' for name, val in self.__dict__.items()])
+        key = "_".join([f"{name}-{val}" for name, val in self.__dict__.items()])
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
@@ -114,7 +127,7 @@ class HIPBackend(BaseBackend):
 
     @staticmethod
     def supports_target(target: GPUTarget):
-        return target.backend == 'hip'
+        return target.backend == "hip"
 
     def __init__(self, target: GPUTarget) -> None:
         super().__init__(target)
@@ -125,24 +138,34 @@ class HIPBackend(BaseBackend):
         return f"hip:{options.arch}"
 
     def parse_options(self, options) -> Any:
-        args = {'arch': knobs.runtime.override_arch or self.target.arch}
+        args = {"arch": knobs.runtime.override_arch or self.target.arch}
 
-        if options.get("num_ctas", 1) > 1 and not amd.supports_multi_cta_launch(self.target.arch):
+        if options.get("num_ctas", 1) > 1 and not amd.supports_multi_cta_launch(
+            self.target.arch
+        ):
             raise ValueError(f"num_ctas > 1 not supported on {self.target.arch}")
 
         # Enable XF32 (TF32) for CDNA3 GPUs
-        if self.target.arch == 'gfx942':
+        if self.target.arch == "gfx942":
             allowed_dot_input_precisions = set(HIPOptions.allowed_dot_input_precisions)
-            allowed_dot_input_precisions.update({'tf32'})
-            args["allowed_dot_input_precisions"] = tuple(sorted(allowed_dot_input_precisions))
+            allowed_dot_input_precisions.update({"tf32"})
+            args["allowed_dot_input_precisions"] = tuple(
+                sorted(allowed_dot_input_precisions)
+            )
 
         if "supported_fp8_dtypes" not in options:
-            args["supported_fp8_dtypes"] = tuple(sorted(HIPOptions.supported_fp8_dtypes))
+            args["supported_fp8_dtypes"] = tuple(
+                sorted(HIPOptions.supported_fp8_dtypes)
+            )
 
-        if self.target.arch == 'gfx950':
-            deprecated_fp8_dot_operand_dtypes = set(HIPOptions.deprecated_fp8_dot_operand_dtypes)
+        if self.target.arch == "gfx950":
+            deprecated_fp8_dot_operand_dtypes = set(
+                HIPOptions.deprecated_fp8_dot_operand_dtypes
+            )
             deprecated_fp8_dot_operand_dtypes.update({"fp8e5b16", "fp8e4b8"})
-            args["deprecated_fp8_dot_operand_dtypes"] = tuple(sorted(deprecated_fp8_dot_operand_dtypes))
+            args["deprecated_fp8_dot_operand_dtypes"] = tuple(
+                sorted(deprecated_fp8_dot_operand_dtypes)
+            )
 
         if "enable_fp_fusion" not in options:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
@@ -186,6 +209,7 @@ class HIPBackend(BaseBackend):
         if HIPBackend._torch_available is None:
             try:
                 import torch
+
                 HIPBackend._torch_available = True
             except ImportError:
                 HIPBackend._torch_available = False
@@ -195,7 +219,11 @@ class HIPBackend(BaseBackend):
         MAX_INT_32 = 2**31 - 1
         if hasattr(arg, "ptr_range"):
             return arg.ptr_range() <= MAX_INT_32
-        if HIPBackend._torch_available and isinstance(arg, torch.Tensor) and hasattr(arg, "untyped_storage"):
+        if (
+            HIPBackend._torch_available
+            and isinstance(arg, torch.Tensor)
+            and hasattr(arg, "untyped_storage")
+        ):
             return arg.untyped_storage().size() <= MAX_INT_32
         return False
 
@@ -228,16 +256,21 @@ class HIPBackend(BaseBackend):
         passes.ttir.add_triton_licm(pm)
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
-        pm.run(mod, 'make_ttir')
+        pm.run(mod, "make_ttir")
         return mod
 
     @staticmethod
     def make_ttgir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
-        passes.ttir.add_convert_to_ttgpuir(pm, f"hip:{options.arch}", options.num_warps, options.warp_size,
-                                           options.num_ctas)
-        pm.run(mod, 'make_ttgir_early')
+        passes.ttir.add_convert_to_ttgpuir(
+            pm,
+            f"hip:{options.arch}",
+            options.num_warps,
+            options.warp_size,
+            options.num_ctas,
+        )
+        pm.run(mod, "make_ttgir_early")
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         emuTF32 = False
@@ -245,7 +278,9 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_f32_dot_tc(pm, emuTF32)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
-        amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack)
+        amd.passes.ttgpuir.add_accelerate_matmul(
+            pm, options.arch, options.matrix_instr_nonkdim, options.kpack
+        )
         passes.ttgpuir.add_remove_layout_conversions(pm)
         amd.passes.ttgpuir.add_optimize_epilogue(pm)
         amd.passes.ttgpuir.add_optimize_dot_operands(pm, options.arch)
@@ -296,7 +331,7 @@ class HIPBackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
         if options.instrumentation_mode == "fpsan" and is_fpsan_supported(options.arch):
             passes.ttgpuir.add_fp_sanitizer(pm)
-        pm.run(mod, 'make_ttgir')
+        pm.run(mod, "make_ttgir")
         metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
         return mod
 
@@ -318,7 +353,7 @@ class HIPBackend(BaseBackend):
         if options.instrumentation_mode == "fpsan" and is_fpsan_supported(options.arch):
             passes.ttgpuir.add_fp_sanitizer(pm)
 
-        pm.run(mod, 'gluon_to_ttgir')
+        pm.run(mod, "gluon_to_ttgir")
         metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
         return mod
 
@@ -359,17 +394,22 @@ class HIPBackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
 
         if options.schedule_hint.lower() != "none":
-            amd.passes.ttgpuir.lower_instruction_sched_hints(pm, options.arch, options.num_stages)
+            amd.passes.ttgpuir.lower_instruction_sched_hints(
+                pm, options.arch, options.num_stages
+            )
 
         # This can not be moved below the di_scope pass
         if HIPBackend.instrumentation:
             HIPBackend.instrumentation.patch("llvmir_to_llvm", pm, mod.context)
 
-        if not knobs.compilation.disable_line_info and not knobs.compilation.dump_ir_extract_di_local_variables:
+        if (
+            not knobs.compilation.disable_line_info
+            and not knobs.compilation.dump_ir_extract_di_local_variables
+        ):
             passes.llvmir.add_di_scope(pm)
 
         amd.passes.ttgpuir.add_builtin_func_to_llvmir(pm, options.arch, __HIP_FTZ)
-        pm.run(mod, 'make_llir')
+        pm.run(mod, "make_llir")
 
         if knobs.compilation.dump_ir_extract_di_local_variables:
             # comments below on why separate it
@@ -377,7 +417,7 @@ class HIPBackend(BaseBackend):
                 pm = ir.pass_manager(mod.context)
                 pm.enable_debug()
                 passes.llvmir.add_di_scope(pm)
-                pm.run(mod, 'make_llir.disable_line_info')
+                pm.run(mod, "make_llir.disable_line_info")
 
             # insert dbg intrinsic with several DI Attribute including source
             # var name and type info note: unknown reason for now, but this
@@ -387,17 +427,19 @@ class HIPBackend(BaseBackend):
             pm = ir.pass_manager(mod.context)
             pm.enable_debug()
             passes.llvmir.add_di_local_variable(pm)
-            pm.run(mod, 'make_llir.dump_ir_extract_di_local_variables')
+            pm.run(mod, "make_llir.dump_ir_extract_di_local_variables")
 
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
         llvm.init_targets()
         context = llvm.context()
         llvm_mod = llvm.to_module(mod, context)
         amd.attach_target_triple(llvm_mod)
-        target_features = ''
+        target_features = ""
         if knobs.compilation.enable_asan:
-            target_features = '+xnack'
-        llvm.attach_datalayout(llvm_mod, amd.TARGET_TRIPLE, options.arch, target_features)
+            target_features = "+xnack"
+        llvm.attach_datalayout(
+            llvm_mod, amd.TARGET_TRIPLE, options.arch, target_features
+        )
 
         # Set various control constants on the LLVM module so that device
         # libraries can resolve references to them.
@@ -406,7 +448,9 @@ class HIPBackend(BaseBackend):
         amd.set_bool_control_constant(llvm_mod, "__oclc_finite_only_opt", False)
         amd.set_bool_control_constant(llvm_mod, "__oclc_correctly_rounded_sqrt32", True)
         amd.set_bool_control_constant(llvm_mod, "__oclc_unsafe_math_opt", False)
-        amd.set_bool_control_constant(llvm_mod, "__oclc_wavefrontsize64", options.warp_size == 64)
+        amd.set_bool_control_constant(
+            llvm_mod, "__oclc_wavefrontsize64", options.warp_size == 64
+        )
 
         # Set kernel attributes first given this may affect later optimizations.
         fns = [fn for fn in llvm_mod.get_functions() if not fn.is_declaration()]
@@ -419,8 +463,10 @@ class HIPBackend(BaseBackend):
         total_num_warps = src.get_int_attr("ttg.total-num-warps")
         if total_num_warps is not None:
             total_warps_num = total_num_warps
-        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{total_warps_num*options.warp_size}")
-        if "memory-bound-attention" in options.schedule_hint.split(','):
+        fns[0].add_fn_attr(
+            "amdgpu-flat-work-group-size", f"1,{total_warps_num*options.warp_size}"
+        )
+        if "memory-bound-attention" in options.schedule_hint.split(","):
             fns[0].add_fn_attr("amdgpu-sched-strategy", "iterative-ilp")
         fns[0].add_fn_attr("uniform-work-group-size", "true")
         # LLVM AMDGPU backend supports the attribute "amdgpu-waves-per-eu"="<min>[, <max>]".
@@ -432,7 +478,9 @@ class HIPBackend(BaseBackend):
         # implies the default behavior (no limits).
         # Specifying N, N forces LLVM to focus on a single register count, simplifies some heuristics
         # and may improve scheduling.
-        fns[0].add_fn_attr("amdgpu-waves-per-eu", f"{options.waves_per_eu}, {options.waves_per_eu}")
+        fns[0].add_fn_attr(
+            "amdgpu-waves-per-eu", f"{options.waves_per_eu}, {options.waves_per_eu}"
+        )
         denormal_mode = "preserve-sign" if options.allow_flush_denorm else "ieee"
         fns[0].add_fn_attr("denormal-fp-math-f32", denormal_mode)
         if knobs.compilation.enable_asan:
@@ -448,19 +496,25 @@ class HIPBackend(BaseBackend):
             amd.set_all_fn_arg_inreg(fns[0])
 
         if knobs.compilation.enable_asan:
-            default_libdir = Path(__file__).parent / 'lib'
+            default_libdir = Path(__file__).parent / "lib"
             paths = [
-                str(default_libdir / 'asanrtl.bc'),
+                str(default_libdir / "asanrtl.bc"),
                 str(default_libdir / "ocml.bc"),
-                str(default_libdir / "ockl.bc")
+                str(default_libdir / "ockl.bc"),
             ]
             llvm.link_extern_libs(llvm_mod, paths)
         elif options.extern_libs:
-            paths = [path for (name, path) in options.extern_libs if amd.need_extern_lib(llvm_mod, name)]
+            paths = [
+                path
+                for (name, path) in options.extern_libs
+                if amd.need_extern_lib(llvm_mod, name)
+            ]
             if len(paths) > 0:
                 llvm.link_extern_libs(llvm_mod, paths)
 
-        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
+        llvm.optimize_module(
+            llvm_mod, llvm.OPTIMIZE_O3, options.arch, "", [], options.enable_fp_fusion
+        )
 
         # Architectures with architected SGPRs store the workgroup id in ttmp9 (X) and ttmp7 (Y[15:0], Z[31:16]).
         # These attributes are used to determine if Z should be masked out when loading Y. They are inferred during
@@ -477,10 +531,18 @@ class HIPBackend(BaseBackend):
         # Get some metadata
         metadata["num_warps"] = total_warps_num
         metadata["shared"] = src.get_int_attr("ttg.shared")
-        metadata["global_scratch_size"] = src.get_int_attr("ttg.global_scratch_memory_size")
-        metadata["global_scratch_align"] = src.get_int_attr("ttg.global_scratch_memory_alignment")
-        metadata["profile_scratch_size"] = src.get_int_attr("ttg.profile_scratch_memory_size") or 0
-        metadata["profile_scratch_align"] = src.get_int_attr("ttg.profile_scratch_memory_alignment") or 1
+        metadata["global_scratch_size"] = src.get_int_attr(
+            "ttg.global_scratch_memory_size"
+        )
+        metadata["global_scratch_align"] = src.get_int_attr(
+            "ttg.global_scratch_memory_alignment"
+        )
+        metadata["profile_scratch_size"] = (
+            src.get_int_attr("ttg.profile_scratch_memory_size") or 0
+        )
+        metadata["profile_scratch_align"] = (
+            src.get_int_attr("ttg.profile_scratch_memory_alignment") or 1
+        )
 
         amd.cleanup_bitcode_metadata(llvm_mod)
         # Disable inlining of print related functions,
@@ -498,22 +560,52 @@ class HIPBackend(BaseBackend):
         metadata["name"] = names[0]
         # llvm -> hsaco
         flags = []
-        features = '-real-true16' if 'gfx11' in options.arch else ''
+        features = "-real-true16" if "gfx11" in options.arch else ""
         ir_hash = hashlib.sha256(src.encode("utf-8")).hexdigest()
-        dump_file_id = names[0] + '_' + ir_hash
-        _ = llvm.translate_to_mir(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion,
-                                  dump_file_id)
-        llvm.dump_sched_dag(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion,
-                            dump_file_id)
+        dump_file_id = names[0] + "_" + ir_hash
+        _ = llvm.translate_to_mir(
+            src,
+            amd.TARGET_TRIPLE,
+            options.arch,
+            features,
+            flags,
+            options.enable_fp_fusion,
+            dump_file_id,
+        )
+        llvm.dump_sched_dag(
+            src,
+            amd.TARGET_TRIPLE,
+            options.arch,
+            features,
+            flags,
+            options.enable_fp_fusion,
+            dump_file_id,
+        )
         if knobs.amd.swap_mir_enable_misched and not knobs.amd.swap_mir:
-            raise ValueError("TRITON_SWAP_MIR_ENABLE_MISCHED requires TRITON_SWAP_MIR to be set")
+            raise ValueError(
+                "TRITON_SWAP_MIR_ENABLE_MISCHED requires TRITON_SWAP_MIR to be set"
+            )
         if knobs.amd.swap_mir:
-            amdgcn = llvm.translate_mir_to_asm(os.path.join(knobs.amd.swap_mir, dump_file_id + '.txt'),
-                                               amd.TARGET_TRIPLE, options.arch, features, flags,
-                                               options.enable_fp_fusion, False, knobs.amd.swap_mir_enable_misched)
+            amdgcn = llvm.translate_mir_to_asm(
+                os.path.join(knobs.amd.swap_mir, dump_file_id + ".txt"),
+                amd.TARGET_TRIPLE,
+                options.arch,
+                features,
+                flags,
+                options.enable_fp_fusion,
+                False,
+                knobs.amd.swap_mir_enable_misched,
+            )
         else:
-            amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags,
-                                           options.enable_fp_fusion, False)
+            amdgcn = llvm.translate_to_asm(
+                src,
+                amd.TARGET_TRIPLE,
+                options.arch,
+                features,
+                flags,
+                options.enable_fp_fusion,
+                False,
+            )
         if knobs.amd.dump_amdgcn:
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
@@ -521,11 +613,11 @@ class HIPBackend(BaseBackend):
 
     @staticmethod
     def make_hsaco(src, metadata, options):
-        target_features = ''
+        target_features = ""
         if knobs.compilation.enable_asan:
-            target_features = '+xnack'
-        if 'gfx11' in options.arch:
-            target_features += ',-real-true16'
+            target_features = "+xnack"
+        if "gfx11" in options.arch:
+            target_features += ",-real-true16"
         hsaco = amd.assemble_amdgcn(src, options.arch, target_features)
         with tempfile.NamedTemporaryFile() as tmp_out:
             with tempfile.NamedTemporaryFile() as tmp_in:
@@ -538,19 +630,29 @@ class HIPBackend(BaseBackend):
 
     def add_stages(self, stages, options, language):
         if language == Language.TRITON:
-            stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
-            stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
+            stages["ttir"] = lambda src, metadata: self.make_ttir(
+                src, metadata, options
+            )
+            stages["ttgir"] = lambda src, metadata: self.make_ttgir(
+                src, metadata, options
+            )
         elif language == Language.GLUON:
-            stages["ttgir"] = lambda src, metadata: self.gluon_to_ttgir(src, metadata, options)
+            stages["ttgir"] = lambda src, metadata: self.gluon_to_ttgir(
+                src, metadata, options
+            )
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
-        stages["amdgcn"] = lambda src, metadata: self.make_amdgcn(src, metadata, options)
+        stages["amdgcn"] = lambda src, metadata: self.make_amdgcn(
+            src, metadata, options
+        )
         stages["hsaco"] = lambda src, metadata: self.make_hsaco(src, metadata, options)
         if knobs.runtime.add_stages_inspection_hook is not None:
-            knobs.runtime.add_stages_inspection_hook(self, stages, options, language, None)
+            knobs.runtime.add_stages_inspection_hook(
+                self, stages, options, language, None
+            )
 
     def hash(self) -> str:
         cached = getattr(self, "_hash_cache", None)
         if cached is None:
-            cached = f'{self.target}'
+            cached = f"{self.target}"
             self._hash_cache = cached
         return cached
