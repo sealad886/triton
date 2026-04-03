@@ -107,8 +107,8 @@ Documented scope boundaries rather than current correctness blockers:
 - Metal-native simdgroup/matrix-core acceleration is wired into the compiler
   pipeline for supported blocked layouts; the remaining work is cross-family
   tuning and performance guard coverage.
-- `launch_cooperative_grid` is an explicit hard-fail on Metal, and
-  `launch_pdl` is a compatibility no-op.
+- `launch_cooperative_grid` is accepted through the standard Metal dispatch
+   path, and `launch_pdl` is a compatibility no-op.
 - `profile_scratch` metadata is preserved for future profiling flows, but the
   profiler-specific runtime path remains dormant on Metal.
 - `fp8e4b15` is not advertised as a supported Metal dtype; the validated fp8

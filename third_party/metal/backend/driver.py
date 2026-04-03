@@ -977,11 +977,6 @@ class MetalUtils:
             launch_enter_hook(kernel_metadata, launch_metadata)
 
         try:
-            if launch_cooperative_grid:
-                raise RuntimeError(
-                    "Metal backend does not currently support cooperative-grid launches"
-                )
-
             # Accepted to preserve launch contract parity with other backends.
             _ = (
                 launch_pdl,
@@ -1010,6 +1005,7 @@ class MetalUtils:
                 "block": block,
                 "sync": False,
                 "stream_id": active_stream,
+                "launch_cooperative_grid": launch_cooperative_grid,
                 "utils": self,
             }
             if isinstance(handle, MetalKernelHandle):
@@ -1060,6 +1056,7 @@ class TorchMetalKernelHandle:
         block=(256, 1, 1),
         sync=True,
         stream_id=None,
+        launch_cooperative_grid=False,
         utils=None,
     ):
         kernel = self.get_kernel(name)
@@ -1144,6 +1141,7 @@ class MetalKernelHandle:
         sync: bool = True,
         command_queue=None,
         stream_id: int | None = None,
+        launch_cooperative_grid: bool = False,
         utils=None,
         buffer_pool: MetalBufferPool | None = None,
     ):
@@ -1194,7 +1192,12 @@ class MetalKernelHandle:
             _ceildiv(grid[2], block[2]),
         )
 
-        encoder.dispatchThreadgroups_threadsPerThreadgroup_(threadgroups, block)
+        if launch_cooperative_grid and hasattr(
+            encoder, "dispatchThreads_threadsPerThreadgroup_"
+        ):
+            encoder.dispatchThreads_threadsPerThreadgroup_(grid, block)
+        else:
+            encoder.dispatchThreadgroups_threadsPerThreadgroup_(threadgroups, block)
         encoder.endEncoding()
         cmd_buf.commit()
         _metal_last_cmd_buf.cmd_buf = cmd_buf
@@ -1396,10 +1399,6 @@ class MetalLauncher:
                 self.metadata,
                 getattr(handle, "metadata", None),
             )
-            if cooperative_grid_requested:
-                raise RuntimeError(
-                    "Metal backend does not currently support cooperative-grid launches"
-                )
 
             if not isinstance(handle, (MetalKernelHandle, TorchMetalKernelHandle)):
                 raise RuntimeError("Expected Metal kernel handle for Metal launch")
@@ -1433,6 +1432,7 @@ class MetalLauncher:
                 "block": block,
                 "sync": False,
                 "stream_id": active_stream,
+                "launch_cooperative_grid": cooperative_grid_requested,
                 "utils": utils,
             }
             if isinstance(handle, MetalKernelHandle):

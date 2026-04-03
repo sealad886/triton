@@ -4222,7 +4222,7 @@ class TestMetalRuntimeConformance:
         assert handle.launch_kernel.call_args.kwargs["sync"] is False
         restore_stream.assert_called_once_with(0)
 
-    def test_utils_launch_rejects_cooperative_grid(self):
+    def test_utils_launch_supports_cooperative_grid(self):
         from third_party.metal.backend.driver import MetalUtils, TorchMetalKernelHandle
 
         mock_lib = MagicMock()
@@ -4236,28 +4236,30 @@ class TestMetalRuntimeConformance:
         with patch.object(utils, "activate_stream", return_value=(0, 1)), patch.object(
             utils, "restore_stream"
         ) as restore_stream:
-            with pytest.raises(RuntimeError, match="cooperative-grid"):
-                utils.launch(
-                    1,
-                    1,
-                    1,
-                    1,
-                    handle,
-                    True,
-                    False,
-                    {"name": "test_fn"},
-                    {},
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    [],
-                )
+            utils.launch(
+                1,
+                1,
+                1,
+                1,
+                handle,
+                True,
+                False,
+                {"name": "test_fn"},
+                {},
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                [],
+            )
+
+        handle.launch_kernel.assert_called_once()
+        assert handle.launch_kernel.call_args.kwargs["launch_cooperative_grid"] is True
         restore_stream.assert_called_once_with(0)
 
-    def test_launcher_rejects_cooperative_grid_metadata(self):
+    def test_launcher_supports_cooperative_grid_metadata(self):
         from types import SimpleNamespace
 
         from third_party.metal.backend.driver import (
@@ -4282,20 +4284,20 @@ class TestMetalRuntimeConformance:
         )
         launcher._utils = fake_utils
 
-        with pytest.raises(RuntimeError, match="cooperative-grid"):
-            launcher(
-                1,
-                1,
-                1,
-                0,
-                handle,
-                metadata,
-                {},
-                None,
-                None,
-            )
+        launcher(
+            1,
+            1,
+            1,
+            0,
+            handle,
+            metadata,
+            {},
+            None,
+            None,
+        )
 
-        handle.launch_kernel.assert_not_called()
+        handle.launch_kernel.assert_called_once()
+        assert handle.launch_kernel.call_args.kwargs["launch_cooperative_grid"] is True
         fake_utils.restore_stream.assert_called_once_with(0)
 
     # ── MetalDriver stream proxy ──────────────────────────────────
@@ -8792,9 +8794,43 @@ class TestMetalDriverFeatures:
         assert snapshot["launch_contract"]["profile_scratch"]["level"] == "limited"
         assert (
             snapshot["launch_contract"]["launch_cooperative_grid"]["level"]
-            == "unsupported"
+            == "supported"
         )
         assert snapshot["strict_first_class_blockers"]
+
+    @skip_non_darwin
+    @skip_no_mps
+    def test_runtime_vector_add_accepts_cooperative_grid_flag(self):
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _coop_vadd(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(axis=0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            y = tl.load(y_ptr + offs, mask=mask, other=0.0)
+            tl.store(out_ptr + offs, x + y, mask=mask)
+
+        n = 256
+        x_cpu = torch.randn((n,), dtype=torch.float32)
+        y_cpu = torch.randn((n,), dtype=torch.float32)
+        x_mps = x_cpu.to("mps")
+        y_mps = y_cpu.to("mps")
+        out_mps = torch.empty_like(x_mps)
+
+        _coop_vadd[(triton.cdiv(n, 64),)](
+            x_mps,
+            y_mps,
+            out_mps,
+            n,
+            BLOCK=64,
+            launch_cooperative_grid=True,
+        )
+        torch.mps.synchronize()
+        assert torch.allclose(out_mps.cpu(), x_cpu + y_cpu, atol=1e-5, rtol=1e-5)
 
     @skip_non_darwin
     def test_check_dot_compatibility_invalid_fp64(self):

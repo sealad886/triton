@@ -53,7 +53,7 @@ Last updated: 2026-03-13
 | Warp specialization (Hopper async-warp model) | **N/A** | No Metal hardware equivalent; architectural impossibility |
 | TMA / Tensor Memory Access | **N/A** | NVIDIA Hopper-specific; no Metal DMA engine |
 | Inline assembly | **N/A** | MSL has no inline assembly mechanism |
-| Cooperative-grid launch | **Unsupported** | Metal runtime rejects cooperative-grid launches explicitly |
+| Cooperative-grid launch | **Supported** | Metal accepts cooperative-grid launch metadata through the standard dispatch path |
 | `launch_pdl` launch metadata | **Limited** | Accepted for ABI compatibility, but remains a no-op |
 | `profile_scratch` launch metadata | **Limited** | Metadata is preserved for tooling, but the runtime does not consume it yet |
 | Fence insertion pass (dual-proxy ordering) | **N/A** | NVIDIA Hopper-specific; Metal barriers are sufficient |
@@ -98,8 +98,7 @@ with machine load and should be interpreted as extended performance coverage,
 not as the baseline correctness contract.
 
 For a stricter CUDA/HIP-style parity bar, the remaining blockers are the
-limited launch-contract fields (`launch_pdl`, `profile_scratch`,
-cooperative-grid), HIP-backed cross-backend parity, and always-on self-hosted
+limited launch-contract fields (`launch_pdl`, `profile_scratch`), HIP-backed cross-backend parity, and always-on self-hosted
 Apple GPU runtime/performance coverage.
 
 Primary CI and release creation now run a reusable hosted Metal correctness

@@ -59,8 +59,8 @@ repo-controlled correctness integration.
 
 For a stricter backend-parity bar, the remaining blockers are now explicit and
 machine-readable in `python/triton/backends/metal/capabilities.py`: the launch
-contract remains intentionally narrower (`launch_cooperative_grid` unsupported,
-`launch_pdl` and `profile_scratch` limited), HIP-backed parity is incomplete,
+contract remains intentionally narrower (`launch_pdl` and `profile_scratch`
+limited), HIP-backed parity is incomplete,
 and always-on self-hosted Apple GPU runtime/performance coverage is still
 supplemental.
 
@@ -98,7 +98,6 @@ Metal is considered first-class for this project phase when:
 The repo-controlled bar above is intentionally narrower than a strict
 CUDA/HIP-style "fully first-class" bar. The outstanding stricter blockers are:
 
-- `launch_cooperative_grid` is still unsupported on Metal.
 - `launch_pdl` remains a compatibility no-op.
 - `profile_scratch` is metadata-only until a Metal profiler runtime path lands.
 - HIP-backed cross-backend numerical parity remains partial.
@@ -336,9 +335,9 @@ Status: Partially complete.
       incoming `stream` values, route metallib launches through per-stream
       command queues, and track async command buffers per stream.
 - [x] Support or explicitly emulate launch contract fields currently ignored
-      (`launch_cooperative_grid`, scratch buffers, profile hooks).
-      Implemented: cooperative-grid launches now fail fast with explicit
-      runtime errors; launch hooks are preserved; global scratch remains wired.
+  (`launch_cooperative_grid`, scratch buffers, profile hooks).
+  Implemented: cooperative-grid launches are now accepted through the
+  standard dispatch path; launch hooks are preserved; global scratch remains wired.
       `profile_scratch`/`launch_pdl` are accepted for contract compatibility
       and remain no-op until native Metal equivalents are added.
 - [x] Add robust runtime fallback path when `torch.mps.compile_shader` is not
@@ -457,7 +456,8 @@ Status: Complete.
   insertion pass (`barrier_pass.py`) in addition to the translator-level loop
   heuristic in `make_metal_ir`.
 - Runtime launch contract support is intentionally constrained for some
-  advanced features: cooperative-grid launch is explicit hard-fail,
+  advanced features: cooperative-grid launch is accepted through the standard
+  dispatch path,
   `launch_pdl` is a compatibility no-op, and `profile_scratch` metadata is
   retained without a Metal profiler runtime path yet.
 - Phase 10 runtime coverage is substantially complete: fp8 runtime matmul
@@ -491,7 +491,7 @@ Status: Complete.
   - Mitigation: prioritize Apple7/8/9 throughput baselines and self-hosted
     performance lanes.
 - Risk: Runtime feature surface is intentionally narrower than CUDA/HIP for
-  advanced launch features (`launch_cooperative_grid`, `launch_pdl`,
+  advanced launch features (`launch_pdl`,
   `profile_scratch`).
   - Mitigation: keep explicit hard-fail/no-op semantics, document behavior, and
 - Risk: Runtime validation breadth is improved but still incomplete for fp8 and
@@ -631,7 +631,7 @@ Status: Complete.
   buffer tracking, PyObjC metallib fallback for source launches when
   `torch.mps.compile_shader` is unavailable, and Metal driver benchmark/runtime
   utility API parity (`get_device_interface`, cache hooks). Added conformance
-  tests for stream consumption, cooperative-grid fail-fast behavior, and source
+  tests for stream consumption, cooperative-grid support behavior, and source
   fallback path.
 - 2026-02-24: Fixed mixed-precision dot lowering at source by updating
   `lib/Conversion/TritonGPUToLLVM/DotOpToLLVM/FMA.cpp` to cast float operands

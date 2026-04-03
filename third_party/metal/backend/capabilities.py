@@ -47,7 +47,6 @@ _GENERIC_FMA_DTYPES = frozenset(
 )
 
 _STRICT_FIRST_CLASS_BLOCKERS = (
-    "cooperative-grid launches remain unsupported on Metal",
     "launch_pdl is accepted for ABI parity but remains a no-op",
     "profile_scratch is metadata-only until a Metal profiler runtime path exists",
     "cross-backend HIP numerical parity is still supplemental rather than always-on",
@@ -332,8 +331,8 @@ def metal_capability_snapshot(gpu_family: str = "apple8") -> dict[str, Any]:
         ),
         "launch_contract": {
             "launch_cooperative_grid": _status(
-                UNSUPPORTED,
-                "Metal rejects cooperative-grid launches explicitly.",
+                SUPPORTED,
+                "Metal accepts cooperative-grid launches through the standard dispatch path.",
             ),
             "launch_pdl": _status(
                 LIMITED,

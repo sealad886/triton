@@ -156,8 +156,8 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
   accepted as **metadata-only**; the driver currently discards the value until
   profiling instrumentation is implemented.
 - **Launch contract extensions**: `launch_pdl` is accepted for ABI parity but
-  remains a no-op, while `launch_cooperative_grid` is an explicit runtime
-  error on Metal.
+  remains a no-op. `launch_cooperative_grid` is accepted through the standard
+  Metal dispatch path.
 - **TF32 dot products**: Apple Silicon has no TF32 tensor cores;
   `add_f32_dot_tc(pm, False)` is explicitly called to opt out.
 - **Warp specialization**: Metal has no hardware equivalent to NVIDIA's

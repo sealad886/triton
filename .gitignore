@@ -100,3 +100,7 @@ docs/sg_execution_times.rst
 
 # macOS
 .DS_Store
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
